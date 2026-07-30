@@ -185,6 +185,9 @@ class TaskCreate(BaseModel):
                     "缺省取该阶段 containers 首项")
     contour_interval: float = Field(
         default=50.0, gt=0.0, le=10000.0, description="等高距(米)")
+    keep_tiles_dir: bool = Field(
+        default=True,
+        description="打包 MBTiles 后是否同时保留散列瓦片目录(默认保留,磁盘占用翻倍)")
 
     def level_list(self) -> list[int]:
         """归一化出去重升序的级别列表:优先 levels,回退 z_min..z_max。
@@ -236,10 +239,10 @@ def create_task(data: TaskCreate, total: int, est_bytes: int = 0) -> str:
                 building_count,
                 upload_id, height_field, height_mode, height_scale,
                 floor_height, name_field, keep_fields, dem_upload_id,
-                containers, contour_interval,
+                containers, contour_interval, keep_tiles_dir,
                 created_at, updated_at)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-                       ?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       ?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 task_id, data.name, data.provider, json.dumps(data.bbox),
                 z_min, z_max, data.export,
@@ -260,6 +263,7 @@ def create_task(data: TaskCreate, total: int, est_bytes: int = 0) -> str:
                 json.dumps(normalize_containers(data.provider, data.containers),
                            ensure_ascii=False),
                 float(data.contour_interval or 50.0),
+                1 if data.keep_tiles_dir else 0,
                 now, now,
             ),
         )
@@ -357,6 +361,9 @@ def _row_to_dict(row) -> dict:
     except (TypeError, ValueError):
         d["containers"] = {}
     d["contour_interval"] = float(d.get("contour_interval") or 50.0)
+    # 旧任务缺列时 get 返回 None → 回落 True(保留目录,与新默认一致)
+    kt = d.get("keep_tiles_dir")
+    d["keep_tiles_dir"] = True if kt is None else bool(kt)
     # 阶段化进度:优先存储的 stages;旧任务(空)按 export/status 合成兼容视图
     st = d.get("stages")
     stages = json.loads(st) if st else []

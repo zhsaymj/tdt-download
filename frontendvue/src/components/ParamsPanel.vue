@@ -76,6 +76,8 @@ const imgForm = reactive({
   annotate: false,
   // 各阶段的文件格式,如 { geotiff: 'cog', tms: 'mbtiles' };空表示用后端默认
   containers: {},
+  // 打包 MBTiles 后是否同时保留散列瓦片目录(默认保留)
+  keepTilesDir: true,
 })
 
 // 地形(DEM)参数表单。级别默认不勾选,由用户按探测到的最高级别自行选择。
@@ -87,6 +89,27 @@ const demForm = reactive({
   crs: 'EPSG:4326',
   containers: {},
   contourInterval: 50,
+  keepTilesDir: true,
+})
+
+/** 该表单是否有瓦片阶段选了 MBTiles(决定是否显示「保留瓦片目录」开关) */
+function picksMbtiles(form) {
+  return ['tms', 'osm'].some(
+    (k) => form.export.includes(k) && form.containers[k] === 'mbtiles',
+  )
+}
+const imgPicksMbtiles = computed(() => picksMbtiles(imgForm))
+const demPicksMbtiles = computed(() => picksMbtiles(demForm))
+
+// 裁切提示随选区形状变化:矩形用户最容易困惑「我画的是矩形,为什么成果更大」
+const clipHint = computed(() => {
+  const base = '瓦片是固定网格,边界由级别决定,不会刚好落在选区上——'
+    + '级别越低超出越多(天地图第 7 级单张瓦片跨 2.8°,足以盖住整个市域)。'
+    + '勾选后 GeoTIFF、TMS/OSM 瓦片都会把选区外的部分设为透明。'
+  const cost = '注意:裁切后瓦片需要透明通道,格式由 JPG 变 PNG,体积会增大。'
+  return drawStore.shape === 'rect'
+    ? `按你画的矩形裁切。${base}${cost}`
+    : `按矢量/多边形的真实边界裁切。${base}${cost}`
 })
 
 // 三维建筑数据源。默认 OSM(Overpass):Overture 需跨境读 512 个 parquet 分片的
@@ -513,10 +536,14 @@ function imgPayload() {
     levels: [...imgForm.levels].sort((a, z) => a - z),
     export: imgForm.export.join(','),
     crs: imgForm.crs,
-    geometry: drawStore.geometry || null,
-    clip: !!(imgForm.clip && drawStore.geometry),
+    // 勾了裁切就把裁切几何一并送出:矩形没有自己的 geometry,clipGeometry 会用
+    // bbox 现造一个矩形环,后端因此不必区分形状。未勾裁切时仍只送原始 geometry
+    // (多边形要留着做范围显示与建筑取数,不能因为没勾裁切就丢掉)。
+    geometry: (imgForm.clip ? drawStore.clipGeometry : drawStore.geometry) || null,
+    clip: !!(imgForm.clip && drawStore.clipGeometry),
     annotate: imgForm.annotate,
     containers: { ...imgForm.containers },
+    keep_tiles_dir: !!imgForm.keepTilesDir,
   }
 }
 function demPayload() {
@@ -532,6 +559,7 @@ function demPayload() {
     annotate: false,
     containers: { ...demForm.containers },
     contour_interval: Number(demForm.contourInterval) || 50,
+    keep_tiles_dir: !!demForm.keepTilesDir,
   }
 }
 
@@ -689,6 +717,11 @@ async function submit() {
           </t-form-item>
           <ContainerPicker :stages="capsOf(imgForm.provider)"
             :selected="imgForm.export" v-model="imgForm.containers" />
+          <t-form-item v-if="imgPicksMbtiles" label-width="0">
+            <t-checkbox v-model="imgForm.keepTilesDir">同时保留散列瓦片目录</t-checkbox>
+            <InfoTip content="MBTiles 是单文件、便于拷贝分发;散列瓦片目录({z}/{x}/{y})可直接挂 HTTP 服务。两者内容等价,同时保留则瓦片数据存两遍、磁盘占用翻倍。取消勾选可省一半空间,但事后想要目录需重新切片。"
+              max-width="380px" />
+          </t-form-item>
           <t-form-item v-if="imgForm.export.includes('osm')" label-width="0">
             <div class="export-note">OSM 切片需重投影,以最高级拼接图作源,已自动勾选 GeoTIFF——切片时直接复用合并结果,不重复拼接。GeoTIFF 主文件恒输出一份 EPSG:4326;若另选了其他坐标系,会再额外生成一份对应投影的成果。(TMS 与天地图瓦片同构,直接由缓存瓦片映射,不经 GeoTIFF。)</div>
           </t-form-item>
@@ -705,7 +738,8 @@ async function submit() {
             <t-select v-model="imgForm.crs" :options="crsOpts" filterable />
           </t-form-item>
           <t-form-item v-if="drawStore.clippable" label-width="0">
-            <t-checkbox v-model="imgForm.clip">裁剪 GeoTIFF 到矢量/多边形边界</t-checkbox>
+            <t-checkbox v-model="imgForm.clip">裁剪成果到选区边界</t-checkbox>
+            <InfoTip :content="clipHint" max-width="400px" />
           </t-form-item>
         </t-form>
         <div class="estimate">
@@ -752,6 +786,11 @@ async function submit() {
           </t-form-item>
           <ContainerPicker :stages="capsOf(demForm.provider)"
             :selected="demForm.export" v-model="demForm.containers" />
+          <t-form-item v-if="demPicksMbtiles" label-width="0">
+            <t-checkbox v-model="demForm.keepTilesDir">同时保留散列瓦片目录</t-checkbox>
+            <InfoTip content="MBTiles 是单文件、便于拷贝分发;散列瓦片目录({z}/{x}/{y})可直接挂 HTTP 服务。两者内容等价,同时保留则瓦片数据存两遍、磁盘占用翻倍。"
+              max-width="380px" />
+          </t-form-item>
           <t-form-item v-if="demForm.export.includes('contour')" label="等高距(米)">
             <t-input-number v-model="demForm.contourInterval" :min="1" :max="1000"
               :step="10" theme="column" style="width: 120px" />

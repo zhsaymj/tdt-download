@@ -204,6 +204,87 @@ async def api_task_size(task_id: str):
     return await asyncio.to_thread(_scan_output_size, task)
 
 
+# ---------- MBTiles 预览 ----------
+# 成果目录本身由 /output 静态挂载,但 MBTiles 是单个 sqlite 文件,浏览器不能
+# 直接按 {z}/{x}/{y} 取瓦片。故这里提供瓦片端点,让预览页像读瓦片目录一样读它。
+
+def _mbtiles_path(task: dict, kind: str) -> Path:
+    """定位任务的 MBTiles 文件。kind 为 tms / osm。"""
+    if kind not in ("tms", "osm"):
+        raise HTTPException(400, f"未知的瓦片类型:{kind}")
+    out_dir = Path(task.get("output_path") or "")
+    if not out_dir.is_dir():
+        raise HTTPException(404, "任务输出目录不存在")
+    p = out_dir / f"{task['name']}_{kind}.mbtiles"
+    if not p.is_file():
+        raise HTTPException(404, f"未找到 {kind} 的 MBTiles 成果")
+    # 名称来自任务名(已经 safe_dirname 清理过),仍做一次归属校验兜底,
+    # 确保解析结果没跑出任务目录之外。
+    try:
+        p.resolve().relative_to(out_dir.resolve())
+    except ValueError:
+        raise HTTPException(400, "非法路径")
+    return p
+
+
+@router.get("/{task_id}/tiles_form/{kind}")
+async def api_tiles_form(task_id: str, kind: str):
+    """告知某瓦片阶段的成果以哪种形态存在:散列目录 / MBTiles / 两者都有。
+
+    预览页据此决定怎么取瓦片。为什么不让前端自己探目录:/output 是 StaticFiles
+    挂载,对"存在的目录"和"不存在的目录"都返回 404(未开目录列表),前端无法区分。
+    """
+    if kind not in ("tms", "osm"):
+        raise HTTPException(400, f"未知的瓦片类型:{kind}")
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    out_dir = Path(task.get("output_path") or "")
+    has_dir = (out_dir / kind).is_dir()
+    has_mb = (out_dir / f"{task['name']}_{kind}.mbtiles").is_file()
+    return {"dir": has_dir, "mbtiles": has_mb}
+
+
+@router.get("/{task_id}/mbtiles/{kind}/meta")
+async def api_mbtiles_meta(task_id: str, kind: str):
+    """返回 MBTiles 的级别范围与瓦片格式,供预览页构造图层。"""
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    from ..core.mbtiles import read_metadata
+    meta = await asyncio.to_thread(read_metadata, _mbtiles_path(task, kind))
+    if not meta:
+        raise HTTPException(404, "MBTiles 无法读取")
+    return {
+        "minzoom": int(meta.get("minzoom") or 0),
+        "maxzoom": int(meta.get("maxzoom") or 0),
+        "format": meta.get("format") or "png",
+        # TMS 包是 EPSG:4326 geodetic 网格,OSM 包是 Web 墨卡托,前端要用不同 tilingScheme
+        "profile": meta.get("profile") or ("geodetic" if kind == "tms" else "mercator"),
+        "bounds": meta.get("bounds") or "",
+    }
+
+
+@router.get("/{task_id}/mbtiles/{kind}/{z}/{x}/{y}")
+async def api_mbtiles_tile(task_id: str, kind: str, z: int, x: int, y: int):
+    """从 MBTiles 取单张瓦片。y 按请求方约定:tms 包自南向北,osm 包自北向南。"""
+    from fastapi import Response
+
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    from ..core.mbtiles import read_tile
+    path = _mbtiles_path(task, kind)
+    data = await asyncio.to_thread(read_tile, path, z, x, y)
+    if data is None:
+        # 瓦片不存在是正常情况(范围外),返回 204 让前端当空白处理,不刷错误日志
+        return Response(status_code=204)
+    # 按实际内容判断类型:jpg 以 FF D8 开头,png 以 89 50 开头
+    media = "image/jpeg" if data[:2] == b"\xff\xd8" else "image/png"
+    return Response(content=data, media_type=media,
+                    headers={"Cache-Control": "max-age=3600"})
+
+
 # 三维建筑范围上限(平方度)。建筑要素全程在内存/中间文件里流转,范围过大会
 # 拖垮内存与耗时;Overpass 还要按 0.05° 分块逐块请求,块数随面积平方增长。
 # 1 平方度在中低纬约 1.2 万 km²,4 平方度足够覆盖一个特大城市群

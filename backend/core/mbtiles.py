@@ -112,3 +112,74 @@ def pack_mbtiles(tiles_dir: Path, out_path: Path, *, scheme: str,
                 out_path.name, done,
                 f"{min(zooms)}-{max(zooms)}" if zooms else "无")
     return out_path
+
+
+# ---------- 读取(供预览)----------
+# 浏览器不能直接读 sqlite,故预览时由后端按 {z}/{x}/{y} 取出单张瓦片。
+# 行号换算与打包时相反:入库存的是 TMS 行号,请求方按哪种约定取由 scheme 决定。
+
+def tms_row_of(z: int, y: int) -> int:
+    """把请求方的 y(自北向南,Cesium/XYZ 约定)换算成库里的行号(自南向北)。
+
+    两种网格的行数公式在这里恰好一致,都是 2^z(z 为请求里的级号):
+      - mercator:Web 墨卡托第 z 级 2^z 行
+      - geodetic:MBTiles 里存的是 gdal 级 L(= 天地图 z-1),而天地图第 z 级有
+        2^(z-1) 行,即 gdal 级 L 下 2^L 行;Cesium GeographicTilingScheme 在
+        level L 的 Y 瓦片数同样是 2^L。两边对齐,故无需按 profile 分支。
+    """
+    return (1 << z) - 1 - y
+
+
+def read_tile(mbtiles_path: Path, z: int, x: int, y: int) -> bytes | None:
+    """从 MBTiles 取一张瓦片。
+
+    y 一律按请求方约定(自北向南)传入,这里统一换算成库里的 TMS 行号——
+    翻转只在这一处做,前端不要再转,否则两边各转一次会让影像上下颠倒。
+    """
+    if not mbtiles_path.is_file():
+        return None
+    row = tms_row_of(z, y)
+    try:
+        # 只读模式打开,避免预览时意外产生 -wal/-shm 或写锁
+        uri = f"file:{mbtiles_path.as_posix()}?mode=ro"
+        con = sqlite3.connect(uri, uri=True)
+    except sqlite3.Error as e:
+        logger.warning("MBTiles 打开失败 %s:%s", mbtiles_path.name, e)
+        return None
+    try:
+        r = con.execute(
+            "SELECT tile_data FROM tiles "
+            "WHERE zoom_level=? AND tile_column=? AND tile_row=?",
+            (z, x, row),
+        ).fetchone()
+        return bytes(r[0]) if r and r[0] is not None else None
+    except sqlite3.Error as e:
+        logger.warning("MBTiles 读取失败 %s:%s", mbtiles_path.name, e)
+        return None
+    finally:
+        con.close()
+
+
+def read_metadata(mbtiles_path: Path) -> dict:
+    """读 MBTiles 的 metadata 表(供预览判定级别范围、瓦片格式、网格类型)。"""
+    if not mbtiles_path.is_file():
+        return {}
+    try:
+        uri = f"file:{mbtiles_path.as_posix()}?mode=ro"
+        con = sqlite3.connect(uri, uri=True)
+    except sqlite3.Error:
+        return {}
+    try:
+        meta = dict(con.execute("SELECT name, value FROM metadata").fetchall())
+        # minzoom/maxzoom 可能缺失(非本工具生成的包),回落实际扫描
+        if "minzoom" not in meta or "maxzoom" not in meta:
+            row = con.execute(
+                "SELECT MIN(zoom_level), MAX(zoom_level) FROM tiles").fetchone()
+            if row and row[0] is not None:
+                meta.setdefault("minzoom", str(row[0]))
+                meta.setdefault("maxzoom", str(row[1]))
+        return meta
+    except sqlite3.Error:
+        return {}
+    finally:
+        con.close()

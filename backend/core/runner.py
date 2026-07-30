@@ -452,8 +452,10 @@ def _maybe_mbtiles(ctx, stage_key: str, tiles_dir: Path, scheme: str,
                    tile_ext: str) -> list[str]:
     """选了 MBTiles 容器时把瓦片目录打包成单文件,否则原样返回目录。
 
-    打包成功后删除瓦片目录:容器是"换一种装法",不是"多一份成果";
-    留着目录会让用户以为要两个都拷走,而 mbtiles 已含全部瓦片。
+    打包后是否保留散列瓦片目录由任务的 keep_tiles_dir 决定(默认保留):
+      - 保留:目录可直接挂 HTTP 服务,mbtiles 便于分发,两者内容等价
+      - 不保留:省一半磁盘。瓦片数据只存一遍
+    默认保留是因为删掉不可逆——用户事后发现需要目录就得重切一遍。
     """
     if container_of(ctx.task, stage_key) != "mbtiles":
         return [str(tiles_dir)]
@@ -467,6 +469,8 @@ def _maybe_mbtiles(ctx, stage_key: str, tiles_dir: Path, scheme: str,
                           should_stop=ctx.should_stop, on_progress=on_progress)
     if packed is None:
         return [str(tiles_dir)]
+    if ctx.task.get("keep_tiles_dir", True):
+        return [str(packed), str(tiles_dir)]
     import shutil as _shutil
     _shutil.rmtree(tiles_dir, ignore_errors=True)
     return [str(packed)]
@@ -876,7 +880,10 @@ def _clear_stage_output(ctx, key: str) -> None:
         stage = STAGES.get(key)
         container = stage.containers[0] if (stage and stage.containers) else ""
     sidecars = CONTAINERS[container].sidecars if container in CONTAINERS else ()
-    for rel in resolve_outputs(key, container, task["name"], ctx.levels):
+    # include_all_forms:瓦片阶段要把目录与 mbtiles 两种形态都清掉,否则改了容器
+    # 重跑会留下上一次的另一种形态,成果目录里两份数据并存且其中一份是旧的。
+    for rel in resolve_outputs(key, container, task["name"], ctx.levels,
+                               include_all_forms=True):
         target = out_dir / rel.rstrip("/")
         rm(target)
         # shapefile 等多文件格式的附属文件(.shx/.dbf/.prj/.cpg)必须一并清掉,
@@ -943,7 +950,10 @@ def _collect_outputs(ctx) -> list[str]:
         if not cont:
             sdef = STAGES.get(key)
             cont = sdef.containers[0] if (sdef and sdef.containers) else ""
-        for rel in resolve_outputs(key, cont, task["name"], ctx.levels):
+        # 瓦片阶段两种形态可并存(keep_tiles_dir),故都查一遍;add() 只收实际存在的,
+        # 没保留目录时那条自然不会进清单。
+        for rel in resolve_outputs(key, cont, task["name"], ctx.levels,
+                                   include_all_forms=True):
             add(out_dir / rel.rstrip("/"))
         # 重投影副本文件名带 EPSG 号,不在 outputs 模板里
         if key == "geotiff":

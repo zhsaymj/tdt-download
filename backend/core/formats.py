@@ -168,6 +168,9 @@ STAGES: dict[str, ExportStage] = {s.key: s for s in (
                 note="每个选中级别各出一张带坐标整幅图"),
     # ---- 栅格:切瓦片 ----
     # 原先仅影像可用;DEM 接入后靠已有的晕渲/伪彩渲染出可视化瓦片
+    # outputs 只写目录形态;MBTiles 的产出名由 outputs_mbtiles 另给——
+    # 瓦片阶段是唯一"容器改变产出结构"的情形(目录 → 单文件),而且两者可以
+    # 并存(keep_tiles_dir),故不能靠单个模板 + 扩展名推导。
     ExportStage("tms", "切 TMS 瓦片", _RASTER, DataKind.TILES_RASTER,
                 containers=("tiles_dir", "mbtiles"),
                 outputs=("tms/",), default_on=True, order=30,
@@ -373,14 +376,27 @@ def default_containers(kind: str) -> dict[str, str]:
 
 
 def resolve_outputs(stage_key: str, container_key: str, name: str,
-                    levels: list[int] | None = None) -> list[str]:
+                    levels: list[int] | None = None,
+                    include_all_forms: bool = False) -> list[str]:
     """把阶段+容器解析成具体产出物相对路径(供清理旧产出与写 metadata 用)。
 
-    目录型产出(tms/、osm/)不带扩展名,直接返回模板本身。
+    瓦片阶段特殊:容器改变的是产出**结构**(目录 vs 单文件),而非仅扩展名,
+    且两种形态可以并存(keep_tiles_dir)。故:
+      - container=mbtiles → 返回 `{name}_{stage}.mbtiles`
+      - include_all_forms=True → 目录与 mbtiles 都返回(清理旧产出时必须两者都清,
+        否则切换容器重跑会留下上一次的另一种形态,成果目录里两份数据打架)
     """
     stage = STAGES.get(stage_key)
     if not stage:
         return []
+    is_tiles = stage.produces == DataKind.TILES_RASTER and bool(stage.containers)
+    if is_tiles:
+        dir_form = [tpl.format(name=name, ext="") for tpl in stage.outputs]
+        mb_form = [f"{name}_{stage_key}.mbtiles"]
+        if include_all_forms:
+            return dir_form + mb_form
+        return mb_form if container_key == "mbtiles" else dir_form
+
     ext = CONTAINERS[container_key].ext if container_key in CONTAINERS else ""
     paths: list[str] = []
     for tpl in stage.outputs:

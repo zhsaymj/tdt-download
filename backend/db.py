@@ -54,6 +54,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- 缺省时按 core.formats 里该阶段 containers 的首项(与旧行为一致:栅格 GTiff、矢量 GeoJSON)
     containers       TEXT DEFAULT '',
     contour_interval REAL DEFAULT 50.0,       -- 等高距(米)
+    -- 打包 MBTiles 后是否同时保留散列瓦片目录(1=保留,默认)。
+    -- 目录适合挂 HTTP 服务、mbtiles 适合分发,两者内容等价但用途不同;
+    -- 默认保留是为了不静默删数据,代价是瓦片存两遍、磁盘翻倍。
+    keep_tiles_dir   INTEGER DEFAULT 1,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
@@ -101,6 +105,7 @@ _MIGRATIONS = {
     # 导出容器格式选择(COG/GPKG/Shapefile/MBTiles 等,见 core.formats.CONTAINERS)
     "containers": "ALTER TABLE tasks ADD COLUMN containers TEXT DEFAULT ''",
     "contour_interval": "ALTER TABLE tasks ADD COLUMN contour_interval REAL DEFAULT 50.0",
+    "keep_tiles_dir": "ALTER TABLE tasks ADD COLUMN keep_tiles_dir INTEGER DEFAULT 1",
 }
 
 

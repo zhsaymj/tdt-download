@@ -196,6 +196,26 @@ async function init() {
         }
       })()
 
+  // 瓦片装在 MBTiles 单文件里时没有可直接访问的目录,改走后端瓦片端点
+  // (/api/tasks/<id>/mbtiles/<kind>/{z}/{x}/{y})。这里先问后端拿级别范围,
+  // 拿到了就说明该成果是 MBTiles 形式。
+  // 两种形态可能并存(任务勾了「同时保留瓦片目录」),此时优先用目录:
+  // 静态文件由浏览器直读,不必每张瓦片都过后端查 sqlite。
+  // 成果形态由后端告知(前端无法自行探目录:/output 是 StaticFiles,对存在与
+  // 不存在的目录都返回 404)。两种形态并存时优先用目录——静态文件浏览器直读,
+  // 不必每张瓦片都过后端查一次 sqlite。
+  const mb = { tms: null, osm: null }
+  for (const kind of ['tms', 'osm']) {
+    if (!ready[kind]) continue
+    try {
+      const form = await (await fetch(`/api/tasks/${task.id}/tiles_form/${kind}`)).json()
+      if (form.dir) continue                    // 有目录,按原方式加载
+      if (!form.mbtiles) continue               // 两者都没有,交给原逻辑报错
+      const r = await fetch(`/api/tasks/${task.id}/mbtiles/${kind}/meta`)
+      if (r.ok) mb[kind] = await r.json()
+    } catch (e) { /* 形态探测失败,按目录方式加载 */ }
+  }
+
   // 天地图底图密钥(后端已保底:basemap_token 缺省回落 token)
   let basemapToken = ''
   try {
@@ -243,23 +263,45 @@ async function init() {
   // 叠加图层(成果,始终位于天地图之上)
   if (ready.tms) {
     try {
-      const p = await TileMapServiceImageryProvider.fromUrl(`${base}/tms`, {
-        tilingScheme: new GeographicTilingScheme(),
-      })
+      let p
+      if (mb.tms) {
+        // MBTiles 里没有 tilemapresource.xml,TileMapServiceImageryProvider 用不了
+        // (它要靠 XML 拿网格与级别范围),改用 UrlTemplate 显式声明 geodetic 网格。
+        // 行号统一用 Cesium 的 {y}(自北向南),由后端换算成库里的 TMS 行号——
+        // 翻转只在一处做,不在前后端各转一次(那样极易两边都转、图上下颠倒)。
+        p = new UrlTemplateImageryProvider({
+          url: `/api/tasks/${task.id}/mbtiles/tms/{z}/{x}/{y}`,
+          tilingScheme: new GeographicTilingScheme(),
+          minimumLevel: mb.tms.minzoom,
+          maximumLevel: mb.tms.maxzoom,
+        })
+      } else {
+        p = await TileMapServiceImageryProvider.fromUrl(`${base}/tms`, {
+          tilingScheme: new GeographicTilingScheme(),
+        })
+      }
       const layer = viewer.imageryLayers.addImageryProvider(p)
-      layers.value.push({ key: 'tms', label: 'TMS 瓦片(EPSG:4326)', layer, show: true })
+      const label = mb.tms ? 'TMS 瓦片(MBTiles·EPSG:4326)' : 'TMS 瓦片(EPSG:4326)'
+      layers.value.push({ key: 'tms', label, layer, show: true })
     } catch (e) { console.warn('TMS 叠加失败', e) }
   }
   if (ready.osm) {
     try {
-      const p = new UrlTemplateImageryProvider({
-        url: `${base}/osm/{z}/{x}/{y}.png`,
-      })
+      const p = new UrlTemplateImageryProvider(
+        mb.osm
+          ? {
+              url: `/api/tasks/${task.id}/mbtiles/osm/{z}/{x}/{y}`,
+              minimumLevel: mb.osm.minzoom,
+              maximumLevel: mb.osm.maxzoom,
+            }
+          : { url: `${base}/osm/{z}/{x}/{y}.png` },
+      )
       const layer = viewer.imageryLayers.addImageryProvider(p)
       // 同时有 tms 时默认隐藏 osm,避免叠盖,由用户切换对比
       const show = !ready.tms
       layer.show = show
-      layers.value.push({ key: 'osm', label: 'OSM 瓦片(Web 墨卡托)', layer, show })
+      const label = mb.osm ? 'OSM 瓦片(MBTiles·Web 墨卡托)' : 'OSM 瓦片(Web 墨卡托)'
+      layers.value.push({ key: 'osm', label, layer, show })
     } catch (e) { console.warn('OSM 叠加失败', e) }
   }
 
