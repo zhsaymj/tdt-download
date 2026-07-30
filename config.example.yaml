@@ -1,0 +1,46 @@
+# 天地图下载处理工具 - 配置示例
+# 复制本文件为 config.yaml 后填写自己的参数
+
+tianditu:
+  # 天地图访问密钥(必填)。申请地址:https://console.tianditu.gov.cn/api/key
+  token: "f58515ae74e4e1a119554a59d424f1eb"
+  # 底图显示用密钥。与下载密钥区分,分别控配额;留空则回落到 token。
+  basemap_token: ""
+
+download:
+  # 单个任务的最大并发下载数
+  concurrency: 8
+  # 单张瓦片失败后的最大重试次数
+  max_retries: 3
+  # 每张瓦片请求超时(秒)
+  timeout: 30
+  # 瓦片缓存目录(断点续传依赖此目录)
+  cache_dir: "./data/tiles"
+
+output:
+  # 成果输出根目录
+  dir: "./output"
+
+server:
+  host: "127.0.0.1"
+  port: 8000
+
+buildings:
+  # 三维建筑白模。默认数据源为 OSM 建筑轮廓(经 Overpass API),境内可直连。
+
+  # Overpass 镜像列表(逗号分隔)。留空用内置默认:
+  #   kumi.systems → private.coffee → overpass-api.de(主站最拥挤,放最后)
+  # 公共实例负载波动大,遇持续 504 可换序或填自建实例。
+  overpass_mirrors: ""
+  # 范围分块跨度(度)。范围会按此尺寸切块逐块请求;
+  # 城区建筑极密时可调小(如 0.02),避免单块响应过大被服务端截断。
+  overpass_chunk_deg: 0.05
+
+  # ---- 以下仅 Overture 数据源用到 ----
+  # Overture 是全球融合数据(覆盖率更高),但为 AWS S3 上的 512 个 parquet 分片,
+  # 做范围裁剪需读遍全部分片元数据,境内实测单次查询十几小时,基本不可用。
+  # 仅在境外服务器或有高速代理时选用。
+  # 发布版本。留空则自动探测最新版(S3 只保留最近约两个版本)
+  release: ""
+  # HTTP 代理,如 "127.0.0.1:7890"
+  proxy: ""

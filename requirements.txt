@@ -1,0 +1,43 @@
+# Web 框架
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+websockets==14.1
+
+# 异步 HTTP 下载
+aiohttp==3.11.11
+
+# 地理数据处理(rasterio 自带 GDAL,无需单独安装系统库）
+rasterio==1.4.4
+numpy==2.2.1
+
+# Esri Terrain3D DEM 瓦片为 LERC 编码,需 Esri 官方解码库
+lerc==4.0.1
+
+# DEM → Cesium quantized-mesh 地形切片(均有 cp311 win_amd64 预编译 wheel,无系统依赖)
+pymartini==0.5.1
+quantized-mesh-encoder==0.5.0
+
+# 三维建筑白模(Overture → b3dm 3D Tiles)
+# duckdb:对 S3 上的 Overture GeoParquet 做 bbox 谓词下推查询,只拉命中范围的行组
+# shapely:建筑轮廓修复/过滤;mapbox-earcut:带洞多边形三角化(屋顶面)
+# b3dm/GLB 二进制由 core/b3dm.py 手写生成,不引入 trimesh/pygltflib
+duckdb==1.1.3
+shapely==2.0.6
+mapbox-earcut==1.0.2
+
+# 全国 osm.pbf 离线导入建筑轮廓(避开公共 Overpass 实例的限流/504)。
+# 必须 4.x:旧版(3.x)只有逐要素 Python 回调,扫一亿多节点要十几分钟以上;
+# 4.x 的 FileProcessor 把过滤下沉到 C++,且提供 area.AreaManager 组装
+# multipolygon(口字楼/带内院建筑)。
+osmium==4.3.1
+
+# 矢量成果导出(Shapefile / GPKG / FlatGeobuf)。
+# 自带 GDAL 3.12(约 23 MB),与 rasterio 的 GDAL 3.10 两套并存——rasterio 的 DLL 是改名
+# 混淆的(gdal-<hash>.dll)无法共享,已实测双版本共存及任意导入顺序均无冲突。
+# 选它而非手写 shp/gpkg 字节:中文字段名与属性值往返一致(自动出 .cpg)、CGCS2000 带号
+# 正常写 .prj。注意 pyogrio.raw.write 参数顺序是 (path, geometry, field_data, fields)。
+pyogrio==0.13.0
+
+# 配置与工具
+PyYAML==6.0.2
+pydantic==2.10.4

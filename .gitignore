@@ -1,0 +1,38 @@
+# 配置(含密钥)
+config.yaml
+
+# 数据与成果
+data/
+output/
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# 前端依赖
+node_modules/
+
+# 编辑器
+.vscode/
+.idea/
+
+# PyInstaller 打包产物
+build/
+dist/
+
+# 前端构建产物(npm run build 可重建;进 git 会让每次前端改动都产生大量二进制 diff)
+frontendvue/dist/
+
+# 瓦片样例数据(69 MB 二进制,不可压缩,进 git 后永久留在历史里)
+exmple-data/
+
+# 沟通记录(本地开发日志,非项目源码)
+沟通记录.md
+
+# 需求输入素材(截图、测试数据、密钥清单)。
+# 其中「当前其他项目存在的tk」含 10 个真实天地图密钥,绝不可进公开仓库。
+docs/input/

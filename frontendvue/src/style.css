@@ -1,0 +1,16 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body, #app { height: 100%; width: 100%; }
+body {
+  font-family: "Microsoft YaHei", system-ui, sans-serif;
+  color: #334155;
+}
+
+/* 收紧 TDesign 默认间距:表单内容不多时不至于撑满整列高度 */
+.t-card__body { padding: 8px 12px 12px !important; }
+.t-card__title { font-size: 14px; }
+/* 标题与内容间距收紧:减小 header 下内边距 */
+.t-card__header { padding: 8px 12px 4px !important; }
+.t-form__item { margin-bottom: 10px !important; }
+/* 顶部标签(重新下载弹窗仍在用)需要一点下内边距;参数面板改成了标签与控件
+   同行,在 ParamsPanel.vue 的 .tab-form 里覆盖为 0。 */
+.t-form__label { padding-bottom: 2px !important; font-size: 13px; }
