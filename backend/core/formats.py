@@ -145,6 +145,9 @@ class ExportStage:
     needs_levels: bool = False
     default_on: bool = False
     note: str = ""
+    #: 管线内执行顺序(小的先执行)。不能靠声明顺序:影像要 geotiff 最先,而 DEM 的
+    #: 整幅图阶段 key 是历史遗留的 "dem"、声明位置在后,两条管线的期望顺序冲突。
+    order: int = 100
     #: 管线归属。同一 DataKind 可能被两条管线用到:base_dem 产出 RASTER_DEM 但属
     #: 建筑管线的内部环节,不该出现在"下载 DEM 能出什么格式"的列表里。
     #: internal=True 的阶段由管线自身按需插入,不给用户勾选。
@@ -160,29 +163,34 @@ STAGES: dict[str, ExportStage] = {s.key: s for s in (
                 DataKind.RASTER_IMAGE,
                 containers=("gtiff", "cog", "png", "jpeg"),
                 outputs=("{name}_z{z}{ext}",),
-                needs_levels=True, default_on=True,
+                needs_levels=True, default_on=True, order=10,
+                pipeline=PIPE_RASTER,
                 note="每个选中级别各出一张带坐标整幅图"),
     # ---- 栅格:切瓦片 ----
     # 原先仅影像可用;DEM 接入后靠已有的晕渲/伪彩渲染出可视化瓦片
     ExportStage("tms", "切 TMS 瓦片", _RASTER, DataKind.TILES_RASTER,
                 containers=("tiles_dir", "mbtiles"),
-                outputs=("tms/",), default_on=True,
+                outputs=("tms/",), default_on=True, order=30,
+                pipeline=PIPE_RASTER,
                 note="gdal2tiles geodetic 网格,与天地图 EPSG:4326 无损直映射"),
     ExportStage("osm", "切 OSM 瓦片", _RASTER, DataKind.TILES_RASTER,
                 containers=("tiles_dir", "mbtiles"),
-                outputs=("osm/",),
+                outputs=("osm/",), order=40, pipeline=PIPE_RASTER,
                 note="Web 墨卡托 XYZ,主流前端底图网格"),
     # ---- DEM 专属 ----
     ExportStage("tiles", "导出原始瓦片", (DataKind.RASTER_DEM,),
-                DataKind.TILES_RASTER, outputs=("tiles/",),
+                DataKind.TILES_RASTER, outputs=("tiles/",), order=50,
+                pipeline=PIPE_RASTER,
                 note="保留 Esri LERC 编码原始瓦片,不解码不重采样"),
     ExportStage("terrain", "切 Cesium 地形", (DataKind.RASTER_DEM,),
-                DataKind.TILES_TERRAIN, outputs=("terrain/",),
+                DataKind.TILES_TERRAIN, outputs=("terrain/",), order=60,
+                pipeline=PIPE_RASTER,
                 note="quantized-mesh,配 layer.json"),
     ExportStage("contour", "提取等高线", (DataKind.RASTER_DEM,),
                 DataKind.VECTOR_LINE,
                 containers=("geojson", "gpkg", "shapefile"),
-                outputs=("{name}_contour{ext}",),
+                outputs=("{name}_contour{ext}",), order=70,
+                pipeline=PIPE_RASTER,
                 note="DEM 的矢量衍生成果;等距可调"),
     # DEM 的高程整幅图。历史上 DEM 与影像用了不同的 stage key(影像 geotiff、
     # DEM dem),库里有 3 条存量任务存着 "dem",故必须保留此 key 而不能合并进
@@ -192,7 +200,8 @@ STAGES: dict[str, ExportStage] = {s.key: s for s in (
                 DataKind.RASTER_DEM,
                 containers=("gtiff", "cog", "ascii_grid", "xyz", "png"),
                 outputs=("{name}_dem_z{z}{ext}", "{name}_hillshade_z{z}{ext}"),
-                needs_levels=True, default_on=True,
+                needs_levels=True, default_on=True, order=20,
+                pipeline=PIPE_RASTER,
                 note="真实海拔单波段;可另出晕渲图"),
     # ---- 三维建筑管线 ----
     # accepts 含 VECTOR_POLYGON:取数阶段本身没有"上游输入",但它必须出现在
@@ -202,20 +211,71 @@ STAGES: dict[str, ExportStage] = {s.key: s for s in (
                 DataKind.VECTOR_POLYGON,
                 containers=("geojson", "gpkg", "shapefile"),
                 outputs=("{name}_buildings{ext}",), default_on=True,
+                order=10, pipeline=PIPE_BUILDING,
                 note="取数阶段,同时是矢量成果的产出点"),
     ExportStage("base_dem", "准备底面高程", (DataKind.VECTOR_POLYGON,),
                 DataKind.RASTER_DEM, outputs=("{name}_dem.tif",),
-                pipeline=PIPE_BUILDING, internal=True,
+                order=20, pipeline=PIPE_BUILDING, internal=True,
                 note="逐栋采样 DEM 写进顶点;b3dm 是绝对定位几何,不会自动贴地形"),
     ExportStage("build_mesh", "建筑白模建模", (DataKind.VECTOR_POLYGON,),
                 DataKind.VECTOR_POLYGON, default_on=True,
-                pipeline=PIPE_BUILDING, internal=True,
+                order=30, pipeline=PIPE_BUILDING, internal=True,
                 note="轮廓挤出为体块并三角化"),
     ExportStage("tile_3d", "切 3D Tiles(b3dm)", (DataKind.VECTOR_POLYGON,),
                 DataKind.TILES_3D, outputs=("3dtiles/",), default_on=True,
-                pipeline=PIPE_BUILDING,
+                order=40, pipeline=PIPE_BUILDING,
                 note="GPU 批渲染,不受 Cesium Entity 数量限制"),
 )}
+
+
+# ---------- 导出格式名 → 阶段 key ----------
+# 接口/落库里的 export 字段用的是"格式名",与阶段 key 并非一一对应:
+#   - DEM 的 "geotiff" 与 "hillshade" 都由 dem 阶段产出(一次拼接两种成果)
+#   - 影像的 "geotiff" 就是 geotiff 阶段
+# 这层映射按 kind 区分,取代原先 build_stage_defs 里的 if is_dem 分支。
+_FORMAT_TO_STAGE: dict[str, dict[str, str]] = {
+    DataKind.RASTER_DEM: {
+        "geotiff": "dem", "hillshade": "dem",
+        "tiles": "tiles", "terrain": "terrain", "contour": "contour",
+    },
+    DataKind.RASTER_IMAGE: {
+        "geotiff": "geotiff", "tms": "tms", "osm": "osm",
+    },
+}
+
+
+#: 所有合法的导出格式名(供接口层白名单校验)。
+#: 含 "b3dm":建筑管线的历史格式名,库里有存量值,阶段推导不看它但白名单需放行。
+ALL_FORMAT_NAMES: frozenset[str] = frozenset(
+    {f for table in _FORMAT_TO_STAGE.values() for f in table}
+    | {"tms", "osm", "b3dm"}
+)
+
+
+def stage_key_for_format(kind: str, fmt: str) -> str | None:
+    """把导出格式名解析成阶段 key;该 kind 不支持时返回 None。"""
+    table = _FORMAT_TO_STAGE.get(kind)
+    if table and fmt in table:
+        return table[fmt]
+    # 未在映射表里的格式名直接当阶段 key(tms/osm 对两种栅格同名同义)
+    stage = STAGES.get(fmt)
+    if stage and kind in stage.accepts:
+        return fmt
+    return None
+
+
+def stage_label(stage_key: str, formats: list[str] | None = None) -> str:
+    """取阶段展示名。dem 阶段的标签随勾选动态变化(与旧行为逐字一致)。"""
+    if stage_key == "dem":
+        fs = set(formats or ())
+        want_dem, want_hs = "geotiff" in fs, "hillshade" in fs
+        if want_dem and want_hs:
+            return "高程 + 晕渲 GeoTIFF"
+        if want_hs:
+            return "晕渲图"
+        return "高程 GeoTIFF"
+    stage = STAGES.get(stage_key)
+    return stage.label if stage else stage_key
 
 
 def stages_for(kind: str, pipeline: str = "",
@@ -234,7 +294,35 @@ def stages_for(kind: str, pipeline: str = "",
         if s.internal and not include_internal:
             continue
         out.append(s)
-    return out
+    return sorted(out, key=lambda s: s.order)
+
+
+def plan_stages(provider: str, formats: list[str],
+                base_height_mode: str = "terrain") -> list[ExportStage]:
+    """按数据源与勾选格式解析出该跑哪些阶段,已按执行顺序排好。
+
+    这是 models.build_stage_defs 的实现内核——它只负责把这里返回的阶段包装成
+    落库用的 dict。放在本模块是为了让"格式→阶段"的推导只有一处。
+    """
+    kind = kind_of(provider)
+    if kind == DataKind.VECTOR_POLYGON:
+        # 建筑管线的阶段由管线自身决定,不看 formats:取数与建模是必经环节,
+        # 底面高仅 terrain 模式需要(其余模式用固定高度,无需采样 DEM)。
+        keys = ["fetch_buildings"]
+        if base_height_mode == "terrain":
+            keys.append("base_dem")
+        keys += ["build_mesh", "tile_3d"]
+        return [STAGES[k] for k in keys]
+
+    picked: list[ExportStage] = []
+    seen: set[str] = set()
+    for fmt in formats:
+        key = stage_key_for_format(kind, fmt)
+        if key is None or key in seen:
+            continue
+        seen.add(key)
+        picked.append(STAGES[key])
+    return sorted(picked, key=lambda s: s.order)
 
 
 def chain_to(kind: str) -> list[ExportStage]:

@@ -16,38 +16,59 @@ from .db import get_conn
 
 # ---------- 导出格式解析 ----------
 
+def normalize_containers(provider: str, wanted: dict | None) -> dict[str, str]:
+    """校验并归一化各阶段的容器格式选择。
+
+    非法的阶段/容器组合直接丢弃(回落该阶段默认容器),不报错——容器只影响成果
+    写成什么文件,一个拼错的值不该让整个任务提交失败。真正需要拦截的非法组合
+    (数据源不支持的格式)由 formats.validate 在接口层负责。
+    """
+    from .core.formats import CONTAINERS, STAGES, kind_of, stages_for
+
+    if not wanted:
+        return {}
+    allowed = {s.key for s in stages_for(kind_of(provider), include_internal=True)}
+    out: dict[str, str] = {}
+    for stage_key, container in wanted.items():
+        stage = STAGES.get(stage_key)
+        if stage is None or stage_key not in allowed:
+            continue
+        if container not in CONTAINERS or container not in stage.containers:
+            continue
+        out[stage_key] = container
+    return out
+
+
 def parse_export(value: str) -> list[str]:
     """把导出格式字段解析成格式列表,兼容旧值 both/geotiff+tms。
 
-    影像格式:geotiff/tms/osm;DEM 格式:geotiff/tiles/terrain/hillshade。
-    白名单覆盖两条管线全部格式,非法值过滤后回退 geotiff。
+    白名单来自 core.formats(覆盖三条管线全部格式名),非法值过滤后回退 geotiff。
+    注意白名单是格式名而非阶段 key:DEM 的 geotiff/hillshade 都由 dem 阶段产出,
+    b3dm 是建筑管线的历史格式名。
     """
+    from .core.formats import ALL_FORMAT_NAMES
+
     v = (value or "geotiff").strip().lower()
     if v == "both":
         return ["geotiff", "tms"]
     parts = [p.strip() for p in v.replace("+", ",").split(",") if p.strip()]
-    allowed = ("geotiff", "tms", "osm", "tiles", "terrain", "hillshade", "b3dm")
-    out = [p for p in parts if p in allowed]
+    out = [p for p in parts if p in ALL_FORMAT_NAMES]
     return out or ["geotiff"]
 
 
 # ---------- 阶段化进度定义 ----------
 
-# 阶段标签(展示名);DEM 的高程/晕渲阶段标签按勾选动态生成
-STAGE_LABELS = {
-    "download": "下载原始瓦片",
-    "geotiff": "合并 GeoTIFF",
-    "tms": "切 TMS 瓦片",
-    "osm": "切 OSM 瓦片",
-    "dem": "高程 GeoTIFF",
-    "tiles": "导出原始瓦片",
-    "terrain": "切 Cesium 地形",
-    # 三维建筑白模管线
-    "fetch_buildings": "拉取建筑轮廓",
-    "base_dem": "准备底面高程",
-    "build_mesh": "建筑白模建模",
-    "tile_3d": "切 3D Tiles(b3dm)",
-}
+# 阶段标签(展示名)。从 core.formats 注册表派生,避免两处维护漂移;
+# download 不是导出阶段(不由注册表管),单独并入。
+# DEM 的高程/晕渲阶段标签按勾选动态生成,见 formats.stage_label。
+def _stage_labels() -> dict[str, str]:
+    from .core.formats import STAGES
+    labels = {"download": "下载原始瓦片"}
+    labels.update({k: s.label for k, s in STAGES.items()})
+    return labels
+
+
+STAGE_LABELS = _stage_labels()
 
 
 def _new_stage(key: str, label: str) -> dict:
@@ -63,44 +84,22 @@ def build_stage_defs(provider: str, formats: list[str], annotate: bool = False,
     """按数据源与导出格式生成有序阶段列表(仅含实际会执行的阶段)。
 
     影像管线:download → geotiff → tms → osm
-    DEM 管线:download → dem(高程/晕渲) → tiles → terrain
+    DEM 管线:download → dem(高程/晕渲) → tms → osm → tiles → terrain → contour
     三维建筑:fetch_buildings → base_dem(仅 terrain 模式) → build_mesh → tile_3d
+
+    阶段推导已收敛到 core.formats 注册表(见该模块开头的设计说明),本函数只负责
+    把注册表返回的阶段包装成落库用的 dict。annotate 不影响阶段构成(注记是在
+    download/切片阶段内部烘焙的),保留参数仅为兼容调用方签名。
     """
-    from .providers.buildings import is_building_provider
-    from .providers.terrain import is_dem_provider
+    from .core.formats import (DataKind, kind_of, plan_stages, stage_label)
 
-    # 三维建筑管线不下载栅格瓦片,阶段构成完全不同
-    if is_building_provider(provider):
-        stages = [_new_stage("fetch_buildings", STAGE_LABELS["fetch_buildings"])]
-        if base_height_mode == "terrain":
-            stages.append(_new_stage("base_dem", STAGE_LABELS["base_dem"]))
-        stages.append(_new_stage("build_mesh", STAGE_LABELS["build_mesh"]))
-        stages.append(_new_stage("tile_3d", STAGE_LABELS["tile_3d"]))
-        return stages
-
-    stages: list[dict] = [_new_stage("download", STAGE_LABELS["download"])]
-    if is_dem_provider(provider):
-        want_geotiff = "geotiff" in formats
-        want_hillshade = "hillshade" in formats
-        if want_geotiff or want_hillshade:
-            if want_geotiff and want_hillshade:
-                label = "高程 + 晕渲 GeoTIFF"
-            elif want_hillshade:
-                label = "晕渲图"
-            else:
-                label = "高程 GeoTIFF"
-            stages.append(_new_stage("dem", label))
-        if "tiles" in formats:
-            stages.append(_new_stage("tiles", STAGE_LABELS["tiles"]))
-        if "terrain" in formats:
-            stages.append(_new_stage("terrain", STAGE_LABELS["terrain"]))
-    else:
-        if "geotiff" in formats:
-            stages.append(_new_stage("geotiff", STAGE_LABELS["geotiff"]))
-        if "tms" in formats:
-            stages.append(_new_stage("tms", STAGE_LABELS["tms"]))
-        if "osm" in formats:
-            stages.append(_new_stage("osm", STAGE_LABELS["osm"]))
+    stages: list[dict] = []
+    # 三维建筑管线的数据是矢量要素集,没有瓦片行列号,因此没有 download 阶段
+    if kind_of(provider) != DataKind.VECTOR_POLYGON:
+        stages.append(_new_stage("download", STAGE_LABELS["download"]))
+    for s in plan_stages(provider, formats, base_height_mode):
+        # dem 阶段的标签随"高程/晕渲"勾选动态变化,故不能直接用 s.label
+        stages.append(_new_stage(s.key, stage_label(s.key, formats)))
     return stages
 
 
@@ -179,6 +178,13 @@ class TaskCreate(BaseModel):
     dem_upload_id: str = Field(
         default="",
         description="上传的地形 GeoTIFF id;优先用于底面高采样,未覆盖处回落在线地形")
+    # ---- 导出容器格式(见 core.formats.CONTAINERS)----
+    containers: dict[str, str] = Field(
+        default_factory=dict,
+        description='各阶段的容器格式,如 {"geotiff":"cog","contour":"gpkg"};'
+                    "缺省取该阶段 containers 首项")
+    contour_interval: float = Field(
+        default=50.0, gt=0.0, le=10000.0, description="等高距(米)")
 
     def level_list(self) -> list[int]:
         """归一化出去重升序的级别列表:优先 levels,回退 z_min..z_max。
@@ -230,9 +236,10 @@ def create_task(data: TaskCreate, total: int, est_bytes: int = 0) -> str:
                 building_count,
                 upload_id, height_field, height_mode, height_scale,
                 floor_height, name_field, keep_fields, dem_upload_id,
+                containers, contour_interval,
                 created_at, updated_at)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-                       ?,?,?,?,?,?,?,?,?,?)""",
+                       ?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 task_id, data.name, data.provider, json.dumps(data.bbox),
                 z_min, z_max, data.export,
@@ -250,6 +257,9 @@ def create_task(data: TaskCreate, total: int, est_bytes: int = 0) -> str:
                 float(data.floor_height), data.name_field or "",
                 json.dumps(data.keep_fields or [], ensure_ascii=False),
                 data.dem_upload_id or "",
+                json.dumps(normalize_containers(data.provider, data.containers),
+                           ensure_ascii=False),
+                float(data.contour_interval or 50.0),
                 now, now,
             ),
         )
@@ -340,6 +350,13 @@ def _row_to_dict(row) -> dict:
     except (TypeError, ValueError):
         d["keep_fields"] = []
     d["dem_upload_id"] = d.get("dem_upload_id") or ""
+    # 容器格式选择;旧任务缺列 → 空 dict(各阶段按注册表默认容器)
+    ct = d.get("containers")
+    try:
+        d["containers"] = json.loads(ct) if ct else {}
+    except (TypeError, ValueError):
+        d["containers"] = {}
+    d["contour_interval"] = float(d.get("contour_interval") or 50.0)
     # 阶段化进度:优先存储的 stages;旧任务(空)按 export/status 合成兼容视图
     st = d.get("stages")
     stages = json.loads(st) if st else []

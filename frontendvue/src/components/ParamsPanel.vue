@@ -8,6 +8,7 @@ import { crsOptions } from '../utils/crs'
 import { fmtSize } from '../utils/format'
 import { parseVectorFiles, looksLikeLonLat, reprojectGeojson } from '../utils/vector'
 import InfoTip from './InfoTip.vue'
+import ContainerPicker from './ContainerPicker.vue'
 import SrsModal from './SrsModal.vue'
 import { api } from '../api'
 
@@ -41,9 +42,28 @@ const imageExportOptions = [
 ]
 const demExportOptions = [
   { value: 'geotiff', label: '高程 GeoTIFF(每级一张·真实海拔)' },
+  { value: 'tms', label: 'TMS 瓦片(晕渲可视化)' },
+  { value: 'osm', label: 'OSM 瓦片(晕渲可视化·Web 墨卡托)' },
   { value: 'tiles', label: '保留原始 LERC 瓦片' },
   { value: 'terrain', label: 'Cesium 地形切片(.terrain + layer.json)' },
+  { value: 'contour', label: '等高线(矢量)' },
 ]
+
+// 后端能力表(/api/capabilities):各 provider 可用的阶段与容器格式。
+// 格式勾选项的中文说明仍留在前端(上面两个数组)——它们要贴合界面语境;
+// 容器(文件格式)下拉完全由后端驱动,后端加一种容器界面自动出现。
+const caps = ref({})
+const capsOf = (provider) => caps.value[provider]?.stages || []
+
+async function loadCaps() {
+  try {
+    const d = await api.capabilities()
+    caps.value = d.providers || {}
+  } catch (e) {
+    // 拿不到能力表时容器选择区不渲染,格式勾选与提交仍可用(后端会回落默认容器)
+    console.warn('读取导出能力失败,容器格式将用默认值', e)
+  }
+}
 
 // 影像参数表单
 const imgForm = reactive({
@@ -54,6 +74,8 @@ const imgForm = reactive({
   crs: 'EPSG:4326',
   clip: false,
   annotate: false,
+  // 各阶段的文件格式,如 { geotiff: 'cog', tms: 'mbtiles' };空表示用后端默认
+  containers: {},
 })
 
 // 地形(DEM)参数表单。级别默认不勾选,由用户按探测到的最高级别自行选择。
@@ -63,6 +85,8 @@ const demForm = reactive({
   levels: [],
   export: ['geotiff'],
   crs: 'EPSG:4326',
+  containers: {},
+  contourInterval: 50,
 })
 
 // 三维建筑数据源。默认 OSM(Overpass):Overture 需跨境读 512 个 parquet 分片的
@@ -136,6 +160,7 @@ const remoteCoverText = computed(() => {
 })
 
 onMounted(refreshOfflineInfo)
+onMounted(loadCaps)
 onBeforeUnmount(() => { if (pbfTimer) clearInterval(pbfTimer) })
 
 // ---- 本地矢量面上传状态 ----
@@ -189,6 +214,8 @@ const bldForm = reactive({
   floor_height: 3,
   name_field: '',
   keep_fields: [],
+  // 建筑轮廓矢量的文件格式:{ fetch_buildings: 'gpkg' | 'shapefile' | 'geojson' }
+  containers: {},
 })
 
 const isLocalVector = computed(() => bldForm.provider === 'local_vector')
@@ -489,6 +516,7 @@ function imgPayload() {
     geometry: drawStore.geometry || null,
     clip: !!(imgForm.clip && drawStore.geometry),
     annotate: imgForm.annotate,
+    containers: { ...imgForm.containers },
   }
 }
 function demPayload() {
@@ -502,6 +530,8 @@ function demPayload() {
     geometry: drawStore.geometry || null,
     clip: false,
     annotate: false,
+    containers: { ...demForm.containers },
+    contour_interval: Number(demForm.contourInterval) || 50,
   }
 }
 
@@ -534,6 +564,7 @@ function bldPayload() {
     floor_height: Number(bldForm.floor_height) || 3,
     name_field: bldForm.name_field || '',
     keep_fields: [...(bldForm.keep_fields || [])],
+    containers: { ...bldForm.containers },
   }
 }
 
@@ -656,6 +687,8 @@ async function submit() {
           <t-form-item label="导出格式">
             <t-checkbox-group v-model="imgForm.export" :options="imageExportOptions" />
           </t-form-item>
+          <ContainerPicker :stages="capsOf(imgForm.provider)"
+            :selected="imgForm.export" v-model="imgForm.containers" />
           <t-form-item v-if="imgForm.export.includes('osm')" label-width="0">
             <div class="export-note">OSM 切片需重投影,以最高级拼接图作源,已自动勾选 GeoTIFF——切片时直接复用合并结果,不重复拼接。GeoTIFF 主文件恒输出一份 EPSG:4326;若另选了其他坐标系,会再额外生成一份对应投影的成果。(TMS 与天地图瓦片同构,直接由缓存瓦片映射,不经 GeoTIFF。)</div>
           </t-form-item>
@@ -716,6 +749,14 @@ async function submit() {
           </t-form-item>
           <t-form-item label="导出格式">
             <t-checkbox-group v-model="demForm.export" :options="demExportOptions" />
+          </t-form-item>
+          <ContainerPicker :stages="capsOf(demForm.provider)"
+            :selected="demForm.export" v-model="demForm.containers" />
+          <t-form-item v-if="demForm.export.includes('contour')" label="等高距(米)">
+            <t-input-number v-model="demForm.contourInterval" :min="1" :max="1000"
+              :step="10" theme="column" style="width: 120px" />
+            <InfoTip content="相邻等高线的高差。30 米级 DEM 上 50 米较合适;设得过小(如 5 米)会因源数据精度不足产生大量锯齿线。"
+              max-width="360px" />
           </t-form-item>
           <t-form-item v-if="demTerrainMultiLevelHint" label-width="0">
             <div class="dem-warn">⚠ 仅导出 Cesium 地形切片时,只用所选的最高层级作高程源,Cesium 会自动从 0 级逐级细化。多选低层级只会增加下载量,不会提升切片精度。如只要地形切片,选一个最高层级即可。</div>
@@ -904,6 +945,10 @@ async function submit() {
             <t-input-number v-model="bldForm.max_per_tile" :min="100" :max="50000"
               :step="100" style="width: 100%" />
           </t-form-item>
+          <!-- 建筑轮廓矢量的文件格式。三维成果(b3dm)结构固定、无可选容器,
+               故这里只会出现「拉取建筑轮廓」一行。 -->
+          <ContainerPicker :stages="capsOf(bldForm.provider)"
+            :selected="['fetch_buildings']" v-model="bldForm.containers" />
         </t-form>
         <div v-if="isLocalVector" class="estimate">
           <template v-if="uploadInfo">

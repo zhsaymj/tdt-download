@@ -196,6 +196,128 @@ def export_tms(
     return out_dir, exported, out_ext, stopped
 
 
+def export_tms_from_source(
+    src_geotiff: Path,
+    bbox: tuple[float, float, float, float],
+    levels: list[int],
+    out_dir: Path,
+    clip_geom: dict | None = None,
+    on_progress=None,
+    should_stop=None,
+    concurrency: int | None = None,
+) -> tuple[Path, list[int], str, bool]:
+    """从一张 EPSG:4326 源图重采样切出 geodetic TMS 瓦片。
+
+    与 export_tms 的分工:export_tms 是"把已下载的瓦片按网格搬运"(无损、不重采样),
+    只适用于源本身就是天地图 4326 瓦片的情形。本函数走重采样,供**没有对应 4326
+    瓦片缓存**的数据用——目前是 DEM(缓存是 3857 网格的 LERC 编码,搬不过来)。
+
+    输出统一 PNG(需 alpha 表达无数据区与裁剪边界),故返回的 ext 恒为 "png"。
+    返回 (out_dir, 已导出级别, "png", stopped)。
+    """
+    from rasterio.enums import Resampling
+    from rasterio.transform import from_bounds as _from_bounds
+    from rasterio.windows import from_bounds as _window_from_bounds
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    clip_geoms = prepare_geoms(clip_geom, "EPSG:4326") if clip_geom else None
+
+    # 先数出总瓦片数,进度才有真实分母
+    tasks: list[tuple[int, int, int]] = []
+    for z in levels:
+        tr = range_for_bbox(*bbox, z)
+        for col, row in tr.iter_tiles():
+            tasks.append((col, row, z))
+    total = len(tasks)
+    done = 0
+    stopped = False
+    lock = threading.Lock()
+
+    # rasterio dataset 非线程安全(与 osm.py 同一约束):多线程共享一个读句柄会抛
+    # "Read failed"。故每个线程用 threading.local 各开一份自己的 dataset。
+    _tls = threading.local()
+
+    with rasterio.open(src_geotiff) as probe:
+        src_bounds = probe.bounds
+        bands = min(probe.count, 3)
+
+    opened: list = []          # 记录各线程开的句柄,收尾统一关闭
+
+    def _local_src():
+        ds = getattr(_tls, "ds", None)
+        if ds is None:
+            ds = rasterio.open(src_geotiff)
+            _tls.ds = ds
+            with lock:
+                opened.append(ds)
+        return ds
+
+    def _one(col: int, row: int, z: int) -> bool:
+        src = _local_src()
+        west, south, east, north = tile_bounds(col, row, z)
+        ix0, iy0 = max(west, src_bounds.left), max(south, src_bounds.bottom)
+        ix1, iy1 = min(east, src_bounds.right), min(north, src_bounds.top)
+        if ix1 <= ix0 or iy1 <= iy0:
+            return False
+        # 交集区在 256 画布上的像素位置(瓦片经纬跨度均匀,直接线性映射)
+        sx, sy = east - west, north - south
+        px0 = int(round((ix0 - west) / sx * TILE_SIZE))
+        px1 = int(round((ix1 - west) / sx * TILE_SIZE))
+        py0 = int(round((north - iy1) / sy * TILE_SIZE))
+        py1 = int(round((north - iy0) / sy * TILE_SIZE))
+        ow, oh = px1 - px0, py1 - py0
+        if ow <= 0 or oh <= 0:
+            return False
+        window = _window_from_bounds(ix0, iy0, ix1, iy1, src.transform)
+        sub = src.read(indexes=list(range(1, bands + 1)),
+                       out_shape=(bands, oh, ow), window=window,
+                       resampling=Resampling.bilinear).astype(np.uint8)
+        submask = src.read_masks(1, out_shape=(oh, ow),
+                                 window=window).astype(np.uint8)
+        rgb = np.zeros((3, TILE_SIZE, TILE_SIZE), dtype=np.uint8)
+        alpha = np.zeros((TILE_SIZE, TILE_SIZE), dtype=np.uint8)
+        # 单波段源(如 DEM 晕渲灰度)复制到三通道,保证输出是可视 RGB
+        for b in range(3):
+            rgb[b, py0:py1, px0:px1] = sub[min(b, bands - 1)]
+        alpha[py0:py1, px0:px1] = submask
+        if clip_geoms is not None:
+            alpha = np.minimum(
+                alpha, tile_alpha_mask((west, south, east, north), clip_geoms))
+        if not alpha.any():
+            return False
+        dst = out_dir / str(tms_level(z)) / str(col) / f"{tms_row(row, z)}.png"
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        _write_tile_png(dst, rgb, alpha)
+        return True
+
+    def _worker(col: int, row: int, z: int):
+        nonlocal done
+        if should_stop and should_stop():
+            return
+        _one(col, row, z)
+        with lock:
+            done += 1
+            if on_progress and (done % 16 == 0 or done == total):
+                on_progress(done, total)
+
+    try:
+        n = concurrency or min(os.cpu_count() or 4, 8)
+        with ThreadPoolExecutor(max_workers=n) as pool:
+            list(pool.map(lambda a: _worker(*a), tasks))
+        if should_stop and should_stop():
+            stopped = True
+    finally:
+        for ds in opened:      # 关掉各线程各自打开的句柄
+            try:
+                ds.close()
+            except Exception:
+                pass
+
+    if on_progress:
+        on_progress(done, total)
+    return out_dir, list(levels), "png", stopped
+
+
 def write_tilemapresource(
     out_dir: Path,
     provider: TileProvider,

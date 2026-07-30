@@ -76,6 +76,41 @@ async def api_config():
     }
 
 
+@app.get("/api/capabilities")
+async def api_capabilities():
+    """按数据源列出可用的导出格式与容器格式。
+
+    前端据此渲染格式勾选与容器下拉,不再各 tab 硬编码——新增格式只需改
+    core.formats 注册表,界面自动跟上。
+    """
+    from .core.formats import (CONTAINERS, PIPE_BUILDING, PIPE_RASTER,
+                               PROVIDER_KIND, DataKind, kind_of, stages_for)
+
+    def stage_json(s):
+        return {
+            "key": s.key,
+            "label": s.label,
+            "default_on": s.default_on,
+            "note": s.note,
+            "containers": [
+                {"key": c, "label": CONTAINERS[c].label,
+                 "ext": CONTAINERS[c].ext, "note": CONTAINERS[c].note,
+                 "sidecars": list(CONTAINERS[c].sidecars)}
+                for c in s.containers if c in CONTAINERS
+            ],
+        }
+
+    providers = {}
+    for key in PROVIDER_KIND:
+        kind = kind_of(key)
+        pipe = (PIPE_BUILDING if kind == DataKind.VECTOR_POLYGON else PIPE_RASTER)
+        providers[key] = {
+            "kind": kind,
+            "stages": [stage_json(s) for s in stages_for(kind, pipe)],
+        }
+    return {"providers": providers}
+
+
 @app.get("/api/logs")
 async def api_logs(limit: int = 300):
     """返回最近的运行日志(内存环形缓冲),供前端「日志」抽屉打开时拉取历史。"""

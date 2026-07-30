@@ -12,6 +12,8 @@ async function req(url, opts) {
 
 export const api = {
   getConfig: () => req('/api/config'),
+  // 各数据源可用的导出阶段与文件格式(由后端 core/formats.py 注册表生成)
+  capabilities: () => req('/api/capabilities'),
   getLogs: (limit = 300) => req(`/api/logs?limit=${limit}`),
   listTasks: () => req('/api/tasks'),
   estimate: ({ west, south, east, north, levels, provider }) =>

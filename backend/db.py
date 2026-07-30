@@ -50,6 +50,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     name_field       TEXT DEFAULT '',         -- 作为建筑名的字段
     keep_fields      TEXT DEFAULT '',         -- json: 写入 b3dm Batch Table 的字段名数组
     dem_upload_id    TEXT DEFAULT '',         -- 上传的地形 GeoTIFF id(优先用于底面高采样)
+    -- 各阶段的容器格式选择 json: {阶段key: 容器key},如 {"geotiff":"cog","contour":"gpkg"}
+    -- 缺省时按 core.formats 里该阶段 containers 的首项(与旧行为一致:栅格 GTiff、矢量 GeoJSON)
+    containers       TEXT DEFAULT '',
+    contour_interval REAL DEFAULT 50.0,       -- 等高距(米)
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
@@ -94,6 +98,9 @@ _MIGRATIONS = {
     "name_field": "ALTER TABLE tasks ADD COLUMN name_field TEXT DEFAULT ''",
     "keep_fields": "ALTER TABLE tasks ADD COLUMN keep_fields TEXT DEFAULT ''",
     "dem_upload_id": "ALTER TABLE tasks ADD COLUMN dem_upload_id TEXT DEFAULT ''",
+    # 导出容器格式选择(COG/GPKG/Shapefile/MBTiles 等,见 core.formats.CONTAINERS)
+    "containers": "ALTER TABLE tasks ADD COLUMN containers TEXT DEFAULT ''",
+    "contour_interval": "ALTER TABLE tasks ADD COLUMN contour_interval REAL DEFAULT 50.0",
 }
 
 

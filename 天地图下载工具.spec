@@ -24,8 +24,16 @@ rio_datas, rio_binaries, rio_hidden = collect_all("rasterio")
 #      吞掉 → DEM 瓦片全部当无数据 → 拼出的高程 GeoTIFF 无法打开。----
 lerc_datas, lerc_binaries, lerc_hidden = collect_all("lerc")
 
+# ---- pyogrio:矢量成果导出(Shapefile/GPKG/等高线)。
+#      它**自带一整套 GDAL**(约 23 MB,与 rasterio 那份是两套独立副本——
+#      rasterio 的 dll 是改名混淆的 gdal-<hash>.dll,无法共享),故必须单独
+#      collect_all 把 pyogrio.libs 下的 dll 与 gdal_data 收全。
+#      漏收的后果:打包后 import pyogrio 失败 → GPKG/Shapefile/等高线导出全部
+#      不可用,而影像/DEM 管线看着正常,问题只在用户选矢量格式时才暴露。----
+pyogrio_datas, pyogrio_binaries, pyogrio_hidden = collect_all("pyogrio")
+
 # ---- 只读资源 ----
-datas = list(rio_datas) + list(lerc_datas)
+datas = list(rio_datas) + list(lerc_datas) + list(pyogrio_datas)
 datas += [
     (str(PROJECT / "frontendvue" / "dist"), "frontendvue/dist"),
     (str(PROJECT / "frontend"), "frontend"),
@@ -33,7 +41,7 @@ datas += [
 ]
 
 # ---- 隐藏导入 ----
-hiddenimports = list(rio_hidden) + list(lerc_hidden)
+hiddenimports = list(rio_hidden) + list(lerc_hidden) + list(pyogrio_hidden)
 # rasterio 常被漏收的内部模块
 hiddenimports += collect_submodules("rasterio")
 hiddenimports += [
@@ -47,9 +55,14 @@ hiddenimports += [
     "websockets", "websockets.legacy",
     # 地形/DEM 相关
     "lerc", "pymartini", "quantized_mesh_encoder",
+    # 矢量导出:pyogrio.raw 是 cython 扩展,静态分析常抓不到
+    "pyogrio", "pyogrio.raw", "pyogrio._io", "pyogrio._ogr", "pyogrio._err",
+    "pyogrio._geometry", "pyogrio._vsi", "pyogrio.core", "pyogrio.errors",
+    # 等高线用到 shapely 的 wkb 编解码(shapely 2.x 是 C 扩展 + lgeos)
+    "shapely", "shapely.wkb", "shapely.geometry",
 ]
 
-binaries = list(rio_binaries) + list(lerc_binaries)
+binaries = list(rio_binaries) + list(lerc_binaries) + list(pyogrio_binaries)
 
 
 a = Analysis(

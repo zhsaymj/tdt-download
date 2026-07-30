@@ -209,6 +209,56 @@ def _write_vector(path: Path, feats) -> int:
     return n
 
 
+def _to_selected_container(task: dict, geojson_path: Path) -> Path:
+    """按任务选定的容器,把已写好的 GeoJSON 轮廓另存为 GPKG / Shapefile。
+
+    为什么先写 GeoJSON 再转、而不直接按目标格式写:_write_vector 是**流式**写出的
+    (18 万栋的成果几百 MB,全量拼在内存里没必要),而 pyogrio 的写入要求一次给全
+    要素数组。先落 GeoJSON 保住流式优势,再由 GDAL 做格式转换,内存占用由它控制。
+
+    转换失败时保留 GeoJSON 并返回它——成果格式不对可以重导,成果丢了不能。
+    """
+    from .containers import container_of
+    from .formats import CONTAINERS
+
+    container = container_of(task, "fetch_buildings")
+    if container in ("", "geojson") or not geojson_path.exists():
+        return geojson_path
+    cont = CONTAINERS.get(container)
+    if cont is None or cont.writer != "pyogrio":
+        return geojson_path
+
+    # 走 pyogrio.raw 而非 read_dataframe:后者需要 geopandas,项目没装(也不想装,
+    # 它会拖进 pandas 全家桶)。raw 接口返回 (meta, index, geometry, field_data),
+    # 字段名在 meta["fields"]、字段值在第四项 —— 与 write 的入参顺序正好对得上。
+    import numpy as _np
+    from pyogrio.raw import read as _read, write as _write
+
+    out_path = geojson_path.with_suffix(cont.ext)
+    try:
+        meta, _idx, geom, field_data = _read(str(geojson_path))
+        _write(str(out_path), geom, list(field_data), _np.asarray(meta["fields"]),
+               driver=cont.driver, crs=meta.get("crs") or "EPSG:4326",
+               geometry_type="Polygon", encoding="UTF-8",
+               promote_to_multi=True)
+        logger.info("建筑轮廓已转为 %s:%s(%d 栋)",
+                    cont.label, out_path.name, len(geom))
+        # Shapefile 字段名上限 10 字符,超长会被 GDAL 静默截断
+        # (实测 base_height → base_heigh)。这是格式固有限制,记日志让用户可查。
+        if container == "shapefile":
+            long_names = [str(x) for x in meta["fields"] if len(str(x)) > 10]
+            if long_names:
+                logger.warning(
+                    "Shapefile 字段名上限 10 字符,以下字段已被截断:%s"
+                    "(需完整字段名请改用 GeoPackage)", ", ".join(long_names))
+        geojson_path.unlink(missing_ok=True)
+        return out_path
+    except Exception as e:
+        logger.warning("建筑轮廓转 %s 失败:%s,保留 GeoJSON", cont.label, e)
+        out_path.unlink(missing_ok=True)
+        return geojson_path
+
+
 def _fmt_size(p: Path) -> str:
     try:
         n = float(p.stat().st_size)
@@ -385,6 +435,7 @@ def _stage_build_mesh(ctx) -> list[str]:
         if not vec_path.exists():
             n = _write_vector(vec_path, _load_features(prep_path))
             logger.info("任务[%s] 补出建筑轮廓矢量:%d 栋", task["name"], n)
+            return [str(_to_selected_container(task, vec_path))]
         return [str(vec_path)]
 
     mode = task.get("base_height_mode") or BaseHeightMode.TERRAIN
@@ -438,10 +489,11 @@ def _stage_build_mesh(ctx) -> list[str]:
     ctx.tracker.update("build_mesh", message="导出建筑轮廓矢量")
     nv = _write_vector(vec_path, iter(feats))
     logger.info("任务[%s] 建筑轮廓矢量:%d 栋 → %s", task["name"], nv, vec_path.name)
+    final_vec = _to_selected_container(task, vec_path)
 
     ctx.tracker.update("build_mesh", done=raw_total, total=raw_total,
                        message=f"可用建筑 {n} 栋")
-    return [str(vec_path)]
+    return [str(final_vec)]
 
 
 def _stage_tile_3d(ctx) -> list[str]:
