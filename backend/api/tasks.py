@@ -381,6 +381,11 @@ async def api_create_task(data: TaskCreate):
     if is_building_provider(data.provider):
         return await _create_buildings_task(data)
 
+    # 本地文件源:不下载不联网,校验与瓦片计数都另走一套
+    from ..core.formats import is_local_source
+    if is_local_source(data.provider):
+        return await _create_local_task(data)
+
     dem = is_dem_provider(data.provider)
     # DEM 走 AWS 公开数据集,无需天地图密钥;天地图数据源才校验密钥
     # (密钥来源:tk 使用池 或 config.yaml 的固定密钥)
@@ -406,6 +411,55 @@ async def api_create_task(data: TaskCreate):
     task_id = create_task(data, total, est_bytes)
     await task_queue.enqueue(task_id)
     return {"id": task_id, "total": total, "status": "pending"}
+
+
+async def _create_local_task(data: TaskCreate):
+    """本地文件源建任务:不下载,直接处理用户磁盘上的文件。
+
+    与下载任务的差别:
+      - 不校验天地图密钥(不联网)
+      - total 不是"要下载的瓦片数"而是 0(没有下载阶段,进度分母由各导出阶段自报)
+      - bbox 缺省时取源文件自身范围(用户可能不画范围就想整幅处理)
+      - 级别缺省时取源文件的原生级别(本地文件只有一个分辨率)
+    """
+    from ..core import local_raster
+
+    p = Path((data.source_path or "").strip().strip('"'))
+    if not p.is_absolute() or not p.is_file():
+        raise HTTPException(400, f"源文件不存在或不是绝对路径:{p}")
+
+    try:
+        info = await asyncio.to_thread(local_raster.inspect_for_import, p)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:
+        raise HTTPException(400, f"无法读取源栅格:{str(e)[:200]}") from e
+
+    # 数据类型必须与 provider 对得上,否则阶段与成果会错位
+    want = ("local_dem" if info["kind"] == "raster_dem" else "local_image")
+    if data.provider != want:
+        raise HTTPException(
+            400, f"该文件被判定为{'高程' if want == 'local_dem' else '影像'}数据"
+                 f"({info['kind_reason']}),请选择对应的数据类型")
+
+    # bbox 缺省用源文件范围;给了则取与源范围的交集(超出部分没有数据)
+    src_bbox = info["bounds_wgs84"]
+    if data.bbox and len(data.bbox) == 4 and any(data.bbox):
+        w = max(data.bbox[0], src_bbox[0]); s = max(data.bbox[1], src_bbox[1])
+        e = min(data.bbox[2], src_bbox[2]); n = min(data.bbox[3], src_bbox[3])
+        if e <= w or n <= s:
+            raise HTTPException(400, "所选范围与该文件的数据范围没有交集")
+        data.bbox = [w, s, e, n]
+    else:
+        data.bbox = list(src_bbox)
+
+    if not data.level_list():
+        data.levels = [int(info["native_level"])]
+
+    task_id = create_task(data, 0, 0)
+    await task_queue.enqueue(task_id)
+    return {"id": task_id, "total": 0, "status": "pending",
+            "kind": info["kind"], "levels": data.level_list()}
 
 
 async def _update_buildings_task(task_id: str, data: TaskCreate):

@@ -58,6 +58,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- 目录适合挂 HTTP 服务、mbtiles 适合分发,两者内容等价但用途不同;
     -- 默认保留是为了不静默删数据,代价是瓦片存两遍、磁盘翻倍。
     keep_tiles_dir   INTEGER DEFAULT 1,
+    -- 本地文件输入源的绝对路径(provider 为 local_image / local_dem 时有效)。
+    -- 存路径而非拷贝文件:本机自用,后端能直接读原文件,复制一份纯属浪费
+    -- (一份 2GB 影像会让 data/ 再占 2GB)。代价是原文件被移动/删除后任务无法重跑,
+    -- runner 启动时会校验存在性并给出明确报错。
+    source_path      TEXT DEFAULT '',
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
@@ -106,6 +111,8 @@ _MIGRATIONS = {
     "containers": "ALTER TABLE tasks ADD COLUMN containers TEXT DEFAULT ''",
     "contour_interval": "ALTER TABLE tasks ADD COLUMN contour_interval REAL DEFAULT 50.0",
     "keep_tiles_dir": "ALTER TABLE tasks ADD COLUMN keep_tiles_dir INTEGER DEFAULT 1",
+    # 本地文件输入源(不下载,直接读用户磁盘上的文件)
+    "source_path": "ALTER TABLE tasks ADD COLUMN source_path TEXT DEFAULT ''",
 }
 
 

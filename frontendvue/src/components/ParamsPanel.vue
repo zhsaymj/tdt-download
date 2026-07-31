@@ -104,6 +104,133 @@ function picksMbtiles(form) {
 const imgPicksMbtiles = computed(() => picksMbtiles(imgForm))
 const demPicksMbtiles = computed(() => picksMbtiles(demForm))
 
+// ---- 本地文件作输入源 ----
+// 单独一个 tab 而非塞进影像/地形:它没有级别勾选与密钥要求,范围也来自文件自身,
+// 混在一起会让那两个 tab 的大半控件对它无意义。
+const localForm = reactive({
+  name: '本地处理',
+  path: '',
+  export: [],
+  crs: 'EPSG:4326',
+  containers: {},
+  contourInterval: 50,
+  keepTilesDir: true,
+  clip: false,
+  useRange: false,        // 是否只处理所画范围(默认整幅)
+  vecContainer: 'gpkg',   // 矢量转换的目标容器
+})
+const localInfo = ref(null)        // 栅格:/api/local/inspect 的返回
+const localVecInfo = ref(null)     // 矢量:/api/local/inspect_vector 的返回
+const localVecDone = ref(null)     // 矢量转换结果(成果目录与文件清单)
+const localBusy = ref(false)
+const localError = ref('')
+const dialogOk = ref(false)        // 系统文件对话框是否可用
+
+async function checkDialog() {
+  try {
+    const d = await api.localDialogAvailable()
+    dialogOk.value = !!d.available
+  } catch (_) { dialogOk.value = false }
+}
+
+/** 弹系统文件对话框选文件(后端弹框,拿到的是真实路径) */
+async function browseLocal(kind = 'raster') {
+  localError.value = ''
+  try {
+    const d = await api.localPick({ kind, multiple: false })
+    if (d.paths?.length) {
+      localForm.path = d.paths[0]
+      await inspectLocal()
+    }
+  } catch (e) {
+    localError.value = '打开文件对话框失败:' + (e?.message || e)
+  }
+}
+
+/** 矢量扩展名(与后端 local_vector_file.VECTOR_EXTS 对应) */
+const VECTOR_EXTS = ['shp', 'geojson', 'json', 'gpkg', 'kml', 'fgb', 'gml']
+function isVectorPath(p) {
+  const m = /\.([a-z0-9]+)$/i.exec((p || '').trim())
+  return !!m && VECTOR_EXTS.includes(m[1].toLowerCase())
+}
+
+/**
+ * 检查选中的文件:按扩展名分流到栅格/矢量两条检查接口。
+ * 矢量只做容器转换(单步、不进队列),栅格走完整导出管线,故两者的界面与提交
+ * 路径都不同,用 localVecInfo 区分。
+ */
+async function inspectLocal() {
+  const p = (localForm.path || '').trim()
+  localInfo.value = null
+  localVecInfo.value = null
+  localError.value = ''
+  if (!p) return
+  localBusy.value = true
+  try {
+    if (isVectorPath(p)) {
+      const d = await api.localInspectVector(p)
+      localVecInfo.value = d
+      localForm.vecContainer = d.containers?.[0]?.key || 'gpkg'
+      const stem = String(d.filename || '').replace(/\.[^.]+$/, '')
+      if (stem) localForm.name = stem
+    } else {
+      const d = await api.localInspect(p)
+      localInfo.value = d
+      // 默认勾上该类型的推荐格式(用格式名,见 fmtNameOf)
+      localForm.export = (d.stages || [])
+        .filter((s) => s.default_on).map((s) => fmtNameOf(s.key))
+      const stem = String(d.filename || '').replace(/\.[^.]+$/, '')
+      if (stem) localForm.name = stem
+    }
+  } catch (e) {
+    localError.value = e?.message || String(e)
+  } finally {
+    localBusy.value = false
+  }
+}
+
+/** 矢量转换:单步完成,直接出成果,不进任务队列 */
+async function convertVector() {
+  if (!localVecInfo.value) return
+  localBusy.value = true
+  localError.value = ''
+  try {
+    const r = await api.localConvertVector({
+      path: localForm.path,
+      container: localForm.vecContainer,
+      name: localForm.name || '',
+    })
+    MessagePlugin.success(`已转换完成:${r.files.join('、')}`)
+    localVecDone.value = r
+  } catch (e) {
+    localError.value = '转换失败:' + (e?.message || e)
+  } finally {
+    localBusy.value = false
+  }
+}
+
+const localIsDem = computed(() => localInfo.value?.kind === 'raster_dem')
+const localStages = computed(() => localInfo.value?.stages || [])
+/**
+ * 阶段 key → 提交用的格式名。两者不是一一对应:DEM 的整幅高程图阶段 key 是历史
+ * 遗留的 `dem`,而 export 字段里的格式名是 `geotiff`(后端 _FORMAT_TO_STAGE 做
+ * 这层映射)。勾选框必须用格式名,否则提交后阶段推导不出来。
+ */
+function fmtNameOf(stageKey) {
+  return stageKey === 'dem' ? 'geotiff' : stageKey
+}
+const localExportOptions = computed(() => {
+  // 复用影像/地形的中文说明(贴合语境),后端没给说明的用 label 兜底
+  const src = localIsDem.value ? demExportOptions : imageExportOptions
+  return localStages.value.map((s) => {
+    const v = fmtNameOf(s.key)
+    const hit = src.find((o) => o.value === v)
+    return { value: v, label: hit ? hit.label : s.label }
+  })
+})
+const localPicksMbtiles = computed(() => ['tms', 'osm'].some(
+  (k) => localForm.export.includes(k) && localForm.containers[k] === 'mbtiles'))
+
 // 裁切提示随选区形状变化:矩形用户最容易困惑「我画的是矩形,为什么成果更大」
 const clipHint = computed(() => {
   const base = '瓦片是固定网格,边界由级别决定,不会刚好落在选区上——'
@@ -187,6 +314,7 @@ const remoteCoverText = computed(() => {
 
 onMounted(refreshOfflineInfo)
 onMounted(loadCaps)
+onMounted(checkDialog)
 onBeforeUnmount(() => { if (pbfTimer) clearInterval(pbfTimer) })
 
 // ---- 本地矢量面上传状态 ----
@@ -626,6 +754,27 @@ function demPayload() {
   }
 }
 
+function localPayload() {
+  return {
+    name: localForm.name || '本地处理',
+    // 数据类型由文件判定(见 /api/local/inspect),前端只按判定结果选 provider
+    provider: localIsDem.value ? 'local_dem' : 'local_image',
+    source_path: localForm.path,
+    // 不勾"只处理所画范围"时送空 bbox,后端取文件自身范围
+    bbox: (localForm.useRange && drawStore.bbox) ? drawStore.bbox : [],
+    // 级别留空,后端按文件分辨率取原生级别
+    levels: [],
+    export: localForm.export.join(','),
+    crs: localForm.crs,
+    geometry: null,
+    clip: !!(localForm.clip && localForm.useRange && drawStore.bbox),
+    annotate: false,
+    containers: { ...localForm.containers },
+    contour_interval: Number(localForm.contourInterval) || 50,
+    keep_tiles_dir: !!localForm.keepTilesDir,
+  }
+}
+
 function bldPayload() {
   return {
     name: bldForm.name || '三维建筑',
@@ -667,8 +816,14 @@ const bldSpan = computed(() => {
 })
 const bldSpanTooBig = computed(() => bldSpan.value > 4)
 
-// 提交按钮禁用条件:本地矢量看是否已上传,其余数据源看是否已选范围
+// 提交按钮禁用条件:本地文件看是否已选到有效文件,本地矢量看是否已上传,
+// 其余数据源看是否已选范围
 const submitDisabled = computed(() => {
+  if (activeTab.value === 'local') {
+    // 矢量走「转换」按钮(单步完成),不用底部的提交按钮
+    if (localVecInfo.value) return true
+    return !localForm.path || !localInfo.value || !localForm.export.length
+  }
   if (activeTab.value === 'buildings' && isLocalVector.value) {
     return !bldForm.upload_id
   }
@@ -681,6 +836,23 @@ const alsoLabel = computed(() =>
   activeTab.value === 'image' ? '同时下载地形(DEM)' : '同时下载影像')
 
 async function submit() {
+  // 本地文件独立提交:范围来自文件自身,不必先画
+  if (activeTab.value === 'local') {
+    if (!localForm.path) { MessagePlugin.error('请先选择本地文件'); return }
+    if (!localInfo.value) { MessagePlugin.error('文件尚未检查通过,请重新选择'); return }
+    if (!localForm.export.length) { MessagePlugin.error('请至少选择一种导出格式'); return }
+    submitting.value = true
+    try {
+      await taskStore.create(localPayload())
+      MessagePlugin.success('本地处理任务已加入队列')
+    } catch (err) {
+      MessagePlugin.error('提交失败:' + (err?.message || err))
+    } finally {
+      submitting.value = false
+    }
+    return
+  }
+
   // 本地矢量面自带范围(数据就是范围),不必先画;其余数据源必须先选范围
   const localVectorReady = activeTab.value === 'buildings' && isLocalVector.value
   if (!drawStore.hasRange && !localVectorReady) {
@@ -1086,9 +1258,132 @@ async function submit() {
           <span v-else class="est-hint">(建筑栋数在取数阶段确定)</span>
         </div>
       </t-tab-panel>
+
+      <!-- 本地文件:处理手上已有的栅格,不下载。
+           范围默认取文件自身,级别按文件分辨率自动定,故没有级别勾选。 -->
+      <t-tab-panel value="local" label="本地文件">
+        <t-form label-align="left" :label-width="LABEL_W_RASTER" class="tab-form">
+          <t-form-item label="源文件" label-align="top">
+            <div class="local-pick">
+              <t-input v-model="localForm.path" placeholder="选择或粘贴本地文件的完整路径"
+                @blur="inspectLocal" @keyup.enter="inspectLocal" />
+              <t-button v-if="dialogOk" theme="default" :loading="localBusy"
+                @click="browseLocal('raster')">栅格…</t-button>
+              <t-button v-if="dialogOk" theme="default" :loading="localBusy"
+                @click="browseLocal('vector')">矢量…</t-button>
+            </div>
+          </t-form-item>
+          <t-form-item v-if="localError" label-width="0">
+            <div class="local-err">{{ localError }}</div>
+          </t-form-item>
+          <t-form-item v-if="localInfo" label-width="0">
+            <div class="local-info">
+              <div class="li-row">
+                <b>{{ localIsDem ? '高程数据' : '影像数据' }}</b>
+                <span v-if="!localInfo.kind_confident" class="li-warn">类型判定不确定,请核对</span>
+              </div>
+              <div class="li-dim">{{ localInfo.kind_reason }}</div>
+              <div class="li-dim">
+                {{ localInfo.width }}×{{ localInfo.height }} 像素 ·
+                {{ localInfo.bands }} 波段 {{ localInfo.dtype }} ·
+                {{ localInfo.crs }} · {{ fmtSize(localInfo.bytes) }}
+              </div>
+              <div class="li-dim">
+                原生级别约 {{ localInfo.native_level }} 级 ·
+                范围 {{ localInfo.bounds_wgs84.map((v) => v.toFixed(4)).join(', ') }}
+              </div>
+            </div>
+          </t-form-item>
+
+          <!-- 矢量:只做容器转换,单步完成,不进任务队列 -->
+          <t-form-item v-if="localVecInfo" label-width="0">
+            <div class="local-info">
+              <div class="li-row"><b>矢量数据</b>
+                <span class="li-dim">{{ localVecInfo.geometry_type }}</span>
+              </div>
+              <div class="li-dim">
+                {{ localVecInfo.features }} 个要素 ·
+                {{ localVecInfo.fields.length }} 个字段 · {{ localVecInfo.crs }} ·
+                {{ fmtSize(localVecInfo.bytes) }}
+              </div>
+              <div v-if="localVecInfo.bounds_wgs84" class="li-dim">
+                范围 {{ localVecInfo.bounds_wgs84.map((v) => v.toFixed(4)).join(', ') }}
+              </div>
+            </div>
+          </t-form-item>
+          <template v-if="localVecInfo">
+            <t-form-item label="成果名称">
+              <t-input v-model="localForm.name" placeholder="成果名称" />
+            </t-form-item>
+            <t-form-item label="转为格式" label-align="top">
+              <t-select v-model="localForm.vecContainer"
+                :options="localVecInfo.containers.map((c) => ({ value: c.key, label: c.label }))" />
+              <InfoTip content="矢量只做格式转换,不涉及下载与切片,故单步完成、不进任务队列。成果统一转为 WGS84 经纬度(与工具其余矢量成果一致)。"
+                max-width="380px" />
+            </t-form-item>
+            <t-form-item label-width="0">
+              <t-button theme="primary" :loading="localBusy" @click="convertVector">
+                开始转换
+              </t-button>
+            </t-form-item>
+            <t-form-item v-if="localVecDone" label-width="0">
+              <div class="local-info">
+                <div class="li-row"><b>已完成</b></div>
+                <div class="li-dim">{{ localVecDone.output_dir }}</div>
+                <div class="li-dim">{{ localVecDone.files.join('、') }}</div>
+              </div>
+            </t-form-item>
+          </template>
+
+          <template v-if="localInfo">
+            <t-form-item label="任务名称">
+              <t-input v-model="localForm.name" placeholder="任务名称" />
+            </t-form-item>
+            <t-form-item label="导出格式">
+              <t-checkbox-group v-model="localForm.export" :options="localExportOptions" />
+            </t-form-item>
+            <ContainerPicker :stages="localStages"
+              :selected="localForm.export" v-model="localForm.containers" />
+            <t-form-item v-if="localPicksMbtiles" label-width="0">
+              <t-checkbox v-model="localForm.keepTilesDir">同时保留散列瓦片目录</t-checkbox>
+              <InfoTip content="MBTiles 是单文件、便于拷贝分发;散列瓦片目录可直接挂 HTTP 服务。两者内容等价,同时保留则瓦片存两遍。"
+                max-width="380px" />
+            </t-form-item>
+            <t-form-item v-if="localForm.export.includes('contour')" label="等高距(米)">
+              <t-input-number v-model="localForm.contourInterval" :min="1" :max="1000"
+                :step="10" theme="column" style="width: 120px" />
+            </t-form-item>
+            <t-form-item label="输出坐标系" label-align="top">
+              <t-select v-model="localForm.crs" :options="crsOpts" filterable />
+            </t-form-item>
+            <t-form-item v-if="drawStore.hasRange" label-width="0">
+              <t-checkbox v-model="localForm.useRange">只处理所画范围</t-checkbox>
+              <InfoTip content="默认处理整幅文件。勾选后只处理文件与所画范围的交集部分——范围超出文件数据范围的部分没有数据。"
+                max-width="360px" />
+            </t-form-item>
+            <t-form-item v-if="localForm.useRange && drawStore.hasRange" label-width="0">
+              <t-checkbox v-model="localForm.clip">裁剪成果到范围边界</t-checkbox>
+            </t-form-item>
+          </template>
+        </t-form>
+        <div class="estimate">
+          <template v-if="localVecInfo">
+            矢量转换单步完成,点上方「开始转换」即可
+            <span class="est-hint">(不经任务队列,底部提交按钮对矢量无效)</span>
+          </template>
+          <template v-else-if="localInfo">
+            直接读取本机文件处理,不下载、不复制
+            <span class="est-hint">(原文件被移动或删除后此任务无法重跑)</span>
+          </template>
+          <template v-else>请先选择本地文件(栅格 tif 等,或矢量 shp/gpkg/kml 等)</template>
+        </div>
+      </t-tab-panel>
     </t-tabs>
 
-    <t-checkbox v-if="activeTab !== 'buildings'" v-model="alsoOther" class="also-check">{{ alsoLabel }}</t-checkbox>
+    <!-- 配对下载只对影像/地形两个 tab 有意义:三维建筑与栅格管线无共用中间产物,
+         本地文件不涉及下载 -->
+    <t-checkbox v-if="activeTab === 'image' || activeTab === 'terrain'"
+      v-model="alsoOther" class="also-check">{{ alsoLabel }}</t-checkbox>
     <t-button theme="primary" block :loading="submitting"
       :disabled="submitDisabled" @click="submit">加入下载队列</t-button>
 
@@ -1155,6 +1450,17 @@ async function submit() {
   display: inline-flex; align-items: center; gap: 4px; }
 .lv-apply { color: #0284c7; cursor: pointer; text-decoration: underline; }
 .lv-apply:hover { color: #0369a1; }
+
+/* 本地文件 tab */
+.local-pick { display: flex; gap: 6px; align-items: center; width: 100%; }
+.local-pick .t-input { flex: 1 1 auto; min-width: 0; }
+.local-err { font-size: 12px; color: #d64541; line-height: 1.6;
+  background: #fef2f2; border: 1px solid #fecaca; border-radius: 4px; padding: 6px 8px; }
+.local-info { font-size: 12px; line-height: 1.7; background: #f0f9ff;
+  border: 1px solid #bae6fd; border-radius: 4px; padding: 6px 8px; width: 100%; }
+.local-info .li-row { display: flex; align-items: center; gap: 8px; }
+.local-info .li-dim { color: #64748b; word-break: break-all; }
+.local-info .li-warn { color: #d97706; font-size: 11px; }
 .lv-z { min-width: 18px; font-weight: 600; }
 .lv-size { font-size: 11px; color: #94a3b8; }
 .lv-nodata { color: #cbd5e1; font-style: italic; }

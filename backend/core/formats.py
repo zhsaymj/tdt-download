@@ -153,6 +153,10 @@ class ExportStage:
     #: internal=True 的阶段由管线自身按需插入,不给用户勾选。
     pipeline: str = ""
     internal: bool = False
+    #: 是否必须有下载的瓦片缓存。本地文件作输入源时没有瓦片缓存(见
+    #: core/local_raster.py),这类阶段对它不可用——例如"导出原始 LERC 瓦片"
+    #: 本质就是把缓存里的瓦片拷出来,没有缓存就无从导出。
+    needs_tile_cache: bool = False
 
 
 STAGES: dict[str, ExportStage] = {s.key: s for s in (
@@ -183,7 +187,7 @@ STAGES: dict[str, ExportStage] = {s.key: s for s in (
     # ---- DEM 专属 ----
     ExportStage("tiles", "导出原始瓦片", (DataKind.RASTER_DEM,),
                 DataKind.TILES_RASTER, outputs=("tiles/",), order=50,
-                pipeline=PIPE_RASTER,
+                pipeline=PIPE_RASTER, needs_tile_cache=True,
                 note="保留 Esri LERC 编码原始瓦片,不解码不重采样"),
     ExportStage("terrain", "切 Cesium 地形", (DataKind.RASTER_DEM,),
                 DataKind.TILES_TERRAIN, outputs=("terrain/",), order=60,
@@ -282,11 +286,13 @@ def stage_label(stage_key: str, formats: list[str] | None = None) -> str:
 
 
 def stages_for(kind: str, pipeline: str = "",
-               include_internal: bool = False) -> list[ExportStage]:
+               include_internal: bool = False,
+               has_tile_cache: bool = True) -> list[ExportStage]:
     """列出某数据类型可用的处理阶段(界面格式勾选列表的数据来源)。
 
     pipeline 限定管线(不传则不限)。默认排除 internal 阶段——它们由管线自动
     插入,不该出现在用户可勾选的格式列表里。
+    has_tile_cache=False 时排除需要下载缓存的阶段(本地文件作输入源的情形)。
     """
     out = []
     for s in STAGES.values():
@@ -295,6 +301,8 @@ def stages_for(kind: str, pipeline: str = "",
         if pipeline and s.pipeline and s.pipeline != pipeline:
             continue
         if s.internal and not include_internal:
+            continue
+        if s.needs_tile_cache and not has_tile_cache:
             continue
         out.append(s)
     return sorted(out, key=lambda s: s.order)
@@ -317,14 +325,19 @@ def plan_stages(provider: str, formats: list[str],
         keys += ["build_mesh", "tile_3d"]
         return [STAGES[k] for k in keys]
 
+    local = is_local_source(provider)
     picked: list[ExportStage] = []
     seen: set[str] = set()
     for fmt in formats:
         key = stage_key_for_format(kind, fmt)
         if key is None or key in seen:
             continue
+        stage = STAGES[key]
+        # 本地源没有瓦片缓存,"导出原始瓦片"这类阶段无从执行
+        if local and stage.needs_tile_cache:
+            continue
         seen.add(key)
-        picked.append(STAGES[key])
+        picked.append(stage)
     return sorted(picked, key=lambda s: s.order)
 
 
@@ -354,7 +367,22 @@ PROVIDER_KIND: dict[str, str] = {
     "osm_buildings": DataKind.VECTOR_POLYGON,
     "overture_buildings": DataKind.VECTOR_POLYGON,
     "local_vector": DataKind.VECTOR_POLYGON,
+    # 本地栅格文件作输入源(不下载,直接读用户机器上的文件)。
+    # 影像与 DEM 分成两个 key 而不是一个 "local_raster" + 动态 kind:
+    # kind_of() 是静态映射,build_stage_defs / validate / stages_for 全都依赖它,
+    # 若 kind 要从任务字段动态取,这些函数都得改签名并处处传参。文件类型在导入时
+    # 已判定好(见 core/local_raster.guess_kind),分成两个 key 即可复用整套逻辑。
+    "local_image": DataKind.RASTER_IMAGE,
+    "local_dem": DataKind.RASTER_DEM,
 }
+
+#: 本地文件输入源:无瓦片缓存、无下载阶段
+LOCAL_PROVIDERS = frozenset({"local_image", "local_dem"})
+
+
+def is_local_source(provider: str) -> bool:
+    """是否为"读本地文件"的数据源(与"联网下载"相对)。"""
+    return provider in LOCAL_PROVIDERS
 
 
 def kind_of(provider: str) -> str:
