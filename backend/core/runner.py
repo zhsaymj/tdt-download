@@ -34,7 +34,7 @@ from .logs import logger
 from .metadata import write_metadata
 from .mosaic import mosaic_to_geotiff
 from .osm import export_osm
-from .postprocess import clip_to_geometry, reproject_geotiff
+from .postprocess import clip_to_geometry, crop_to_bbox, reproject_geotiff
 from .progress import StageTracker
 from .queue import task_queue
 from .terrain_tiles import export_terrain, level_for_resolution, write_layer_json
@@ -187,6 +187,10 @@ async def run_task(task_id: str, emit) -> None:
         tracker=tracker, should_stop=should_stop, cur_stage="",
         # 延后到全部阶段结束后再做的容器转换(见 _stage_geotiff 的说明)
         deferred_convert=[],
+        # DEM 的裁切是"裁到选区外接矩形"(窗口裁剪、缩小尺寸),与影像按几何遮罩
+        # 裁边界是两回事:DEM 成果按瓦片区间出图,边界是瓦片网格边界,低层级能超出
+        # 选区数倍。环形/飞地这类复杂几何对高程没有意义,故只用外接矩形。
+        clip_bbox=bool(task.get("clip")) and is_dem,
     )
 
     # 阶段 key → 执行器。按数据类型组装(取代原先的 if is_dem 二选一):
@@ -311,6 +315,23 @@ def _check_stop(ctx):
         raise _Stopped()
 
 
+def _clip_geom_of(ctx):
+    """取裁切用几何:有 geometry 用它,否则(DEM 的矩形选区)用 bbox 造矩形环。
+
+    瓦片必须对齐网格、不能像整幅图那样裁掉多余像素,故只能靠 alpha 遮罩把选区外
+    设为透明——遮罩需要一个几何。DEM 任务前端不送 geometry(只裁到外接矩形),
+    这里补上,让瓦片切片器与影像走同一条路。
+    """
+    task = ctx.task
+    if not task.get("clip"):
+        return None
+    if ctx.geom:
+        return ctx.geom
+    w, s, e, n = ctx.bbox
+    return {"type": "Polygon",
+            "coordinates": [[[w, s], [e, s], [e, n], [w, n], [w, s]]]}
+
+
 # ============ 影像管线阶段 ============
 
 def _stage_geotiff(ctx) -> list[str]:
@@ -423,7 +444,7 @@ def _stage_tms(ctx) -> list[str]:
     """
     task = ctx.task
     anno_path_fn = ctx.anno_downloader.tile_path if ctx.anno_downloader is not None else None
-    clip_geom = ctx.geom if (task.get("clip") and ctx.geom) else None
+    clip_geom = _clip_geom_of(ctx)
     levels = ctx.levels
     ctx.tracker.start("tms", total=1, message="切 TMS 瓦片")
     tms_dir = ctx.out_dir / "tms"
@@ -504,7 +525,7 @@ def _stage_osm(ctx) -> list[str]:
     """
     task = ctx.task
     anno_path_fn = ctx.anno_downloader.tile_path if ctx.anno_downloader is not None else None
-    clip_geom = ctx.geom if (task.get("clip") and ctx.geom) else None
+    clip_geom = _clip_geom_of(ctx)
     z_max = max(ctx.levels)
     osm_levels = list(range(min(OSM_MIN_LEVEL, z_max), z_max + 1))
     # 进度直接用真实瓦片数上报(切片阶段),不再用 0-1000 虚拟刻度——虚拟刻度让
@@ -696,13 +717,20 @@ def _stage_dem(ctx) -> list[str]:
 
         dem_tif = ctx.out_dir / f"{task['name']}_dem_z{z}.tif"
         mosaic_dem_geotiff(tr, dem_tif, ctx.downloader.tile_path, on_row=on_row)
+        # 裁剪放在晕渲**之后**:hillshade 用 3x3 邻域算坡度,先裁会让新边缘那一圈
+        # 少了外侧邻居、坡度失真(表现为成果四周一道亮/暗边)。故先用完整数据出
+        # 晕渲,再分别把两份成果裁到选区。
         if want_hillshade:
             hs_tif = ctx.out_dir / f"{task['name']}_hillshade_z{z}.tif"
             hillshade_from_dem(dem_tif, hs_tif, azimuth=az, altitude=alt, z_factor=zf)
+            if ctx.clip_bbox:
+                crop_to_bbox(hs_tif, ctx.bbox)
             if ctx.target_crs and ctx.target_crs not in ("EPSG:3857",):
                 reproject_geotiff(hs_tif, ctx.target_crs)
             outputs.append(str(hs_tif))
         if want_geotiff:
+            if ctx.clip_bbox:
+                crop_to_bbox(dem_tif, ctx.bbox)
             if ctx.target_crs and ctx.target_crs not in ("EPSG:3857",):
                 reproject_geotiff(dem_tif, ctx.target_crs)
             outputs.append(str(dem_tif))
@@ -753,8 +781,13 @@ def _stage_contour(ctx) -> list[str]:
                            build_overviews=False, on_row=on_row)
         # 等高线成果统一 WGS84(与其余矢量成果一致,前端可直读)
         reproject_geotiff(tmp_dem, "EPSG:4326")
+        # 裁源而不是裁线:等高线是闭合环,裁线段会切出一堆断头线且要重新闭合;
+        # 先把源裁到选区,提取出来的线自然不出界。
+        if ctx.clip_bbox:
+            crop_to_bbox(tmp_dem, ctx.bbox)
         src = tmp_dem
     else:
+        # 复用 dem 阶段成果。它已按 clip_bbox 裁过(同一任务同一设置),故这里不再裁。
         src = dem_tif
         ctx.tracker.update("contour", message="复用已合并高程图")
 

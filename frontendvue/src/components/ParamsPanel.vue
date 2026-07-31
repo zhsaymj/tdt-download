@@ -90,6 +90,9 @@ const demForm = reactive({
   containers: {},
   contourInterval: 50,
   keepTilesDir: true,
+  // 裁到选区外接矩形。DEM 不按环形/飞地等复杂几何裁——高程成果按矩形网格组织,
+  // 复杂边界没有意义,外接矩形足够。
+  clip: false,
 })
 
 /** 该表单是否有瓦片阶段选了 MBTiles(决定是否显示「保留瓦片目录」开关) */
@@ -555,11 +558,13 @@ function demPayload() {
     export: demForm.export.join(','),
     crs: demForm.crs,
     geometry: drawStore.geometry || null,
-    clip: false,
     annotate: false,
     containers: { ...demForm.containers },
     contour_interval: Number(demForm.contourInterval) || 50,
     keep_tiles_dir: !!demForm.keepTilesDir,
+    // DEM 只裁到外接矩形,不送 geometry(后端按 bbox 处理:整幅图窗口裁剪、
+    // 瓦片按 bbox 矩形环做 alpha 遮罩)
+    clip: !!(demForm.clip && drawStore.hasRange),
   }
 }
 
@@ -802,6 +807,11 @@ async function submit() {
           </t-form-item>
           <t-form-item label-width="0">
             <div class="dem-note">Esri Terrain3D 真实高程(EPSG:3857,LERC 解码为米值)。GeoTIFF 可在 QGIS 出等高线/坡度。Cesium 地形切片输出 WGS84 geodetic quantized-mesh-1.0(未压缩·无法线),供 CesiumJS CesiumTerrainProvider 加载。最高级别随范围而定(超出部分无数据,已置灰),中国多数区域约 13-15 级。</div>
+          </t-form-item>
+          <t-form-item v-if="drawStore.hasRange" label-width="0">
+            <t-checkbox v-model="demForm.clip">裁剪成果到选区范围</t-checkbox>
+            <InfoTip content="高程成果按瓦片区间拼接,边界是瓦片网格边界而非你画的范围——级别越低超出越多(实测 12 级时东边可多出 0.087°,比一个 0.071° 的选区还宽)。勾选后高程图与晕渲图裁到选区外接矩形,等高线不出界,瓦片则把范围外设为透明。DEM 只按外接矩形裁,不按环形/飞地等复杂边界(高程成果是矩形网格,复杂边界没有意义)。"
+              max-width="400px" />
           </t-form-item>
           <t-form-item label="输出坐标系(高程 GeoTIFF)" label-align="top">
             <t-select v-model="demForm.crs" :options="crsOpts" filterable />
