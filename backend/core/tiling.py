@@ -130,6 +130,87 @@ AVG_TILE_BYTES = {
 DEFAULT_TILE_BYTES = 15 * 1024
 
 
+#: 建议级别时的瓦片数软上限。约 5000 张 ≈ 天地图影像 250 MB、十几分钟下载,
+#: 是"一次能接受的任务量"的量级。超过它就该缩小范围或降低最高级别,而不是硬下。
+SUGGEST_TILE_BUDGET = 5000
+
+
+def suggest_levels(
+    bbox: tuple[float, float, float, float],
+    z_max_cap: int = 18,
+    z_min_cap: int = 1,
+    min_useful_ratio: float = 0.25,
+    tile_budget: int = SUGGEST_TILE_BUDGET,
+    depth: int = 4,
+) -> dict:
+    """按选区大小建议该下载哪些级别。
+
+    两个判据合起来用,缺一个都会给出坏建议:
+
+    1) **有效数据占比** = 选区面积 / 该级瓦片区间实际覆盖面积。瓦片是固定网格,
+       级别越低单张跨度越大,一张能盖住远超选区的范围——实测 0.07° 的选区在天地图
+       第 7 级只有 0.1% 有效占比(那张瓦片覆盖整个市域),下了也只是得到一张几乎
+       全是选区外内容的图。低于阈值的级别标 useful=False。
+
+    2) **下载量预算**。只看占比会永远推最高几级:省域选区的 15-18 级有效占比都
+       超过 96%,但合计 1762 万张瓦片——这是最坏的建议。故从满足占比的级别里由高
+       到低累加瓦片数,超预算就停,保证 recommended 的总量落在可接受范围内。
+
+    极端情况:选区极小时可能没有任何级别达占比阈值(0.007° 的小区到 18 级才 72%),
+    此时退回取最高几级——它们仍是最贴合的,且瓦片数很少。
+
+    返回 {levels:[{z,tiles,ratio,useful}], recommended, min_useful, max_useful,
+          recommended_tiles, budget_limited}。
+    """
+    w, s, e, n = bbox
+    sel_area = max((e - w) * (n - s), 1e-12)
+    rows = []
+    for z in range(z_min_cap, z_max_cap + 1):
+        tr = range_for_bbox(w, s, e, n, z)
+        bw, bs, be, bn = tr.mosaic_bounds()
+        cov = max((be - bw) * (bn - bs), 1e-12)
+        ratio = min(sel_area / cov, 1.0)
+        rows.append({"z": z, "tiles": tr.count, "ratio": round(ratio, 4),
+                     "useful": ratio >= min_useful_ratio})
+
+    tiles_of = {r["z"]: r["tiles"] for r in rows}
+    useful = [r["z"] for r in rows if r["useful"]]
+    pool = useful or [r["z"] for r in rows]
+
+    # 先定"最高可行级别":单是这一级就超预算的话,再往上都没意义(瓦片数按 4 倍
+    # 递增)。大范围选区靠这一步把顶降下来——省域选区的 18 级有 1300 万张,
+    # 保底也不该建议它,否则建议本身成了最坏方案。
+    top = pool[0]
+    for z in pool:
+        if tiles_of[z] <= tile_budget:
+            top = z
+        else:
+            break
+    budget_limited = top < pool[-1]
+
+    # 再从 top 往低走累加,凑够 depth 层或用完预算
+    picked: list[int] = []
+    total = 0
+    for z in range(top, pool[0] - 1, -1):
+        if z not in tiles_of:
+            break
+        t = tiles_of[z]
+        if picked and (total + t > tile_budget or len(picked) >= depth):
+            break
+        picked.append(z)
+        total += t
+    picked.reverse()
+
+    return {
+        "levels": rows,
+        "recommended": picked,
+        "recommended_tiles": total,
+        "budget_limited": budget_limited,
+        "max_useful": useful[-1] if useful else z_max_cap,
+        "min_useful": useful[0] if useful else picked[0],
+    }
+
+
 def estimate_levels_detail(
     bbox: tuple[float, float, float, float],
     levels: list[int],

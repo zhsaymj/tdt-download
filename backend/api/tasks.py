@@ -84,6 +84,27 @@ async def api_estimate(west: float, south: float, east: float, north: float,
     return {"total": detail["total_tiles"], **detail}
 
 
+@router.get("/suggest_levels")
+async def api_suggest_levels(west: float, south: float, east: float, north: float,
+                            provider: str = "tianditu_img"):
+    """按选区大小建议下载级别,并给出各级的"有效数据占比"。
+
+    用途:瓦片是固定网格,低级别单张就能盖住远超选区的范围(实测 0.07° 的选区在
+    天地图第 7 级只有 0.1% 有效占比)。全选 1-18 会下一堆几乎全是选区外内容的图。
+    """
+    from ..core.tiling import suggest_levels
+
+    dem = is_dem_provider(provider)
+    if dem:
+        # DEM 是墨卡托 XYZ 网格,列行数与 4326 不同,不能用同一套换算
+        from ..core.dem_tiling import suggest_dem_levels
+        return await asyncio.to_thread(
+            suggest_dem_levels, (west, south, east, north),
+            DEM_LAYERS[provider][2])
+    return await asyncio.to_thread(
+        suggest_levels, (west, south, east, north), 18, 1)
+
+
 @router.get("/dem_max_level")
 async def api_dem_max_level(west: float, south: float, east: float, north: float,
                             provider: str = "esri_terrain"):

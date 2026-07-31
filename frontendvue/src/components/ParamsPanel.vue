@@ -484,8 +484,66 @@ async function estimateFor(provider, levels, target) {
 function refreshImgEstimate() { estimateFor(imgForm.provider, IMG_LEVELS, imgPerLevel) }
 function refreshDemEstimate() { estimateFor(demForm.provider, DEM_LEVELS, demPerLevel) }
 
-watch(() => [drawStore.bbox, imgForm.provider], refreshImgEstimate, { deep: true })
-watch(() => drawStore.bbox, () => { refreshDemEstimate(); probeDemMaxLevel() }, { deep: true })
+// ---- 按选区建议级别 ----
+// 低级别瓦片单张就能盖住远超选区的范围(0.07° 的选区在 18 级瓦片有效占比 96%,
+// 但在 7 级只有 0.1%)。这里把后端算的有效占比与建议级别拿来提示用户。
+const imgSuggest = ref(null)
+const demSuggest = ref(null)
+
+async function suggestFor(provider, target) {
+  const b = drawStore.bbox
+  if (!b) { target.value = null; return }
+  try {
+    target.value = await api.suggestLevels({
+      west: b[0], south: b[1], east: b[2], north: b[3], provider,
+    })
+  } catch (_) { target.value = null }
+}
+
+/** 某级别的有效数据占比(0-1);拿不到建议数据时返回 null */
+function ratioOf(sug, z) {
+  const row = sug?.levels?.find((r) => r.z === z)
+  return row ? row.ratio : null
+}
+/** 有效占比过低的级别:提示用「多余」,但不禁用——用户可能确实要金字塔底层 */
+function lowRatio(sug, z) {
+  const r = ratioOf(sug, z)
+  return r != null && r < 0.25
+}
+function applySuggest(form, sug) {
+  if (sug?.recommended?.length) form.levels = [...sug.recommended]
+}
+function suggestHint(sug) {
+  if (!sug) return ''
+  const parts = [
+    '瓦片是固定网格,级别越低单张覆盖范围越大——标「多余」的级别里,'
+    + '落在选区内的内容不足 25%,下载它们主要是在下选区外的数据。',
+    `该选区真正有内容的级别是 ${sug.min_useful}–${sug.max_useful}。`,
+  ]
+  if (sug.budget_limited) {
+    parts.push('注意:更高级别的瓦片数已超出单次任务的合理量,建议缩小范围后再下,'
+      + '或分片多次下载。')
+  }
+  parts.push(`按建议选择约 ${sug.recommended_tiles} 张瓦片。`)
+  return parts.join('')
+}
+
+function refreshImgSuggest() { suggestFor(imgForm.provider, imgSuggest) }
+function refreshDemSuggest() { suggestFor(demForm.provider, demSuggest) }
+
+// DEM 的建议还要剔掉探测出的无数据级别:suggest 只按几何算,不知道该范围
+// 实际有没有高程数据(Esri Terrain3D 各地最高级别不同,超出的已置灰)。
+const demSuggestable = computed(() => {
+  const rec = demSuggest.value?.recommended || []
+  return rec.filter((z) => !demLevelDisabled(z))
+})
+
+watch(() => [drawStore.bbox, imgForm.provider], () => {
+  refreshImgEstimate(); refreshImgSuggest()
+}, { deep: true })
+watch(() => drawStore.bbox, () => {
+  refreshDemEstimate(); probeDemMaxLevel(); refreshDemSuggest()
+}, { deep: true })
 
 // 影像数据类型切换时,中间地图底图同步切换
 watch(() => imgForm.provider, (p) => { mapController.value?.setOverlayByProvider(p) })
@@ -704,14 +762,22 @@ async function submit() {
                     @change="(e) => imgToggleAll(e.target.checked)" />
                   <span class="lv-z">全选</span>
                 </label>
+                <span v-if="imgSuggest?.recommended?.length" class="lv-suggest">
+                  建议 {{ imgSuggest.recommended.join('、') }} 级
+                  <a class="lv-apply" @click.prevent="applySuggest(imgForm, imgSuggest)">按建议选择</a>
+                  <InfoTip :content="suggestHint(imgSuggest)" max-width="400px" />
+                </span>
               </div>
               <div class="lv-scroll">
                 <div class="lv-group">
-                  <label v-for="z in IMG_LEVELS" :key="z" class="lv nlv">
+                  <label v-for="z in IMG_LEVELS" :key="z" class="lv nlv"
+                    :class="{ low: lowRatio(imgSuggest, z) }">
                     <input type="checkbox" :checked="isLevelChecked(imgForm, z)"
                       @change="(e) => toggleLevel(imgForm, z, e.target.checked)" />
                     <span class="lv-z">{{ z }}</span>
                     <span v-if="levelSizeOf(imgPerLevel, z)" class="lv-size">{{ levelSizeOf(imgPerLevel, z) }}</span>
+                    <span v-if="lowRatio(imgSuggest, z)" class="lv-low"
+                      :title="`该级瓦片只有 ${(ratioOf(imgSuggest, z) * 100).toFixed(1)}% 的内容落在选区内`">多余</span>
                   </label>
                 </div>
               </div>
@@ -770,17 +836,24 @@ async function submit() {
                 </label>
                 <span v-if="probing" class="lv-probe">探测最高级别中…</span>
                 <span v-else-if="demMaxLevel != null" class="lv-probe ok">该范围最高 {{ demMaxLevel }} 级</span>
+                <span v-if="demSuggestable?.length" class="lv-suggest">
+                  建议 {{ demSuggestable.join('、') }} 级
+                  <a class="lv-apply" @click.prevent="demForm.levels = [...demSuggestable]">按建议选择</a>
+                  <InfoTip :content="suggestHint(demSuggest)" max-width="400px" />
+                </span>
               </div>
               <div class="lv-scroll">
                 <div class="lv-group">
                   <label v-for="z in DEM_LEVELS" :key="z" class="lv nlv"
-                    :class="{ disabled: demLevelDisabled(z) }">
+                    :class="{ disabled: demLevelDisabled(z), low: !demLevelDisabled(z) && lowRatio(demSuggest, z) }">
                     <input type="checkbox" :checked="isLevelChecked(demForm, z)"
                       :disabled="demLevelDisabled(z)"
                       @change="(e) => toggleLevel(demForm, z, e.target.checked)" />
                     <span class="lv-z">{{ z }}</span>
                     <span v-if="demLevelDisabled(z)" class="lv-size lv-nodata">无数据</span>
                     <span v-else-if="levelSizeOf(demPerLevel, z)" class="lv-size">{{ levelSizeOf(demPerLevel, z) }}</span>
+                    <span v-if="!demLevelDisabled(z) && lowRatio(demSuggest, z)" class="lv-low"
+                      :title="`该级瓦片只有 ${(ratioOf(demSuggest, z) * 100).toFixed(1)}% 的内容落在选区内`">多余</span>
                   </label>
                 </div>
               </div>
@@ -1075,10 +1148,18 @@ async function submit() {
 .nlv input { cursor: pointer; margin: 0; }
 .nlv.disabled { cursor: not-allowed; color: #cbd5e1; }
 .nlv.disabled input { cursor: not-allowed; }
+/* 有效数据占比过低的级别:只淡化提示,不禁用——用户可能确实要金字塔底层 */
+.nlv.low { color: #94a3b8; }
+.lv-low { font-size: 11px; color: #d97706; }
+.lv-suggest { font-size: 11px; color: #0369a1; margin-left: auto;
+  display: inline-flex; align-items: center; gap: 4px; }
+.lv-apply { color: #0284c7; cursor: pointer; text-decoration: underline; }
+.lv-apply:hover { color: #0369a1; }
 .lv-z { min-width: 18px; font-weight: 600; }
 .lv-size { font-size: 11px; color: #94a3b8; }
 .lv-nodata { color: #cbd5e1; font-style: italic; }
-.lv-probe { font-size: 11px; color: #94a3b8; margin-left: auto; }
+/* probe 与 suggest 同行时:probe 紧跟「全选」,suggest 靠右(下面有 margin-left:auto) */
+.lv-probe { font-size: 11px; color: #94a3b8; }
 .lv-probe.ok { color: #0369a1; }
 .dem-note { font-size: 11px; color: #0369a1; line-height: 1.6;
   background: #f0f9ff; border: 1px solid #e0f2fe; border-radius: 6px; padding: 6px 8px; }

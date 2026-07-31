@@ -18,6 +18,9 @@ export const api = {
   listTasks: () => req('/api/tasks'),
   estimate: ({ west, south, east, north, levels, provider }) =>
     req(`/api/tasks/estimate?west=${west}&south=${south}&east=${east}&north=${north}&levels=${levels}&provider=${provider || 'tianditu_img'}`),
+  // 按选区大小建议下载级别 + 各级的有效数据占比
+  suggestLevels: ({ west, south, east, north, provider }) =>
+    req(`/api/tasks/suggest_levels?west=${west}&south=${south}&east=${east}&north=${north}&provider=${provider || 'tianditu_img'}`),
   demMaxLevel: ({ west, south, east, north, provider }) =>
     req(`/api/tasks/dem_max_level?west=${west}&south=${south}&east=${east}&north=${north}&provider=${provider || 'esri_terrain'}`),
   createTask: (payload) =>
