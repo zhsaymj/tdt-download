@@ -6,6 +6,7 @@ import { mapController } from '../composables/mapController'
 import { fmtEta, fmtSize } from '../utils/format'
 import { isBuildingProvider } from '../utils/provider'
 import RedownloadDialog from './RedownloadDialog.vue'
+import AddExportDialog from './AddExportDialog.vue'
 
 const taskStore = useTaskStore()
 
@@ -15,6 +16,18 @@ const redownloadTask = ref(null)
 function openRedownload(t) {
   redownloadTask.value = t
   redownloadVisible.value = true
+}
+
+// 补充导出格式弹窗:往原任务追加新阶段,复用已有中间成果、不重新下载。
+// 三维建筑的阶段是固定管线(取数→建模→切片),没有"可选格式"的概念,故不提供。
+const addExportVisible = ref(false)
+const addExportTask = ref(null)
+function canAddExport(t) {
+  return ['done', 'failed'].includes(t.status) && !isBuildingProvider(t.provider)
+}
+function openAddExport(t) {
+  addExportTask.value = t
+  addExportVisible.value = true
 }
 
 onMounted(async () => {
@@ -192,6 +205,9 @@ async function doDelete(id, purge) {
             size="small" variant="outline" @click="onPause(t.id)">暂停</t-button>
           <t-button v-if="['paused','failed','canceled'].includes(t.status)"
             size="small" variant="outline" theme="primary" @click="onResume(t.id)">开始</t-button>
+          <t-button v-if="canAddExport(t)"
+            size="small" variant="outline" theme="primary"
+            @click="openAddExport(t)">补充格式</t-button>
           <t-button v-if="['done','failed','canceled','paused'].includes(t.status)"
             size="small" variant="outline" @click="openRedownload(t)">重新下载</t-button>
           <t-button size="small" variant="outline" theme="danger" @click="onDelete(t)">删除</t-button>
@@ -201,6 +217,7 @@ async function doDelete(id, purge) {
     </div>
 
     <RedownloadDialog v-model:visible="redownloadVisible" :task="redownloadTask" />
+    <AddExportDialog v-model:visible="addExportVisible" :task="addExportTask" />
   </div>
 </template>
 

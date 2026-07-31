@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 
 from ..config import settings
 from ..core.dem_tiling import estimate_dem_tiles, mercator_range_for_bbox
@@ -632,6 +633,124 @@ async def api_resume_task(task_id: str):
                 stages=json.dumps(stages))
     await task_queue.enqueue(task_id)
     return {"id": task_id, "status": "pending"}
+
+
+class AddExportReq(BaseModel):
+    """给已完成任务补充导出格式。"""
+    export: str = Field(..., description="要新增的格式,逗号分隔(如 osm,contour)")
+    containers: dict[str, str] = Field(default_factory=dict)
+    contour_interval: float = Field(default=0.0, gt=-1.0, le=10000.0)
+    keep_tiles_dir: bool | None = Field(default=None)
+
+
+@router.post("/{task_id}/add_export")
+async def api_add_export(task_id: str, data: AddExportReq):
+    """给已完成的任务补充新的导出格式,复用已有中间成果。
+
+    为什么需要这个:此前想给已完成任务补一个格式,只能新建任务重下一遍——大范围
+    影像可能是几十分钟。而下载的瓦片缓存与合并好的 GeoTIFF 都还在,新格式所需的
+    上游数据其实已经具备,只是没有入口把新阶段接进已有任务。
+
+    与 stage/retry 的区别:retry 只能重跑**已存在**的阶段;这里是往 stages 里
+    **追加**新阶段。已完成的旧阶段保持 done,runner 会跳过它们、只跑新增的。
+    """
+    from ..core.formats import (ALL_FORMAT_NAMES, STAGES, is_local_source,
+                                validate)
+
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    if task["status"] not in ("done", "failed"):
+        raise HTTPException(
+            400, f"只有已完成或部分失败的任务才能补充导出(当前 {task['status']})")
+    if is_building_provider(task["provider"]):
+        raise HTTPException(
+            400, "三维建筑任务的阶段是固定管线,不支持补充导出;"
+                 "如需其他矢量格式请用「本地文件」功能转换已产出的建筑轮廓")
+
+    provider = task["provider"]
+    # 不能直接用 parse_export:它会把非法值过滤掉并回落成 geotiff,导致
+    # "加 terrain 给影像任务"和"传空字符串"都变成"加 geotiff",报错文案就成了
+    # 误导性的"已经导出过"。故先按原样切分,逐个校验。
+    raw = [p.strip().lower() for p in
+           (data.export or "").replace("+", ",").split(",") if p.strip()]
+    if not raw:
+        raise HTTPException(400, "未指定要新增的导出格式")
+
+    want, unknown, unsupported = [], [], []
+    for fmt in raw:
+        key = stage_key_for_fmt(provider, fmt)
+        if key is None:
+            # 该 kind 的映射表里没有:要么格式名拼错,要么该数据源不支持
+            (unknown if fmt not in ALL_FORMAT_NAMES else unsupported).append(fmt)
+            continue
+        want.append(fmt)
+    if unknown:
+        raise HTTPException(400, "未知的导出格式:" + "、".join(unknown))
+    if unsupported:
+        raise HTTPException(
+            400, "该数据源不支持这些格式:" + "、".join(unsupported))
+
+    # 容器合法性(阶段与容器的搭配)由注册表统一校验
+    errs = validate(provider,
+                    [stage_key_for_fmt(provider, f) for f in want],
+                    data.containers or None)
+    if errs:
+        raise HTTPException(400, "；".join(errs))
+
+    # 合并格式:旧的保留(它们的成果还在),新的追加
+    old_fmts = parse_export(task.get("export", "geotiff"))
+    merged = list(dict.fromkeys([*old_fmts, *want]))
+
+    # 容器选择合并。注意不能改旧阶段已用的容器——那些成果已经按旧容器写出,
+    # 改了只会让 metadata 与磁盘上的文件对不上。
+    containers = dict(task.get("containers") or {})
+    old_stage_keys = {s["key"] for s in (task.get("stages") or [])}
+    for k, v in (data.containers or {}).items():
+        if k in old_stage_keys:
+            continue
+        containers[k] = v
+
+    interval = (data.contour_interval if data.contour_interval > 0
+                else float(task.get("contour_interval") or 50.0))
+    keep_dir = (task.get("keep_tiles_dir", True)
+                if data.keep_tiles_dir is None else data.keep_tiles_dir)
+
+    # 按合并后的格式重算阶段表:已有阶段沿用其状态(done 的会被 runner 跳过),
+    # 新阶段为 pending。顺序由注册表的 order 决定,不受追加顺序影响。
+    fresh = build_stage_defs(provider, merged, task.get("annotate", False),
+                            task.get("base_height_mode") or "terrain")
+    old_by_key = {s["key"]: s for s in (task.get("stages") or [])}
+    stages = []
+    added = []
+    for s in fresh:
+        prev = old_by_key.get(s["key"])
+        if prev is not None:
+            stages.append(prev)          # 保留原状态与进度
+        else:
+            stages.append(s)
+            added.append(s["key"])
+    if not added:
+        raise HTTPException(400, "这些格式该任务已经导出过,无需补充")
+
+    task_queue.clear_control(task_id)
+    update_task(task_id, status="pending",
+                message="补充导出:" + "、".join(
+                    STAGES[k].label if k in STAGES else k for k in added),
+                export=",".join(merged),
+                containers=json.dumps(containers, ensure_ascii=False),
+                contour_interval=interval,
+                keep_tiles_dir=1 if keep_dir else 0,
+                stages=json.dumps(stages))
+    await task_queue.enqueue(task_id)
+    return {"id": task_id, "status": "pending", "added": added,
+            "export": ",".join(merged)}
+
+
+def stage_key_for_fmt(provider: str, fmt: str) -> str | None:
+    """格式名 → 阶段 key(按该 provider 的数据类型解析)。"""
+    from ..core.formats import kind_of, stage_key_for_format
+    return stage_key_for_format(kind_of(provider), fmt)
 
 
 @router.post("/{task_id}/stage/{stage_key}/retry")

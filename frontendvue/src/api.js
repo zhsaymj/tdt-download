@@ -65,6 +65,12 @@ export const api = {
   resumeTask: (id) => req(`/api/tasks/${id}/resume`, { method: 'POST' }),
   retryStage: (id, key, purge = false) =>
     req(`/api/tasks/${id}/stage/${key}/retry?purge=${purge}`, { method: 'POST' }),
+  // 给已完成任务补充导出格式(复用已有瓦片缓存与合并成果,不重新下载)
+  addExport: (id, payload) =>
+    req(`/api/tasks/${id}/add_export`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
   taskSize: (id) => req(`/api/tasks/${id}/size`),
   deleteTask: (id, purge) => req(`/api/tasks/${id}?purge=${purge}`, { method: 'DELETE' }),
 
