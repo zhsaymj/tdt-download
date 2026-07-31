@@ -74,7 +74,11 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["tkinter", "matplotlib", "pytest"],
+    # tkinter 不能排除:本地数据入库要用它弹系统文件对话框选文件
+    # (本机自用,前后端同机,故由后端弹框拿真实路径,不做上传。见
+    #  core/file_dialog.py)。排除掉的话该功能在打包版直接失效,
+    #  而开发环境完全正常——这类问题只能靠打包后实测发现。
+    excludes=["matplotlib", "pytest"],
     noarchive=False,
 )
 

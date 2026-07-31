@@ -91,11 +91,16 @@ def build_stage_defs(provider: str, formats: list[str], annotate: bool = False,
     把注册表返回的阶段包装成落库用的 dict。annotate 不影响阶段构成(注记是在
     download/切片阶段内部烘焙的),保留参数仅为兼容调用方签名。
     """
-    from .core.formats import (DataKind, kind_of, plan_stages, stage_label)
+    from .core.formats import (DataKind, is_local_source, kind_of,
+                               plan_stages, stage_label)
 
     stages: list[dict] = []
-    # 三维建筑管线的数据是矢量要素集,没有瓦片行列号,因此没有 download 阶段
-    if kind_of(provider) != DataKind.VECTOR_POLYGON:
+    # 没有 download 阶段的两种情形:
+    #   建筑管线——数据是矢量要素集,没有瓦片行列号
+    #   本地文件源——数据已在用户磁盘上,不需要下载
+    no_download = (kind_of(provider) == DataKind.VECTOR_POLYGON
+                   or is_local_source(provider))
+    if not no_download:
         stages.append(_new_stage("download", STAGE_LABELS["download"]))
     for s in plan_stages(provider, formats, base_height_mode):
         # dem 阶段的标签随"高程/晕渲"勾选动态变化,故不能直接用 s.label
@@ -188,6 +193,9 @@ class TaskCreate(BaseModel):
     keep_tiles_dir: bool = Field(
         default=True,
         description="打包 MBTiles 后是否同时保留散列瓦片目录(默认保留,磁盘占用翻倍)")
+    source_path: str = Field(
+        default="",
+        description="本地文件输入源的绝对路径(provider 为 local_image/local_dem 时必填)")
 
     def level_list(self) -> list[int]:
         """归一化出去重升序的级别列表:优先 levels,回退 z_min..z_max。
@@ -239,10 +247,10 @@ def create_task(data: TaskCreate, total: int, est_bytes: int = 0) -> str:
                 building_count,
                 upload_id, height_field, height_mode, height_scale,
                 floor_height, name_field, keep_fields, dem_upload_id,
-                containers, contour_interval, keep_tiles_dir,
+                containers, contour_interval, keep_tiles_dir, source_path,
                 created_at, updated_at)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-                       ?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       ?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 task_id, data.name, data.provider, json.dumps(data.bbox),
                 z_min, z_max, data.export,
@@ -264,6 +272,7 @@ def create_task(data: TaskCreate, total: int, est_bytes: int = 0) -> str:
                            ensure_ascii=False),
                 float(data.contour_interval or 50.0),
                 1 if data.keep_tiles_dir else 0,
+                (data.source_path or "").strip(),
                 now, now,
             ),
         )
@@ -364,6 +373,7 @@ def _row_to_dict(row) -> dict:
     # 旧任务缺列时 get 返回 None → 回落 True(保留目录,与新默认一致)
     kt = d.get("keep_tiles_dir")
     d["keep_tiles_dir"] = True if kt is None else bool(kt)
+    d["source_path"] = d.get("source_path") or ""
     # 阶段化进度:优先存储的 stages;旧任务(空)按 export/status 合成兼容视图
     st = d.get("stages")
     stages = json.loads(st) if st else []

@@ -18,6 +18,32 @@ export const api = {
   listTasks: () => req('/api/tasks'),
   estimate: ({ west, south, east, north, levels, provider }) =>
     req(`/api/tasks/estimate?west=${west}&south=${south}&east=${east}&north=${north}&levels=${levels}&provider=${provider || 'tianditu_img'}`),
+  // ---- 本地文件作输入源(仅本机可用:后端会校验请求来自 127.0.0.1)----
+  localDialogAvailable: () => req('/api/local/dialog_available'),
+  // 弹系统文件对话框选文件,返回真实路径(浏览器拿不到路径,故由后端弹框)
+  localPick: (payload) =>
+    req('/api/local/pick', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload || {}),
+    }),
+  // 检查本地栅格:元信息 + 判定出的数据类型 + 可用导出格式
+  localInspect: (path) =>
+    req('/api/local/inspect', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    }),
+  // 检查本地矢量:几何类型、要素数、可转的容器格式
+  localInspectVector: (path) =>
+    req('/api/local/inspect_vector', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    }),
+  // 矢量容器转换(单步完成,不进任务队列)
+  localConvertVector: (payload) =>
+    req('/api/local/convert_vector', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
   // 按选区大小建议下载级别 + 各级的有效数据占比
   suggestLevels: ({ west, south, east, north, provider }) =>
     req(`/api/tasks/suggest_levels?west=${west}&south=${south}&east=${east}&north=${north}&provider=${provider || 'tianditu_img'}`),

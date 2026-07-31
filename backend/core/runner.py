@@ -21,15 +21,17 @@ from pathlib import Path
 from ..config import settings
 from ..models import get_task, parse_export, update_task
 from ..providers.buildings import is_building_provider
+from ..providers.local_file import LocalFileProvider
 from ..providers.terrain import build_terrain_provider, is_dem_provider
 from ..providers.tianditu import build_annotation_provider, build_provider
 from .containers import container_of, convert_raster
 from .contour import DEFAULT_INTERVAL, extract_contours, write_contours
 from .mbtiles import pack_mbtiles
 from .dem import hillshade_from_dem, mosaic_dem_geotiff
-from .dem_tiling import mercator_range_for_bbox
+from .dem_tiling import mercator_range_for_bbox, mosaic_bounds_3857
 from .downloader import TileDownloader
-from .formats import CONTAINERS, DataKind, STAGES, kind_of, resolve_outputs
+from .formats import (CONTAINERS, DataKind, STAGES, is_local_source, kind_of,
+                      resolve_outputs)
 from .logs import logger
 from .metadata import write_metadata
 from .mosaic import mosaic_to_geotiff
@@ -40,7 +42,7 @@ from .queue import task_queue
 from .terrain_tiles import export_terrain, level_for_resolution, write_layer_json
 from .token_pool import token_pool
 from .tms import export_tms, export_tms_from_source, write_tilemapresource
-from .tiling import range_for_bbox
+from .tiling import TILE_SIZE, range_for_bbox
 
 # OSM 金字塔起始下限:低于此级的超低层(单瓦片跨度巨大、小范围里基本全透明)
 # 不生成。实际最低级 = min(OSM_MIN_LEVEL, 最高级),且 export_osm 会跳过无数据瓦片。
@@ -78,13 +80,29 @@ async def run_task(task_id: str, emit) -> None:
         from .runner_buildings import run_buildings_task
         return await run_buildings_task(task_id, emit)
 
-    is_dem = is_dem_provider(task["provider"])
-    if is_dem:
+    # 本地文件源:不联网、不需要密钥,数据已在用户磁盘上
+    local_src = None
+    if is_local_source(task["provider"]):
+        local_src = Path(task.get("source_path") or "")
+        if not local_src.is_file():
+            msg = f"源文件不存在或已移动:{local_src}"
+            update_task(task_id, status="failed", message=msg)
+            emit({"type": "task", "id": task_id, "status": "failed", "message": msg})
+            logger.error("任务[%s] %s", task["name"], msg)
+            return
+
+    is_dem = is_dem_provider(task["provider"]) or task["provider"] == "local_dem"
+    if local_src is not None:
+        # 造一个轻量 provider:下游只用它取 ext / bands / key(写 tilemapresource
+        # 与 metadata),不做任何下载。这样 write_tilemapresource、_write_metadata
+        # 等无需到处判空。
+        provider = LocalFileProvider(task["provider"], local_src)
+    elif is_dem:
         provider = build_terrain_provider(task["provider"])
     else:
         token_src = token_pool.use_token if token_pool.has_any() else settings.tianditu.token
         provider = build_provider(task["provider"], token_src)
-    downloader = TileDownloader(
+    downloader = None if local_src is not None else TileDownloader(
         provider,
         cache_dir=settings.cache_dir,
         concurrency=settings.download.concurrency,
@@ -93,7 +111,9 @@ async def run_task(task_id: str, emit) -> None:
         use_cache=task.get("use_cache", True),
     )
 
-    annotate = task.get("annotate", False) and not is_dem
+    # 注记要联网下载同网格的注记瓦片,本地文件源没有这个概念
+    annotate = (task.get("annotate", False) and not is_dem
+                and local_src is None)
     anno_token_src = token_pool.use_token if token_pool.has_any() else settings.tianditu.token
     anno_provider = build_annotation_provider(task["provider"], anno_token_src) if annotate else None
     anno_downloader = TileDownloader(
@@ -116,7 +136,8 @@ async def run_task(task_id: str, emit) -> None:
     tracker = StageTracker(task_id, task.get("stages") or [], emit,
                            task_name=task.get("name") or task_id)
 
-    update_task(task_id, status="running", message="开始下载")
+    update_task(task_id, status="running",
+                message="开始处理" if local_src is not None else "开始下载")
     emit({"type": "task", "id": task_id, "status": "running"})
     pending = [s["key"] for s in tracker.stages if s["status"] not in ("done", "skipped")]
     logger.info("任务[%s]开始运行 provider=%s 级别=%s 格式=%s 待执行阶段=%s",
@@ -130,7 +151,10 @@ async def run_task(task_id: str, emit) -> None:
         return task_queue.control_of(task_id) in ("pause", "cancel")
 
     # ---------- 阶段 1:下载原始瓦片 ----------
-    if not tracker.is_done("download"):
+    # 本地文件源没有 download 阶段(见 models.build_stage_defs);is_done() 对
+    # 不存在的阶段返回 False,故要先确认该阶段确实在阶段表里,否则会误入下载分支。
+    has_download = any(s["key"] == "download" for s in tracker.stages)
+    if has_download and not tracker.is_done("download"):
         import time as _time
         downloaded = 0
         failed = 0
@@ -191,6 +215,9 @@ async def run_task(task_id: str, emit) -> None:
         # 裁边界是两回事:DEM 成果按瓦片区间出图,边界是瓦片网格边界,低层级能超出
         # 选区数倍。环形/飞地这类复杂几何对高程没有意义,故只用外接矩形。
         clip_bbox=bool(task.get("clip")) and is_dem,
+        # 本地文件输入源的原始路径(不下载,直接读用户磁盘上的文件)。
+        # 各阶段据此改走"读文件"而非"拼瓦片"的取源路径。
+        local_src=local_src,
     )
 
     # 阶段 key → 执行器。按数据类型组装(取代原先的 if is_dem 二选一):
@@ -253,14 +280,18 @@ async def run_task(task_id: str, emit) -> None:
 
     # ---------- 汇总任务终态 ----------
     logger.info("任务[%s] 全部阶段结束,%s", task["name"], "有阶段失败" if any_failed else "成功")
+    # 本地源没有下载计数,报"0 张成功"会让人以为出错了
+    is_local = local_src is not None
     if any_failed:
-        msg = f"部分完成:{downloaded} 张成功,{failed} 张失败(有导出阶段失败,可单独重试)"
+        msg = ("部分完成(有导出阶段失败,可单独重试)" if is_local else
+               f"部分完成:{downloaded} 张成功,{failed} 张失败(有导出阶段失败,可单独重试)")
         update_task(task_id, status="failed", message=msg,
                     output_path=str(out_dir), downloaded=downloaded, failed=failed)
         emit({"type": "task", "id": task_id, "status": "failed",
               "message": msg, "output_path": str(out_dir), "outputs": outputs})
     else:
-        msg = f"完成:{downloaded} 张成功,{failed} 张失败"
+        msg = ("处理完成" if is_local else
+               f"完成:{downloaded} 张成功,{failed} 张失败")
         update_task(task_id, status="done", message=msg,
                     output_path=str(out_dir), downloaded=downloaded, failed=failed)
         emit({"type": "task", "id": task_id, "status": "done",
@@ -334,6 +365,48 @@ def _clip_geom_of(ctx):
 
 # ============ 影像管线阶段 ============
 
+def _resample_to_level(ctx, src_path: Path, dst_path: Path, tr, on_row=None) -> Path:
+    """把本地栅格重采样成"该瓦片区间对齐"的 EPSG:4326 GeoTIFF。
+
+    为什么要对齐瓦片网格而不是直接拷源文件:下游 tms/osm 切片、以及"每级一张"的
+    成果约定都建立在"图的四至等于瓦片区间四至"之上(见 tms.export_tms_from_source
+    按 tile_bounds 反算窗口)。直接用源文件的四至,切片时边缘会错位半个瓦片。
+
+    重采样用 bilinear;源与目标坐标系不同时由 WarpedVRT 顺带完成重投影。
+    逐块写出并回调 on_row,大图不必整份进内存。
+    """
+    import rasterio
+    from rasterio.enums import Resampling
+    from rasterio.transform import from_bounds as _from_bounds
+    from rasterio.vrt import WarpedVRT
+    from rasterio.windows import Window
+
+    west, south, east, north = tr.mosaic_bounds()
+    width, height = tr.cols * TILE_SIZE, tr.rows * TILE_SIZE
+    transform = _from_bounds(west, south, east, north, width, height)
+
+    with rasterio.open(src_path) as src:
+        with WarpedVRT(src, crs="EPSG:4326", transform=transform,
+                       width=width, height=height,
+                       resampling=Resampling.bilinear) as vrt:
+            profile = vrt.profile.copy()
+            profile.update(driver="GTiff", tiled=True, blockxsize=256,
+                           blockysize=256, compress="deflate",
+                           BIGTIFF="IF_SAFER")
+            # 行块高度取一屏瓦片,既控制内存也让进度回调有合理粒度
+            step = TILE_SIZE
+            with rasterio.open(dst_path, "w", **profile) as dst:
+                total = max(1, (height + step - 1) // step)
+                for i, y0 in enumerate(range(0, height, step), start=1):
+                    _check_stop(ctx)
+                    h = min(step, height - y0)
+                    win = Window(0, y0, width, h)
+                    dst.write(vrt.read(window=win), window=win)
+                    if on_row:
+                        on_row(i, total)
+    return dst_path
+
+
 def _stage_geotiff(ctx) -> list[str]:
     """每个选中级别各合并导出一张 {任务名}_z{级别}.tif。
 
@@ -359,8 +432,14 @@ def _stage_geotiff(ctx) -> list[str]:
         # 主文件恒为 EPSG:4326(供 OSM/TMS 切片复用,不必再自拼源)。
         # 裁剪在 4326 下做(几何本身即 WGS84,直接匹配)。
         geotiff = ctx.out_dir / f"{task['name']}_z{z}.tif"
-        mosaic_to_geotiff(ctx.provider, settings.cache_dir, tr, geotiff,
-                          ctx.downloader.tile_path, anno_path_fn, on_row=on_row)
+        if ctx.local_src is not None:
+            # 本地源:没有瓦片可拼,直接由源文件重采样出该级别的图。
+            # 仍按级别出多张:用户可能要一套不同分辨率的成果,且下游 tms/osm
+            # 的复用逻辑也依赖"最高级那张"的存在。
+            _resample_to_level(ctx, ctx.local_src, geotiff, tr, on_row)
+        else:
+            mosaic_to_geotiff(ctx.provider, settings.cache_dir, tr, geotiff,
+                              ctx.downloader.tile_path, anno_path_fn, on_row=on_row)
 
         # 裁剪 + 需要 OSM 时:裁剪前把最高级那张未裁剪 4326 图留一份给 OSM 复用。
         # OSM 需未裁剪源(自带几何遮罩精确切边),裁过的源会在几何边缘产生暗边。
@@ -455,6 +534,11 @@ def _stage_tms(ctx) -> list[str]:
     if ctx.is_dem:
         return _tms_from_dem(ctx, tms_dir, clip_geom)
 
+    # 本地影像源同理:没有瓦片缓存可搬,改由源文件重采样切分。
+    # 源优先用 geotiff 阶段已产出的最高级图(它已对齐瓦片网格),否则直接用原文件。
+    if ctx.local_src is not None:
+        return _tms_from_source_file(ctx, tms_dir, clip_geom)
+
     def on_progress(done, total):
         ctx.tracker.update("tms", done=done, total=total,
                            message=f"已切 {done}/{total} 张")
@@ -495,6 +579,50 @@ def _maybe_mbtiles(ctx, stage_key: str, tiles_dir: Path, scheme: str,
     import shutil as _shutil
     _shutil.rmtree(tiles_dir, ignore_errors=True)
     return [str(packed)]
+
+
+def _local_raster_source(ctx) -> Path:
+    """本地源任务里,供切片使用的 4326 源图。
+
+    优先用 geotiff 阶段已产出的最高级图:它已重采样并对齐瓦片网格,切片时窗口
+    换算是整数、无边缘错位。该阶段未跑(用户只勾了瓦片)时才临时生成一张。
+    """
+    task = ctx.task
+    z_max = max(ctx.levels)
+    done = ctx.out_dir / f"{task['name']}_z{z_max}.tif"
+    if done.exists() and done.stat().st_size > 0:
+        return done
+    tmp = ctx.out_dir / f".local_src_z{z_max}.tif"
+    if tmp.exists() and tmp.stat().st_size > 0:
+        return tmp
+
+    def on_row(done_rows, total_r):
+        _check_stop(ctx)
+        ctx.tracker.update(ctx.cur_stage,
+                           message=f"准备切片源({done_rows}/{total_r})")
+
+    tr = range_for_bbox(*ctx.bbox, z_max)
+    _resample_to_level(ctx, ctx.local_src, tmp, tr, on_row)
+    return tmp
+
+
+def _tms_from_source_file(ctx, tms_dir: Path, clip_geom) -> list[str]:
+    """本地影像源出 TMS:由源图重采样切 geodetic 网格。"""
+    src = _local_raster_source(ctx)
+
+    def on_progress(done, total):
+        _check_stop(ctx)
+        ctx.tracker.update("tms", done=done, total=total,
+                           message=f"切 TMS 瓦片({done}/{total} 张)")
+
+    _, _, tms_ext, stopped = export_tms_from_source(
+        src, ctx.bbox, ctx.levels, tms_dir, clip_geom=clip_geom,
+        on_progress=on_progress, should_stop=ctx.should_stop)
+    if stopped:
+        raise _Stopped()
+    write_tilemapresource(tms_dir, ctx.provider, ctx.task["name"],
+                          ctx.bbox, ctx.levels, ext=tms_ext)
+    return _maybe_mbtiles(ctx, "tms", tms_dir, "tms", tms_ext)
 
 
 def _tms_from_dem(ctx, tms_dir: Path, clip_geom) -> list[str]:
@@ -550,6 +678,25 @@ def _stage_osm(ctx) -> list[str]:
         and ctx.tracker.is_done("geotiff")
         and geotiff_src.exists() and geotiff_src.stat().st_size > 0
     )
+
+    # 本地影像源:用已重采样对齐的源图切片(复用 geotiff 阶段成果或临时生成)
+    if ctx.local_src is not None and not ctx.is_dem:
+        src_path = _local_raster_source(ctx)
+        ctx.tracker.update("osm", message="切 OSM 瓦片")
+
+        def on_progress_local(done, total):
+            _check_stop(ctx)
+            ctx.tracker.update("osm", done=done, total=total,
+                               message=f"切 OSM 瓦片({done}/{total} 张)")
+
+        osm_dir = ctx.out_dir / "osm"
+        _, _, stopped = export_osm(src_path, osm_levels, ctx.bbox, osm_dir,
+                                   on_progress=on_progress_local,
+                                   clip_geom=clip_geom,
+                                   should_stop=ctx.should_stop)
+        if stopped:
+            raise _Stopped()
+        return _maybe_mbtiles(ctx, "osm", osm_dir, "xyz", "png")
 
     # DEM 的源不是影像 geotiff,而是渲染出的 4326 可视化图。切完由本分支自己清理:
     # 它可能同时被 tms 阶段用到,故不走下面 reused 的删除逻辑。
@@ -649,8 +796,11 @@ def _dem_visual_source(ctx) -> Path:
     tmp_dem = ctx.out_dir / f".dem_vis_src_z{z_max}.tmp.tif"
     tmp_gray = ctx.out_dir / f".dem_vis_gray_z{z_max}.tmp.tif"
     tmp_vis = ctx.out_dir / f".dem_vis_z{z_max}.tmp.tif"
-    mosaic_dem_geotiff(tr, tmp_dem, ctx.downloader.tile_path,
-                       build_overviews=False, on_row=on_row)
+    if ctx.local_src is not None:
+        _resample_dem_to_level(ctx, ctx.local_src, tmp_dem, tr, on_row)
+    else:
+        mosaic_dem_geotiff(tr, tmp_dem, ctx.downloader.tile_path,
+                           build_overviews=False, on_row=on_row)
     _check_stop(ctx)
     # 渲染成灰度晕渲(单波段 8bit)
     hillshade_from_dem(tmp_dem, tmp_gray, azimuth=az, altitude=alt,
@@ -693,6 +843,49 @@ def _hs_params(task):
     return (hs.get("azimuth", 315.0), hs.get("altitude", 45.0), hs.get("z_factor", 1.0))
 
 
+def _resample_dem_to_level(ctx, src_path: Path, dst_path: Path, tr,
+                           on_row=None) -> Path:
+    """把本地高程栅格重采样成"该墨卡托瓦片区间对齐"的 EPSG:3857 GeoTIFF。
+
+    与 _resample_to_level 的差别:目标坐标系是 3857(与 DEM 下载管线一致,
+    下游 terrain/contour 都按此假设取源)、重采样保持浮点不截断、dtype 统一
+    float32(高程要小数,整型源也转成浮点以免后续晕渲/等高线计算掉精度)。
+    """
+    import rasterio
+    from rasterio.enums import Resampling
+    from rasterio.transform import from_bounds as _from_bounds
+    from rasterio.vrt import WarpedVRT
+    from rasterio.windows import Window
+
+    minx, miny, maxx, maxy = mosaic_bounds_3857(tr)
+    width, height = tr.cols * TILE_SIZE, tr.rows * TILE_SIZE
+    transform = _from_bounds(minx, miny, maxx, maxy, width, height)
+
+    with rasterio.open(src_path) as src:
+        nodata = src.nodata if src.nodata is not None else -32768.0
+        with WarpedVRT(src, crs="EPSG:3857", transform=transform,
+                       width=width, height=height,
+                       resampling=Resampling.bilinear,
+                       src_nodata=src.nodata, nodata=nodata) as vrt:
+            profile = vrt.profile.copy()
+            profile.update(driver="GTiff", count=1, dtype="float32",
+                           nodata=nodata, tiled=True, blockxsize=256,
+                           blockysize=256, compress="deflate",
+                           BIGTIFF="IF_SAFER")
+            step = TILE_SIZE
+            with rasterio.open(dst_path, "w", **profile) as dst:
+                total = max(1, (height + step - 1) // step)
+                for i, y0 in enumerate(range(0, height, step), start=1):
+                    _check_stop(ctx)
+                    h = min(step, height - y0)
+                    win = Window(0, y0, width, h)
+                    dst.write(vrt.read(1, window=win).astype("float32"),
+                              1, window=win)
+                    if on_row:
+                        on_row(i, total)
+    return dst_path
+
+
 def _stage_dem(ctx) -> list[str]:
     """高程 GeoTIFF(每级一张)+ 可选晕渲图。"""
     task = ctx.task
@@ -716,7 +909,12 @@ def _stage_dem(ctx) -> list[str]:
                                message=f"解码高程第 {_z} 级({done_rows}/{total_r} 行)")
 
         dem_tif = ctx.out_dir / f"{task['name']}_dem_z{z}.tif"
-        mosaic_dem_geotiff(tr, dem_tif, ctx.downloader.tile_path, on_row=on_row)
+        if ctx.local_src is not None:
+            # 本地高程源:重采样到该级墨卡托网格。保持 EPSG:3857 与下载管线一致,
+            # 后续 reproject_geotiff 再按 target_crs 转换。
+            _resample_dem_to_level(ctx, ctx.local_src, dem_tif, tr, on_row)
+        else:
+            mosaic_dem_geotiff(tr, dem_tif, ctx.downloader.tile_path, on_row=on_row)
         # 裁剪放在晕渲**之后**:hillshade 用 3x3 邻域算坡度,先裁会让新边缘那一圈
         # 少了外侧邻居、坡度失真(表现为成果四周一道亮/暗边)。故先用完整数据出
         # 晕渲,再分别把两份成果裁到选区。
@@ -777,8 +975,11 @@ def _stage_contour(ctx) -> list[str]:
 
         tmp_dem = ctx.out_dir / f".contour_src_z{z_max}.tif"
         tr = mercator_range_for_bbox(*ctx.bbox, z_max)
-        mosaic_dem_geotiff(tr, tmp_dem, ctx.downloader.tile_path,
-                           build_overviews=False, on_row=on_row)
+        if ctx.local_src is not None:
+            _resample_dem_to_level(ctx, ctx.local_src, tmp_dem, tr, on_row)
+        else:
+            mosaic_dem_geotiff(tr, tmp_dem, ctx.downloader.tile_path,
+                               build_overviews=False, on_row=on_row)
         # 等高线成果统一 WGS84(与其余矢量成果一致,前端可直读)
         reproject_geotiff(tmp_dem, "EPSG:4326")
         # 裁源而不是裁线:等高线是闭合环,裁线段会切出一堆断头线且要重新闭合;
@@ -858,8 +1059,11 @@ def _stage_terrain(ctx) -> list[str]:
             ctx.tracker.update("terrain", message=f"准备高程源({done_rows}/{total_r} 行)")
 
         tmp_src = ctx.out_dir / "_terrain_src.tmp.tif"
-        mosaic_dem_geotiff(tr, tmp_src, ctx.downloader.tile_path,
-                           build_overviews=False, on_row=on_row)
+        if ctx.local_src is not None:
+            _resample_dem_to_level(ctx, ctx.local_src, tmp_src, tr, on_row)
+        else:
+            mosaic_dem_geotiff(tr, tmp_src, ctx.downloader.tile_path,
+                               build_overviews=False, on_row=on_row)
         reproject_geotiff(tmp_src, "EPSG:4326")
         _check_stop(ctx)
         tmp_src.replace(terrain_src)   # 拼接+重投影都完成才改名为正式源
