@@ -7,6 +7,7 @@ import test from 'node:test'
 const componentDir = dirname(fileURLToPath(import.meta.url))
 const frontendRoot = resolve(componentDir, '../..')
 const componentSource = readFileSync(resolve(componentDir, 'ProcessDialog.vue'), 'utf8')
+const taskDefaultsSource = readFileSync(resolve(frontendRoot, 'src/utils/taskDefaults.js'), 'utf8')
 
 test('处理面板切换来源时会完整重置本地表单状态', () => {
   assert.match(componentSource, /function\s+resetFormState\s*\(/)
@@ -51,4 +52,11 @@ test('浏览器页签图标使用地球 emoji', () => {
     const html = readFileSync(resolve(frontendRoot, file), 'utf8')
     assert.match(html, /<link\s+rel="icon"\s+type="image\/svg\+xml"\s+href="\/favicon\.svg"\s*\/>/)
   }
+})
+
+test('地形下载层级描述会展示大小和精度', () => {
+  assert.ok(componentSource.includes('formatTerrainPrecision'))
+  assert.ok(componentSource.includes('precisionOf(z)'))
+  assert.ok(componentSource.includes('levelMetaText(z)'))
+  assert.ok(taskDefaultsSource.includes('精度约'))
 })

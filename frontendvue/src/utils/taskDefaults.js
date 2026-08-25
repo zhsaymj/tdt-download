@@ -1,6 +1,9 @@
 export const IMG_LEVELS = Array.from({ length: 18 }, (_, i) => i + 1)
 export const DEM_LEVELS = Array.from({ length: 17 }, (_, i) => i)
 
+const WEB_MERCATOR_EQUATOR_RESOLUTION_M = 156543.03392804097
+const WEB_MERCATOR_LAT_LIMIT = 85.05112878
+
 const PROVIDER_LABELS = {
   tianditu_img: '天地图影像',
   tianditu_vec: '天地图矢量底图',
@@ -51,6 +54,15 @@ export function defaultExportForStages(stages = []) {
   return stages.filter((s) => s.default_on).map((s) => fmtNameOf(s.key))
 }
 
+function ensureDemDefaultExports(provider, stages = [], exportFormats = []) {
+  if (!isDemProvider(provider)) return exportFormats
+  const stageKeys = new Set(stages.map((s) => s.key))
+  const out = [...exportFormats]
+  if (stageKeys.has('dem') && !out.includes('geotiff')) out.unshift('geotiff')
+  if (stageKeys.has('terrain') && !out.includes('terrain')) out.push('terrain')
+  return out
+}
+
 export function defaultContainersForStages(stages = []) {
   const out = {}
   for (const stage of stages) {
@@ -85,7 +97,7 @@ export function defaultAnnotateForProvider(provider) {
 }
 
 export function downloadDefaultsForProvider(provider, stages = [], date = new Date()) {
-  const exportFormats = defaultExportForStages(stages)
+  const exportFormats = ensureDemDefaultExports(provider, stages, defaultExportForStages(stages))
   return {
     name: defaultTaskName(provider, date),
     levels: defaultLevelsForProvider(provider, exportFormats),
@@ -94,6 +106,22 @@ export function downloadDefaultsForProvider(provider, stages = [], date = new Da
     crs: defaultCrsForProvider(provider),
     annotate: defaultAnnotateForProvider(provider),
   }
+}
+
+export function terrainPrecisionMeters(level, latitude = 0) {
+  const z = Math.max(0, Number(level) || 0)
+  const lat = Math.max(-WEB_MERCATOR_LAT_LIMIT, Math.min(WEB_MERCATOR_LAT_LIMIT, Number(latitude) || 0))
+  return WEB_MERCATOR_EQUATOR_RESOLUTION_M * Math.cos(lat * Math.PI / 180) / (2 ** z)
+}
+
+function formatMeters(value) {
+  if (value >= 100) return String(Math.round(value))
+  if (value >= 10) return value.toFixed(1)
+  return value.toFixed(2)
+}
+
+export function formatTerrainPrecision(level, latitude = 0) {
+  return `精度约 ${formatMeters(terrainPrecisionMeters(level, latitude))} 米/像素`
 }
 
 export const DEM_CRS_HINT = 'DEM 原始缓存与拼接中间图仍按 Esri 瓦片网格使用 EPSG:3857；最终 GeoTIFF 默认重投影为 WGS84(EPSG:4326)。Cesium 地形切片阶段会单独准备 EPSG:4326 高程源。'

@@ -2,12 +2,15 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  DEM_LEVELS,
   IMG_LEVELS,
   defaultTaskName,
   defaultContainersForStages,
   downloadDefaultsForProvider,
   ensureImageTmsLevels,
+  formatTerrainPrecision,
   normalizeContainerMap,
+  terrainPrecisionMeters,
 } from './taskDefaults.js'
 
 test('任务名称默认使用数据源和当前时间', () => {
@@ -66,4 +69,23 @@ test('影像勾选 TMS 时默认补全 1 到最大级别', () => {
   assert.deepEqual(ensureImageTmsLevels('tianditu_vec', ['geotiff', 'tms'], []), IMG_LEVELS)
   assert.deepEqual(ensureImageTmsLevels('esri_terrain', ['geotiff', 'tms'], []), [])
   assert.deepEqual(ensureImageTmsLevels('tianditu_img', ['geotiff'], [10]), [10])
+})
+
+test('地形下载默认导出 GeoTIFF 和 Cesium 地形切片', () => {
+  const stages = [
+    { key: 'dem', default_on: true, containers: ['cog', 'gtiff'] },
+    { key: 'terrain', default_on: false, containers: [] },
+    { key: 'contour', default_on: false, containers: ['geojson'] },
+  ]
+  const defaults = downloadDefaultsForProvider('esri_terrain', stages)
+  assert.deepEqual(defaults.export, ['geotiff', 'terrain'])
+  assert.deepEqual(defaults.levels, [])
+  assert.deepEqual(DEM_LEVELS.slice(0, 3), [0, 1, 2])
+})
+
+test('地形精度按层级和纬度显示为米每像素', () => {
+  assert.equal(Math.round(terrainPrecisionMeters(0)), 156543)
+  assert.equal(Math.round(terrainPrecisionMeters(1)), 78272)
+  assert.ok(terrainPrecisionMeters(13, 30) < terrainPrecisionMeters(13, 0))
+  assert.equal(formatTerrainPrecision(13, 30), '精度约 16.5 米/像素')
 })

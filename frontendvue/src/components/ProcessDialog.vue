@@ -18,7 +18,8 @@ import { fmtNum, fmtSize } from '../utils/format'
 import {
   DEM_CRS_HINT, DEM_LEVELS, IMG_LEVELS,
   defaultContainersForStages, defaultTaskName,
-  downloadDefaultsForProvider, ensureImageTmsLevels, normalizeContainerMap,
+  downloadDefaultsForProvider, ensureImageTmsLevels, formatTerrainPrecision,
+  normalizeContainerMap,
 } from '../utils/taskDefaults'
 import { api } from '../api'
 import InfoTip from './InfoTip.vue'
@@ -240,6 +241,26 @@ function tilesOf(z) { return est.value?.[z]?.tiles ?? null }
 function sizeOf(z) {
   const b = est.value?.[z]?.bytes
   return b == null ? '' : fmtSize(b)
+}
+function precisionOf(z) {
+  if (!isDem.value) return ''
+  const b = drawStore.bbox
+  const lat = b ? (Number(b[1]) + Number(b[3])) / 2 : 0
+  return formatTerrainPrecision(z, lat)
+}
+function levelMetaText(z) {
+  const parts = []
+  const size = sizeOf(z)
+  const precision = precisionOf(z)
+  if (size) parts.push(`约 ${size}`)
+  if (precision) parts.push(precision)
+  return parts.join(' · ')
+}
+function levelTitle(z) {
+  const tiles = tilesOf(z)
+  const base = tiles != null ? `${z} 级:${fmtNum(tiles)} 张瓦片` : `${z} 级`
+  const meta = levelMetaText(z)
+  return meta ? `${base} · ${meta}` : base
 }
 /** 已勾选级别的合计(瓦片数 + 大小),注记翻倍与后端提交口径一致 */
 const estTotal = computed(() => {
@@ -565,14 +586,12 @@ const title = computed(() => ({
             <div class="lv-grid">
               <label v-for="z in levelList" :key="z" class="lv"
                 :class="{ low: lowRatio(z) }"
-                :title="tilesOf(z) != null
-                  ? `${z} 级:${fmtNum(tilesOf(z))} 张瓦片,约 ${sizeOf(z)}`
-                  : `${z} 级`">
+                :title="levelTitle(z)">
                 <input type="checkbox" :checked="form.levels.includes(z)"
                   @change="(e) => toggleLevel(z, e.target.checked)" />
                 <span class="lv-z">{{ z }} 级<span v-if="lowRatio(z)" class="lowtag"
                   :title="`仅 ${(ratioOf(z) * 100).toFixed(1)}% 内容落在选区内`">·</span></span>
-                <span v-if="sizeOf(z)" class="lv-sz">约 {{ sizeOf(z) }}</span>
+                <span v-if="levelMetaText(z)" class="lv-sz">{{ levelMetaText(z) }}</span>
               </label>
             </div>
             <div v-if="estTotal" class="lv-total">
