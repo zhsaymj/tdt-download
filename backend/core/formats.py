@@ -80,10 +80,10 @@ PIPE_BUILDING = "building"
 
 CONTAINERS: dict[str, Container] = {c.key: c for c in (
     # 栅格容器
-    Container("gtiff", "GeoTIFF", _RASTER, ".tif", "rasterio", "GTiff",
-              note="通用性最好,老软件都能读"),
     Container("cog", "COG(云优化 GeoTIFF)", _RASTER, ".tif", "rasterio", "COG",
               note="仍是合法 GeoTIFF,多了内部瓦片与金字塔,大图浏览快"),
+    Container("gtiff", "GeoTIFF", _RASTER, ".tif", "rasterio", "GTiff",
+              note="通用性最好,老软件都能读"),
     # PNG/JPEG 靠 worldfile(.pgw/.jgw)带坐标,不能存 CRS 本身,仅供出图
     Container("png", "PNG + worldfile", _RASTER, ".png", "rasterio", "PNG",
               sidecars=(".pgw", ".wld"),
@@ -165,7 +165,7 @@ STAGES: dict[str, ExportStage] = {s.key: s for s in (
     # 解耦的收益体现在 tms/osm——它们原先只有影像能用,现在两种栅格都接。
     ExportStage("geotiff", "合并 GeoTIFF", (DataKind.RASTER_IMAGE,),
                 DataKind.RASTER_IMAGE,
-                containers=("gtiff", "cog", "png", "jpeg"),
+                containers=("cog", "gtiff", "png", "jpeg"),
                 outputs=("{name}_z{z}{ext}",),
                 needs_levels=True, default_on=True, order=10,
                 pipeline=PIPE_RASTER,
@@ -205,7 +205,7 @@ STAGES: dict[str, ExportStage] = {s.key: s for s in (
     # 二者语义相同(合并整幅栅格),差别仅在 DEM 另可出晕渲图。
     ExportStage("dem", "高程 GeoTIFF", (DataKind.RASTER_DEM,),
                 DataKind.RASTER_DEM,
-                containers=("gtiff", "cog", "ascii_grid", "xyz", "png"),
+                containers=("cog", "gtiff", "ascii_grid", "xyz", "png"),
                 outputs=("{name}_dem_z{z}{ext}", "{name}_hillshade_z{z}{ext}"),
                 needs_levels=True, default_on=True, order=20,
                 pipeline=PIPE_RASTER,

@@ -81,16 +81,27 @@ def _geojson_geometries(geometry: dict) -> list[dict]:
 
 
 def clip_to_geometry(src_path: Path, geometry: dict) -> bool:
-    """把 EPSG:4326 的 GeoTIFF 原地裁剪到 geometry 边界,边界外设为 nodata。
+    """把 EPSG:4326 的 GeoTIFF 原地裁剪到 geometry 边界,边界外置黑 + 写掩膜波段。
+
+    不用 nodata=0 表达"边界外":三波段 uint8 影像里 0 是合法像素值,深色植被的
+    红波段经常正好取 0(实测 z13 有 6.5% 的有效像素至少有一个波段为 0)。一旦
+    声明 nodata=0,QGIS 按波段套用 nodata,选区**内部**这些像素也被判成无数据、
+    渲成白点,看着像影像丢像素。
+    故改用 GDAL 掩膜波段:像素值原样保留,有效区只靠 mask 表达。下游 tms/osm
+    切片本就用 read_masks 取 alpha(见 tms.py/osm.py),掩膜同样能正确传下去,
+    且不会再在植被区打出透明散点。
 
     成功裁剪返回 True;几何为空或无重叠返回 False(原文件不动)。
     """
+    from rasterio.features import geometry_mask
+
     geoms = _geojson_geometries(geometry)
     if not geoms:
         return False
 
     with rasterio.open(src_path) as src:
         try:
+            # 几何外仍填 0(保持黑边):不认掩膜的老客户端看到的是黑边而非花屏
             out_image, out_transform = rio_mask(
                 src, geoms, crop=True, filled=True, nodata=0
             )
@@ -99,18 +110,27 @@ def clip_to_geometry(src_path: Path, geometry: dict) -> bool:
             return False
         profile = src.profile.copy()
 
+    height, width = out_image.shape[1], out_image.shape[2]
+    # invert=True -> 几何内为 True。与 rio_mask 同样用默认 all_touched=False,
+    # 保证掩膜边界和上面裁出来的像素边界完全一致。
+    inside = geometry_mask(geoms, out_shape=(height, width),
+                           transform=out_transform, invert=True)
+    valid = np.where(inside, 255, 0).astype(np.uint8)
+
     profile.update({
-        "height": out_image.shape[1],
-        "width": out_image.shape[2],
+        "height": height,
+        "width": width,
         "transform": out_transform,
-        "nodata": 0,
         # 大范围裁剪结果仍可能超 4GB 普通 TIFF 上限,显式启用 BIGTIFF
         "BIGTIFF": "YES",
     })
+    # 旧版成果(或上游)可能已带 nodata=0,必须显式清掉,否则白点照旧
+    profile.pop("nodata", None)
 
     tmp = src_path.with_suffix(".clip.tif")
     with rasterio.open(tmp, "w", **profile) as dst:
         dst.write(out_image)
+        dst.write_mask(valid)
     tmp.replace(src_path)
     return True
 
@@ -143,6 +163,10 @@ def reproject_geotiff(src_path: Path, dst_crs: str) -> bool:
         src_crs = src.crs
         src_transform = src.transform
         src_nodata = src.nodata
+        # 裁剪过的影像用掩膜波段表达有效区(见 clip_to_geometry),重投影必须把
+        # 掩膜一起搬过去,否则投影版会丢掉裁剪边界的透明信息。
+        src_mask = src.read_masks(1)
+        has_mask = bool(src_mask.min() < 255)
 
     tmp = src_path.with_suffix(".warp.tif")
     with rasterio.open(tmp, "w", **profile) as dst:
@@ -158,5 +182,18 @@ def reproject_geotiff(src_path: Path, dst_crs: str) -> bool:
                 dst_nodata=src_nodata,
                 resampling=Resampling.bilinear,
             )
+        if has_mask:
+            dst_mask = np.zeros((height, width), dtype=np.uint8)
+            reproject(
+                source=src_mask,
+                destination=dst_mask,
+                src_transform=src_transform,
+                src_crs=src_crs,
+                dst_transform=transform,
+                dst_crs=dst_crs,
+                # 掩膜是 0/255 二值,必须最近邻,双线性会在边界糊出中间值
+                resampling=Resampling.nearest,
+            )
+            dst.write_mask(dst_mask)
     tmp.replace(src_path)
     return True

@@ -3,9 +3,11 @@ import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { createMapController } from '../composables/useMap'
 import { mapController } from '../composables/mapController'
 import { useDrawStore } from '../stores/draw'
+import { useBasemapStore } from '../stores/basemap'
 import { api } from '../api'
 
 const drawStore = useDrawStore()
+const basemapStore = useBasemapStore()
 const mapEl = ref(null)
 const info = ref({ zoom: '—', scale: '—', lon: null, lat: null })
 
@@ -30,6 +32,7 @@ onMounted(async () => {
   } catch (_) {
     controller.setupBasemap(null)
   }
+  basemapStore.apply()
 })
 
 onBeforeUnmount(() => {
@@ -55,6 +58,8 @@ onBeforeUnmount(() => {
 .map-canvas { width: 100%; height: 100%; }
 .map-info {
   position: absolute; left: 0; bottom: 0; z-index: 10;
+  left: 50%;
+  transform: translateX(-50%);
   display: flex; gap: 16px; padding: 5px 14px;
   background: rgba(2, 132, 199, 0.82); color: #f0f9ff;
   font-size: 12px; font-family: Consolas, "Courier New", monospace;

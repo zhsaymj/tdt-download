@@ -213,6 +213,37 @@ def _scan_output_size(task: dict) -> dict:
     return {"items": items, "total_bytes": total, "output_path": out}
 
 
+def _output_dir_for_mutation(task: dict) -> Path:
+    """取任务输出目录,并限制在 output 根目录内。
+
+    这类接口会原地修改成果文件,不能像只读扫描那样信任任意路径。
+    """
+    out = task.get("output_path") or ""
+    if not out:
+        raise HTTPException(400, "任务没有输出目录")
+    out_dir = Path(out)
+    if not out_dir.is_dir():
+        raise HTTPException(404, f"任务输出目录不存在:{out_dir}")
+    try:
+        out_dir.resolve().relative_to(settings.output_dir.resolve())
+    except (ValueError, OSError):
+        raise HTTPException(403, "只能修改 output 目录内的任务成果")
+    return out_dir
+
+
+def _repair_task_output(task: dict) -> dict:
+    """批量修复任务输出目录中的旧版 nodata=0 RGB GeoTIFF。"""
+    from ..core.repair_nodata import repair_dir
+
+    out_dir = _output_dir_for_mutation(task)
+    fixed, recovered = repair_dir(out_dir)
+    return {
+        "output_path": str(out_dir),
+        "fixed": fixed,
+        "recovered_pixels": recovered,
+    }
+
+
 @router.get("/{task_id}/size")
 async def api_task_size(task_id: str):
     """返回任务导出成果的磁盘占用明细(按格式分类)+ 合计。
@@ -224,6 +255,87 @@ async def api_task_size(task_id: str):
     if not task:
         raise HTTPException(404, "任务不存在")
     return await asyncio.to_thread(_scan_output_size, task)
+
+
+@router.post("/{task_id}/repair_nodata")
+async def api_repair_nodata(task_id: str):
+    """修复旧版裁剪影像的 nodata=0 白点问题。
+
+    早期成果把边界外标成 nodata=0,QGIS 会把 RGB 中任一波段为 0 的合法像素也
+    当无数据渲成白点。修复只清元数据并写 GDAL 掩膜,不重写像素值。
+    """
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    if task["status"] not in ("done", "failed"):
+        raise HTTPException(
+            400, f"只有已完成或部分失败的任务成果才能修复(当前 {task['status']})")
+    return await asyncio.to_thread(_repair_task_output, task)
+
+
+@router.get("/{task_id}/layers")
+async def api_task_layers(task_id: str):
+    """列出该任务可叠加到地图的图层(或可打开三维预览的成果)。
+
+    扫盘 + 读栅格元信息是阻塞 IO,放线程池。
+    """
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    from ..core.overlay import list_layers
+    layers = await asyncio.to_thread(list_layers, task, settings.output_dir)
+    return {"id": task_id, "name": task["name"], "layers": layers}
+
+
+@router.get("/{task_id}/vector/{filename}")
+async def api_task_vector(task_id: str, filename: str):
+    """把成果里的 gpkg/shp 转成 GeoJSON 返回,供地图叠加。
+
+    浏览器读不了这两种格式,只能由后端转。不落盘、直接返回内容——这是"看一下"
+    的用途,持久化成果应该走导出功能。
+    """
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    out_dir = Path(task.get("output_path") or "")
+    p = (out_dir / filename)
+    # 防路径穿越:filename 来自 URL,必须确认解析结果仍在成果目录内
+    try:
+        p.resolve().relative_to(out_dir.resolve())
+    except (ValueError, OSError):
+        raise HTTPException(400, "非法文件名")
+    if not p.is_file():
+        raise HTTPException(404, f"文件不存在:{filename}")
+    if p.suffix.lower() not in (".gpkg", ".shp", ".fgb"):
+        raise HTTPException(400, f"不支持转换该格式:{p.suffix}")
+
+    def _to_geojson() -> dict:
+        import json as _json
+        from pyogrio.raw import read as _read
+        from shapely import wkb as _wkb
+        from shapely.geometry import mapping as _mapping
+        meta, _idx, geoms, field_data = _read(str(p))
+        names = [str(x) for x in meta["fields"]]
+        feats = []
+        for i, g in enumerate(geoms):
+            if g is None:
+                continue
+            try:
+                geom = _mapping(_wkb.loads(g))
+            except Exception:
+                continue
+            props = {}
+            for j, nm in enumerate(names):
+                v = field_data[j][i]
+                # numpy 标量不是 JSON 可序列化类型
+                props[nm] = v.item() if hasattr(v, "item") else v
+            feats.append({"type": "Feature", "geometry": geom, "properties": props})
+        return {"type": "FeatureCollection", "features": feats}
+
+    try:
+        return await asyncio.to_thread(_to_geojson)
+    except Exception as e:
+        raise HTTPException(500, f"转换失败:{str(e)[:200]}") from e
 
 
 # ---------- MBTiles 预览 ----------

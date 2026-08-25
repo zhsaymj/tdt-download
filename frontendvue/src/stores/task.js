@@ -29,8 +29,10 @@ export const useTaskStore = defineStore('task', {
       try { this.logs = (await api.getLogs(400)).logs || [] } catch (_) { /* ignore */ }
     },
     async create(payload) {
-      await api.createTask(payload)
+      const created = await api.createTask(payload)
       await this.load()
+      this.activeId = created?.id || this.tasks[0]?.id || null
+      return created
     },
     async updateParams(id, payload) {
       await api.updateTask(id, payload)

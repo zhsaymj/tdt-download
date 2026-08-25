@@ -1,8 +1,10 @@
 // OpenLayers 地图逻辑封装:底图、绘制/编辑、信息栏、范围预览。
 // 以工厂函数返回操作 API;通过回调把 bbox/几何变化同步给上层(Pinia)。
 import { Map, View, Feature } from 'ol'
-import { Tile as TileLayer, Vector as VectorLayer } from 'ol/layer'
-import { OSM, XYZ, Vector as VectorSource } from 'ol/source'
+import TileLayer from 'ol/layer/Tile'
+import VectorLayer from 'ol/layer/Vector'
+import XYZ from 'ol/source/XYZ'
+import VectorSource from 'ol/source/Vector'
 import { fromLonLat, toLonLat, transformExtent } from 'ol/proj'
 import { Draw, Modify, Translate } from 'ol/interaction'
 import { createBox } from 'ol/interaction/Draw'
@@ -12,6 +14,8 @@ import { GeoJSON } from 'ol/format'
 import Collection from 'ol/Collection'
 import { never } from 'ol/events/condition'
 import { unByKey } from 'ol/Observable'
+import { DRAW_Z } from './overlays'
+import { basemapTypesFor, basemapZIndexForLevel } from '../utils/basemap'
 
 const geojsonFmt = new GeoJSON()
 
@@ -20,10 +24,13 @@ export function createMapController(target, hooks = {}) {
   const state = { feature: null, shape: null, editing: false }
 
   // ---- 图层 ----
-  const osmLayer = new TileLayer({ source: new OSM(), visible: false })
+  // 绘制层与预览层的 zIndex 必须在 DRAW_Z 以上:成果叠加层用 10~89(见
+  // composables/overlays.js),不显式压在其上的话,勾一个影像图层就会把用户
+  // 画的选区盖掉——而"叠加成果和选区对不对得上"正是要看的东西。
   const vectorSource = new VectorSource()
   const vectorLayer = new VectorLayer({
     source: vectorSource,
+    zIndex: DRAW_Z,
     style: new Style({
       stroke: new Stroke({ color: '#ffcc00', width: 2 }),
       fill: new Fill({ color: 'rgba(255,204,0,0.15)' }),
@@ -38,6 +45,7 @@ export function createMapController(target, hooks = {}) {
   const previewSource = new VectorSource()
   const previewLayer = new VectorLayer({
     source: previewSource,
+    zIndex: DRAW_Z + 1,
     style: new Style({
       stroke: new Stroke({ color: '#e11d48', width: 2, lineDash: [6, 4] }),
       fill: new Fill({ color: 'rgba(225,29,72,0.10)' }),
@@ -47,6 +55,7 @@ export function createMapController(target, hooks = {}) {
   const previewGeomSource = new VectorSource()
   const previewGeomLayer = new VectorLayer({
     source: previewGeomSource,
+    zIndex: DRAW_Z + 2,
     style: new Style({
       stroke: new Stroke({ color: '#2563eb', width: 2, lineDash: [4, 4] }),
       fill: new Fill({ color: 'rgba(37,99,235,0.10)' }),
@@ -55,7 +64,7 @@ export function createMapController(target, hooks = {}) {
 
   const map = new Map({
     target,
-    layers: [osmLayer, vectorLayer, previewLayer, previewGeomLayer],
+    layers: [vectorLayer, previewLayer, previewGeomLayer],
     view: new View({ center: fromLonLat([104.07, 30.67]), zoom: 4, maxZoom: 22 }),
   })
 
@@ -74,31 +83,50 @@ export function createMapController(target, hooks = {}) {
     })
   }
 
-  // 下载数据类型 -> 天地图底图图层组(底图 + 对应注记)
-  const PROVIDER_BASEMAP = {
-    tianditu_img: ['img_w', 'cia_w'],  // 影像 + 影像注记
-    tianditu_vec: ['vec_w', 'cva_w'],  // 矢量 + 矢量注记
-    tianditu_ter: ['ter_w', 'cta_w'],  // 地形 + 地形注记
-  }
-
   let baseLayers = []   // 当前底图图层组(供切换时移除)
   let baseToken = null
+  let baseKey = 'tianditu_img'
+  let baseOpacity = 1
+  let baseLevel = 0
+
+  function applyBasemapStyle() {
+    const z = basemapZIndexForLevel(baseLevel)
+    for (const l of baseLayers) {
+      l.setOpacity(baseOpacity)
+      l.setZIndex(z)
+    }
+  }
 
   function setupBasemap(token) {
     baseToken = token
-    if (!token) { osmLayer.setVisible(true); return }
-    setOverlayByProvider('tianditu_img')
+    if (!token) { applyBasemapStyle(); return }
+    setBasemap(baseKey)
   }
 
-  // 按数据类型切换中间地图底图(与下载数据源保持一致)
-  function setOverlayByProvider(providerKey) {
-    if (!baseToken) { osmLayer.setVisible(true); return }
-    const types = PROVIDER_BASEMAP[providerKey] || PROVIDER_BASEMAP.tianditu_img
+  // 按用户选择/下载数据类型切换中间地图底图(底图 + 对应注记)
+  function setBasemap(providerKey) {
+    baseKey = providerKey || 'tianditu_img'
+    if (!baseToken) { applyBasemapStyle(); return }
+    const types = basemapTypesFor(baseKey)
     // 移除旧底图组
     baseLayers.forEach((l) => map.removeLayer(l))
     baseLayers = types.map((t) => tiandituLayer(t, baseToken))
+    applyBasemapStyle()
     // 插到最底层(矢量/预览层之下)
     baseLayers.forEach((l, i) => map.getLayers().insertAt(i, l))
+  }
+
+  // 兼容旧调用名:下载数据源切换时仍能同步底图
+  function setOverlayByProvider(providerKey) { setBasemap(providerKey) }
+
+  function setBasemapOpacity(v) {
+    baseOpacity = Math.min(1, Math.max(0, Number(v)))
+    applyBasemapStyle()
+  }
+
+  function setBasemapLevel(level) {
+    baseLevel = Math.max(0, Math.min(2, Number(level) || 0))
+    applyBasemapStyle()
   }
 
   // ---- 信息栏 ----
@@ -356,7 +384,8 @@ export function createMapController(target, hooks = {}) {
   emitInfo()
 
   return {
-    map, setupBasemap, setOverlayByProvider,
+    map, setupBasemap, setOverlayByProvider, setBasemap,
+    setBasemapOpacity, setBasemapLevel,
     startDrawRect, startDrawPolygon, toggleEdit, clearDraw, loadGeojson,
     showPreview, clearPreview, zoomTo,
     hasFeature: () => !!state.feature,

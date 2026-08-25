@@ -171,3 +171,47 @@ async def api_inspect(request: Request, data: InspectReq):
         info["bytes"] = 0
     return info
 
+
+
+class RevealReq(BaseModel):
+    path: str = Field(..., description="要在文件管理器中打开的路径")
+
+
+@router.post("/reveal")
+async def api_reveal(request: Request, data: RevealReq):
+    """在系统文件管理器中打开成果目录(或选中成果文件)。
+
+    只放行 output 目录内的路径。这个接口会让操作系统去"打开"一个路径,若不加
+    限制就等于给了任意路径的启动入口——Windows 上 startfile 一个 .bat/.exe
+    会直接执行它。故先 resolve()(解掉符号链接与 ..)再比对是否在 output 内。
+    """
+    _require_local(request)
+    import os
+    import sys
+
+    from ..config import settings
+
+    out_root = settings.output_dir.resolve()
+    try:
+        p = Path((data.path or "").strip().strip('"')).resolve()
+    except OSError as e:
+        raise HTTPException(400, f"路径无效:{e}") from e
+    if not p.is_relative_to(out_root):
+        raise HTTPException(403, "只能打开成果目录内的路径")
+    if not p.exists():
+        raise HTTPException(404, f"路径不存在:{p}")
+
+    # 目标是文件时打开它所在的目录(用户要的是"看到成果",不是用默认程序打开 tif)
+    target = p if p.is_dir() else p.parent
+    try:
+        if sys.platform == "win32":
+            await asyncio.to_thread(os.startfile, str(target))
+        elif sys.platform == "darwin":
+            proc = await asyncio.create_subprocess_exec("open", str(target))
+            await proc.wait()
+        else:
+            proc = await asyncio.create_subprocess_exec("xdg-open", str(target))
+            await proc.wait()
+    except Exception as e:
+        raise HTTPException(500, f"打开目录失败:{str(e)[:200]}") from e
+    return {"opened": str(target)}

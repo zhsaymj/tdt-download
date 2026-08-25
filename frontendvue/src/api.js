@@ -1,11 +1,26 @@
 // 后端 REST API 封装
 
+export function formatApiDetail(detail) {
+  if (detail == null) return ''
+  if (typeof detail === 'string' || typeof detail === 'number') return String(detail)
+  if (Array.isArray(detail)) {
+    return detail.map((it) => {
+      if (it && typeof it === 'object' && it.msg) {
+        const loc = Array.isArray(it.loc) ? it.loc.join('.') : ''
+        return loc ? loc + ': ' + it.msg : String(it.msg)
+      }
+      return formatApiDetail(it)
+    }).filter(Boolean).join('；')
+  }
+  try { return JSON.stringify(detail) } catch (_) { return String(detail) }
+}
+
 async function req(url, opts) {
   const r = await fetch(url, opts)
   if (!r.ok) {
     let detail = r.status
     try { detail = (await r.json()).detail || detail } catch (_) { /* ignore */ }
-    throw new Error(detail)
+    throw new Error(formatApiDetail(detail))
   }
   return r.status === 204 ? null : r.json()
 }
@@ -44,6 +59,12 @@ export const api = {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
+  // 在系统文件管理器中打开成果目录(后端只放行 output 目录内的路径)
+  revealPath: (path) =>
+    req('/api/local/reveal', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    }),
   // 按选区大小建议下载级别 + 各级的有效数据占比
   suggestLevels: ({ west, south, east, north, provider }) =>
     req(`/api/tasks/suggest_levels?west=${west}&south=${south}&east=${east}&north=${north}&provider=${provider || 'tianditu_img'}`),
@@ -65,12 +86,16 @@ export const api = {
   resumeTask: (id) => req(`/api/tasks/${id}/resume`, { method: 'POST' }),
   retryStage: (id, key, purge = false) =>
     req(`/api/tasks/${id}/stage/${key}/retry?purge=${purge}`, { method: 'POST' }),
+  // 该任务可叠加到地图的图层清单(后端判定每类成果能否直读,见 core/overlay.py)
+  taskLayers: (id) => req(`/api/tasks/${id}/layers`),
   // 给已完成任务补充导出格式(复用已有瓦片缓存与合并成果,不重新下载)
   addExport: (id, payload) =>
     req(`/api/tasks/${id}/add_export`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
+  // 修复旧版 RGB GeoTIFF 的 nodata=0 白点问题:原地清 nodata + 写掩膜
+  repairNodata: (id) => req(`/api/tasks/${id}/repair_nodata`, { method: 'POST' }),
   taskSize: (id) => req(`/api/tasks/${id}/size`),
   deleteTask: (id, purge) => req(`/api/tasks/${id}?purge=${purge}`, { method: 'DELETE' }),
 

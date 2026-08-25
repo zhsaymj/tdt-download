@@ -386,12 +386,18 @@ def _resample_to_level(ctx, src_path: Path, dst_path: Path, tr, on_row=None) -> 
     transform = _from_bounds(west, south, east, north, width, height)
 
     with rasterio.open(src_path) as src:
+        src_count = src.count
         with WarpedVRT(src, crs="EPSG:4326", transform=transform,
-                       width=width, height=height,
-                       resampling=Resampling.bilinear) as vrt:
+                        width=width, height=height,
+                        resampling=Resampling.bilinear,
+                        add_alpha=True) as vrt:
             profile = vrt.profile.copy()
+            # 本地源图通常不会刚好落在瓦片网格边界上。WarpedVRT 会把源图
+            # 覆盖不到的目标像素填成 0；如果只写 RGB 而不写 mask，QGIS / 下游
+            # 切片会把这些 0 当成有效黑像素，形成上/右/下黑边。
+            profile.pop("nodata", None)
             profile.update(driver="GTiff", tiled=True, blockxsize=256,
-                           blockysize=256, compress="deflate",
+                           blockysize=256, compress="deflate", count=src_count,
                            BIGTIFF="IF_SAFER")
             # 行块高度取一屏瓦片,既控制内存也让进度回调有合理粒度
             step = TILE_SIZE
@@ -401,7 +407,10 @@ def _resample_to_level(ctx, src_path: Path, dst_path: Path, tr, on_row=None) -> 
                     _check_stop(ctx)
                     h = min(step, height - y0)
                     win = Window(0, y0, width, h)
-                    dst.write(vrt.read(window=win), window=win)
+                    dst.write(vrt.read(indexes=list(range(1, src_count + 1)),
+                                       window=win), window=win)
+                    dst.write_mask(vrt.read(src_count + 1, window=win),
+                                   window=win)
                     if on_row:
                         on_row(i, total)
     return dst_path

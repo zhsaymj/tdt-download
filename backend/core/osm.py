@@ -74,6 +74,7 @@ def _write_png(path: Path, arr: np.ndarray, transform) -> None:
     最后一个波段作为 alpha:下载范围外(未覆盖)的像素透明,消除黑边。
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    arr = _bleed_rgb_into_transparent_pixels(arr)
     bands = arr.shape[0]
     profile = {
         "driver": "GTiff", "height": TILE_SIZE, "width": TILE_SIZE,
@@ -90,6 +91,50 @@ def _write_png(path: Path, arr: np.ndarray, transform) -> None:
                 ]
             with mem.open() as tmp:
                 rio_shutil.copy(tmp, str(path), driver="PNG")
+
+
+def _bleed_rgb_into_transparent_pixels(arr: np.ndarray, max_iter: int = 8) -> np.ndarray:
+    """把透明像素旁边的 RGB 向外扩几圈,避免 PNG 纹理采样出现黑边。
+
+    OSM 边缘瓦片会有 alpha=0 的空白区。PNG 虽然透明,但这些像素的 RGB
+    默认是 0,部分预览器/纹理线性采样会把透明黑参与插值,视觉上出现黑线。
+    只改透明像素的 RGB,不改 alpha,因此不会改变瓦片真实有效范围。
+    """
+    if arr.shape[0] < 4:
+        return arr
+    alpha = arr[-1]
+    transparent = alpha == 0
+    filled = alpha > 0
+    if not transparent.any() or not filled.any():
+        return arr
+
+    out = arr.copy()
+    rgb = out[:-1]
+    h, w = alpha.shape
+    directions = (
+        (-1, 0), (1, 0), (0, -1), (0, 1),
+        (-1, -1), (-1, 1), (1, -1), (1, 1),
+    )
+    for _ in range(max_iter):
+        newly = np.zeros_like(filled, dtype=bool)
+        for dy, dx in directions:
+            src_y = slice(max(0, -dy), h - max(0, dy))
+            src_x = slice(max(0, -dx), w - max(0, dx))
+            dst_y = slice(max(0, dy), h - max(0, -dy))
+            dst_x = slice(max(0, dx), w - max(0, -dx))
+            candidates = transparent[dst_y, dst_x] & ~filled[dst_y, dst_x] & filled[src_y, src_x]
+            if not candidates.any():
+                continue
+            for b in range(rgb.shape[0]):
+                dst_band = rgb[b, dst_y, dst_x]
+                src_band = rgb[b, src_y, src_x]
+                dst_band[candidates] = src_band[candidates]
+            newly_view = newly[dst_y, dst_x]
+            newly_view[candidates] = True
+        if not newly.any():
+            break
+        filled |= newly
+    return out
 
 
 def _render_one_tile(vrt, vrt_bounds, bands, z, x, y, dst_png,

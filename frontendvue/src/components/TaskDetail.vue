@@ -1,5 +1,6 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
+import { MessagePlugin } from 'tdesign-vue-next'
 import { useTaskStore, STATUS_TEXT } from '../stores/task'
 import { mapController } from '../composables/mapController'
 import { fmtSize } from '../utils/format'
@@ -75,6 +76,14 @@ function close() {
   mapController.value?.clearPreview()
 }
 function zoom() { if (t.value) mapController.value?.zoomTo(t.value.bbox) }
+async function openOutputDir() {
+  if (!t.value?.output_path) return
+  try {
+    await api.revealPath(t.value.output_path)
+  } catch (e) {
+    MessagePlugin.error('打开目录失败:' + (e?.message || e))
+  }
+}
 </script>
 
 <template>
@@ -132,7 +141,13 @@ function zoom() { if (t.value) mapController.value?.zoomTo(t.value.bbox) }
         <div class="kv" v-if="t.est_bytes"><span class="k">预估下载</span><span class="v">~{{ fmtSize(t.est_bytes) }} <span class="est-note">(仅原始瓦片)</span></span></div>
       </template>
       <div class="kv"><span class="k">范围</span><span class="v">{{ fmtBbox(t.bbox) }}</span></div>
-      <div class="kv" v-if="t.output_path"><span class="k">导出目录</span><span class="v path">{{ t.output_path }}</span></div>
+      <div class="kv path-row" v-if="t.output_path">
+        <span class="k">导出目录</span>
+        <span class="v path">
+          <span class="path-text">{{ t.output_path }}</span>
+          <t-button size="small" variant="outline" @click="openOutputDir">打开目录</t-button>
+        </span>
+      </div>
     </div>
 
     <!-- 导出成果大小(按格式分类 + 合计) -->
@@ -155,7 +170,10 @@ function zoom() { if (t.value) mapController.value?.zoomTo(t.value.bbox) }
 
 <style scoped>
 .detail {
-  position: absolute; top: 12px; right: 12px; z-index: 20; width: 290px;
+  /* 改停左上并随左侧面板避让:新布局的绘制工具条占了右上角,原先的 right:12px
+     会与它重叠。--pad-left 由 App.vue 按面板开合下传。 */
+  position: absolute; top: 12px; left: calc(12px + var(--pad-left, 0px));
+  z-index: 20; width: 290px; transition: left .22s ease;
   background: #fff; border: 1px solid #e2e8f0; border-radius: 10px;
   box-shadow: 0 6px 20px rgba(14,165,233,.14); padding: 14px; font-size: 13px;
 }
@@ -167,7 +185,9 @@ function zoom() { if (t.value) mapController.value?.zoomTo(t.value.bbox) }
 .kv { display: flex; justify-content: space-between; gap: 8px; line-height: 1.9; }
 .kv .k { color: #94a3b8; flex: 0 0 auto; }
 .kv .v { color: #334155; text-align: right; word-break: break-all; }
-.kv .v.path { font-size: 11px; }
+.kv.path-row { align-items: flex-start; }
+.kv .v.path { font-size: 11px; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.path-text { word-break: break-all; }
 .kv .v .est-note { color: #94a3b8; font-weight: 400; }
 .toggle { margin: 12px 0 8px; }
 </style>

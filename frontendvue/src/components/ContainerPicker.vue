@@ -9,6 +9,7 @@
  * 单一容器(如 Cesium 地形切片)没得选,列出来只是噪音。
  */
 import { computed } from 'vue'
+import { containerKeyOf } from '../utils/taskDefaults'
 import InfoTip from './InfoTip.vue'
 
 const props = defineProps({
@@ -41,7 +42,7 @@ const rows = computed(() => {
 })
 
 function valueOf(stage) {
-  return props.modelValue[stage.key] || stage.containers[0].key
+  return containerKeyOf(props.modelValue[stage.key]) || containerKeyOf(stage.containers[0])
 }
 
 function pick(stage, containerKey) {
@@ -50,7 +51,8 @@ function pick(stage, containerKey) {
 
 /** 附属文件提示:shapefile 这类多文件格式,拷走时少一个 .prj 就丢坐标系 */
 function hintOf(stage) {
-  const cur = stage.containers.find((c) => c.key === valueOf(stage))
+  const cur = stage.containers.find((c) => containerKeyOf(c) === valueOf(stage))
+  if (typeof cur === 'string') return ''
   if (!cur) return ''
   const parts = [cur.note].filter(Boolean)
   if (cur.sidecars?.length) {
@@ -65,7 +67,7 @@ function hintOf(stage) {
     <t-form-item :label="`${s.label} 文件格式`" label-align="top">
       <t-select
         :value="valueOf(s)"
-        :options="s.containers.map((c) => ({ value: c.key, label: c.label }))"
+        :options="s.containers.map((c) => ({ value: containerKeyOf(c), label: c.label || containerKeyOf(c) }))"
         @change="(v) => pick(s, v)"
       />
       <InfoTip v-if="hintOf(s)" :content="hintOf(s)" max-width="360px" />
