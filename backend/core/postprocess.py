@@ -81,15 +81,14 @@ def _geojson_geometries(geometry: dict) -> list[dict]:
 
 
 def clip_to_geometry(src_path: Path, geometry: dict) -> bool:
-    """把 EPSG:4326 的 GeoTIFF 原地裁剪到 geometry 边界,边界外置黑 + 写掩膜波段。
+    """把 EPSG:4326 的 GeoTIFF 原地裁剪到 geometry 边界并写显式 alpha 波段。
 
     不用 nodata=0 表达"边界外":三波段 uint8 影像里 0 是合法像素值,深色植被的
     红波段经常正好取 0(实测 z13 有 6.5% 的有效像素至少有一个波段为 0)。一旦
     声明 nodata=0,QGIS 按波段套用 nodata,选区**内部**这些像素也被判成无数据、
     渲成白点,看着像影像丢像素。
-    故改用 GDAL 掩膜波段:像素值原样保留,有效区只靠 mask 表达。下游 tms/osm
-    切片本就用 read_masks 取 alpha(见 tms.py/osm.py),掩膜同样能正确传下去,
-    且不会再在植被区打出透明散点。
+    因此输出保留颜色像素值,并把几何范围与源图有效性合并到显式 alpha。这样
+    桌面查看器和下游 tms/osm 切片都能识别透明区,且不会在植被区打出透明散点。
 
     成功裁剪返回 True;几何为空或无重叠返回 False(原文件不动)。
     """
@@ -101,26 +100,47 @@ def clip_to_geometry(src_path: Path, geometry: dict) -> bool:
 
     with rasterio.open(src_path) as src:
         try:
-            # 几何外仍填 0(保持黑边):不认掩膜的老客户端看到的是黑边而非花屏
-            out_image, out_transform = rio_mask(
-                src, geoms, crop=True, filled=True, nodata=0
+            # 几何外填 0,同时把有效性写入显式 alpha,避免不认内部 mask 的客户端显示黑边
+            masked_image, out_transform = rio_mask(
+                src, geoms, crop=True, filled=False
             )
         except ValueError:
             # 几何与影像无重叠
             return False
         profile = src.profile.copy()
+        source_colorinterp = tuple(src.colorinterp)
 
+    out_image = np.ma.getdata(masked_image)
+    masked = np.ma.getmaskarray(masked_image)
+    if masked.ndim == 2:
+        masked = masked[np.newaxis, ...]
     height, width = out_image.shape[1], out_image.shape[2]
     # invert=True -> 几何内为 True。与 rio_mask 同样用默认 all_touched=False,
     # 保证掩膜边界和上面裁出来的像素边界完全一致。
     inside = geometry_mask(geoms, out_shape=(height, width),
                            transform=out_transform, invert=True)
-    valid = np.where(inside, 255, 0).astype(np.uint8)
+    alpha_indexes = [
+        i for i, ci in enumerate(source_colorinterp)
+        if ci == rasterio.enums.ColorInterp.alpha
+    ]
+    data_indexes = [
+        i for i in range(out_image.shape[0]) if i not in alpha_indexes
+    ] or [0]
+    source_valid = ~masked[data_indexes].any(axis=0)
+    if alpha_indexes:
+        source_alpha = np.asarray(out_image[alpha_indexes[0]], dtype=np.uint8)
+        valid = np.where(inside & source_valid, source_alpha, 0).astype(np.uint8)
+    else:
+        valid = np.where(inside & source_valid, 255, 0).astype(np.uint8)
+    data = np.asarray(out_image[data_indexes], dtype=out_image.dtype).copy()
+    data[:, valid == 0] = 0
 
     profile.update({
         "height": height,
         "width": width,
         "transform": out_transform,
+        "count": len(data_indexes) + 1,
+        "photometric": "RGB" if len(data_indexes) >= 3 else "MINISBLACK",
         # 大范围裁剪结果仍可能超 4GB 普通 TIFF 上限,显式启用 BIGTIFF
         "BIGTIFF": "YES",
     })
@@ -129,8 +149,20 @@ def clip_to_geometry(src_path: Path, geometry: dict) -> bool:
 
     tmp = src_path.with_suffix(".clip.tif")
     with rasterio.open(tmp, "w", **profile) as dst:
-        dst.write(out_image)
-        dst.write_mask(valid)
+        dst.write(data, indexes=list(range(1, len(data_indexes) + 1)))
+        dst.write(valid, len(data_indexes) + 1)
+        if len(data_indexes) >= 3:
+            dst.colorinterp = [
+                rasterio.enums.ColorInterp.red,
+                rasterio.enums.ColorInterp.green,
+                rasterio.enums.ColorInterp.blue,
+                rasterio.enums.ColorInterp.alpha,
+            ]
+        else:
+            dst.colorinterp = [
+                rasterio.enums.ColorInterp.gray,
+                rasterio.enums.ColorInterp.alpha,
+            ]
     tmp.replace(src_path)
     return True
 
@@ -163,6 +195,10 @@ def reproject_geotiff(src_path: Path, dst_crs: str) -> bool:
         src_crs = src.crs
         src_transform = src.transform
         src_nodata = src.nodata
+        alpha_indexes = {
+            i for i, ci in enumerate(src.colorinterp, start=1)
+            if ci == rasterio.enums.ColorInterp.alpha
+        }
         # 裁剪过的影像用掩膜波段表达有效区(见 clip_to_geometry),重投影必须把
         # 掩膜一起搬过去,否则投影版会丢掉裁剪边界的透明信息。
         src_mask = src.read_masks(1)
@@ -180,9 +216,11 @@ def reproject_geotiff(src_path: Path, dst_crs: str) -> bool:
                 dst_crs=dst_crs,
                 src_nodata=src_nodata,
                 dst_nodata=src_nodata,
-                resampling=Resampling.bilinear,
+                # alpha 是有效性边界,避免双线性插值把透明边界扩大成灰边。
+                resampling=Resampling.nearest if i in alpha_indexes
+                else Resampling.bilinear,
             )
-        if has_mask:
+        if has_mask and not alpha_indexes:
             dst_mask = np.zeros((height, width), dtype=np.uint8)
             reproject(
                 source=src_mask,
@@ -195,5 +233,18 @@ def reproject_geotiff(src_path: Path, dst_crs: str) -> bool:
                 resampling=Resampling.nearest,
             )
             dst.write_mask(dst_mask)
+        if alpha_indexes:
+            if len(src_data) >= 4:
+                dst.colorinterp = [
+                    rasterio.enums.ColorInterp.red,
+                    rasterio.enums.ColorInterp.green,
+                    rasterio.enums.ColorInterp.blue,
+                    rasterio.enums.ColorInterp.alpha,
+                ]
+            elif len(src_data) == 2:
+                dst.colorinterp = [
+                    rasterio.enums.ColorInterp.gray,
+                    rasterio.enums.ColorInterp.alpha,
+                ]
     tmp.replace(src_path)
     return True

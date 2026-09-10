@@ -56,6 +56,15 @@ def parse_export(value: str) -> list[str]:
     return out or ["geotiff"]
 
 
+TMS_SOURCE_STRATEGIES = {"contiguous", "preserve_inputs"}
+
+
+def normalize_tms_source_strategy(value: str | None) -> str:
+    """归一化本地 tif 出 TMS 时的层级补齐策略。"""
+    v = str(value or "").strip().lower()
+    return v if v in TMS_SOURCE_STRATEGIES else "contiguous"
+
+
 # ---------- 阶段化进度定义 ----------
 
 # 阶段标签(展示名)。从 core.formats 注册表派生,避免两处维护漂移;
@@ -196,6 +205,9 @@ class TaskCreate(BaseModel):
     source_path: str = Field(
         default="",
         description="本地文件输入源的绝对路径(provider 为 local_image/local_dem 时必填)")
+    tms_source_strategy: str = Field(
+        default="contiguous",
+        description="本地影像出 TMS 的断层策略:contiguous/preserve_inputs")
 
     def level_list(self) -> list[int]:
         """归一化出去重升序的级别列表:优先 levels,回退 z_min..z_max。
@@ -248,9 +260,10 @@ def create_task(data: TaskCreate, total: int, est_bytes: int = 0) -> str:
                 upload_id, height_field, height_mode, height_scale,
                 floor_height, name_field, keep_fields, dem_upload_id,
                 containers, contour_interval, keep_tiles_dir, source_path,
+                tms_source_strategy,
                 created_at, updated_at)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-                       ?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 task_id, data.name, data.provider, json.dumps(data.bbox),
                 z_min, z_max, data.export,
@@ -273,6 +286,7 @@ def create_task(data: TaskCreate, total: int, est_bytes: int = 0) -> str:
                 float(data.contour_interval or 50.0),
                 1 if data.keep_tiles_dir else 0,
                 (data.source_path or "").strip(),
+                normalize_tms_source_strategy(data.tms_source_strategy),
                 now, now,
             ),
         )
@@ -374,6 +388,8 @@ def _row_to_dict(row) -> dict:
     kt = d.get("keep_tiles_dir")
     d["keep_tiles_dir"] = True if kt is None else bool(kt)
     d["source_path"] = d.get("source_path") or ""
+    d["tms_source_strategy"] = normalize_tms_source_strategy(
+        d.get("tms_source_strategy"))
     # 阶段化进度:优先存储的 stages;旧任务(空)按 export/status 合成兼容视图
     st = d.get("stages")
     stages = json.loads(st) if st else []

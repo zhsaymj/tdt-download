@@ -21,6 +21,7 @@ test('处理面板切换来源时会完整重置本地表单状态', () => {
     'bldParams.value = null',
     'bldBbox.value = null',
     'submitting.value = false',
+    "form.tmsSourceStrategy = 'contiguous'",
     'form.useRange = false',
     "form.vecContainer = 'gpkg'",
     "form.bldVecContainer = 'gpkg'",
@@ -59,4 +60,15 @@ test('地形下载层级描述会展示大小和精度', () => {
   assert.ok(componentSource.includes('precisionOf(z)'))
   assert.ok(componentSource.includes('levelMetaText(z)'))
   assert.ok(taskDefaultsSource.includes('精度约'))
+})
+
+test('影像 TMS 支持选择分段保留输入层级策略', () => {
+  assert.ok(componentSource.includes("tmsSourceStrategy: 'contiguous'"))
+  assert.ok(componentSource.includes('tmsSourceStrategyOptions'))
+  assert.ok(componentSource.includes('showTmsSourceStrategy'))
+  assert.ok(componentSource.includes("!isBuildings.value && !isDem.value && form.export.includes('tms')"))
+  assert.ok(componentSource.includes("value: 'preserve_inputs'"))
+  assert.ok((componentSource.match(/tms_source_strategy: form.tmsSourceStrategy/g) || []).length >= 2)
+  assert.ok(componentSource.includes('TMS 断层策略'))
+  assert.ok(componentSource.includes("form.export.includes('tms')"))
 })

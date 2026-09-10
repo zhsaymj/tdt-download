@@ -41,7 +41,8 @@ from .progress import StageTracker
 from .queue import task_queue
 from .terrain_tiles import export_terrain, level_for_resolution, write_layer_json
 from .token_pool import token_pool
-from .tms import export_tms, export_tms_from_source, write_tilemapresource
+from .tms import (export_tms, export_tms_from_source, source_tms_level_plan,
+                  source_tms_level_plan_preserve_inputs, write_tilemapresource)
 from .tiling import TILE_SIZE, range_for_bbox
 
 # OSM 金字塔起始下限:低于此级的超低层(单瓦片跨度巨大、小范围里基本全透明)
@@ -376,7 +377,7 @@ def _resample_to_level(ctx, src_path: Path, dst_path: Path, tr, on_row=None) -> 
     逐块写出并回调 on_row,大图不必整份进内存。
     """
     import rasterio
-    from rasterio.enums import Resampling
+    from rasterio.enums import ColorInterp, Resampling
     from rasterio.transform import from_bounds as _from_bounds
     from rasterio.vrt import WarpedVRT
     from rasterio.windows import Window
@@ -386,18 +387,31 @@ def _resample_to_level(ctx, src_path: Path, dst_path: Path, tr, on_row=None) -> 
     transform = _from_bounds(west, south, east, north, width, height)
 
     with rasterio.open(src_path) as src:
-        src_count = src.count
+        alpha_indexes = {
+            i for i, ci in enumerate(src.colorinterp, start=1)
+            if ci == ColorInterp.alpha
+        }
+        alpha_index = min(alpha_indexes) if alpha_indexes else None
+        data_indexes = [
+            i for i in range(1, src.count + 1)
+            if i not in alpha_indexes
+        ] or [1]
+        # RGBA/灰度+alpha 本地源已经有透明通道,GDAL 不允许再 add_alpha。
+        # 统一写成显式 alpha 波段,桌面查看器和下游 TMS/OSM 都能识别透明区。
+        add_alpha = not alpha_indexes
         with WarpedVRT(src, crs="EPSG:4326", transform=transform,
                         width=width, height=height,
                         resampling=Resampling.bilinear,
-                        add_alpha=True) as vrt:
+                        add_alpha=add_alpha) as vrt:
             profile = vrt.profile.copy()
             # 本地源图通常不会刚好落在瓦片网格边界上。WarpedVRT 会把源图
             # 覆盖不到的目标像素填成 0；如果只写 RGB 而不写 mask，QGIS / 下游
             # 切片会把这些 0 当成有效黑像素，形成上/右/下黑边。
             profile.pop("nodata", None)
             profile.update(driver="GTiff", tiled=True, blockxsize=256,
-                           blockysize=256, compress="deflate", count=src_count,
+                           blockysize=256, compress="deflate",
+                           count=len(data_indexes) + 1,
+                           photometric="RGB" if len(data_indexes) >= 3 else "MINISBLACK",
                            BIGTIFF="IF_SAFER")
             # 行块高度取一屏瓦片,既控制内存也让进度回调有合理粒度
             step = TILE_SIZE
@@ -407,12 +421,24 @@ def _resample_to_level(ctx, src_path: Path, dst_path: Path, tr, on_row=None) -> 
                     _check_stop(ctx)
                     h = min(step, height - y0)
                     win = Window(0, y0, width, h)
-                    dst.write(vrt.read(indexes=list(range(1, src_count + 1)),
-                                       window=win), window=win)
-                    dst.write_mask(vrt.read(src_count + 1, window=win),
-                                   window=win)
+                    data = vrt.read(indexes=data_indexes, window=win)
+                    if add_alpha:
+                        alpha = vrt.read(len(data_indexes) + 1, window=win)
+                    else:
+                        alpha = vrt.read(alpha_index, window=win)
+                    data[:, alpha == 0] = 0
+                    dst.write(data, indexes=list(range(1, len(data_indexes) + 1)),
+                              window=win)
+                    dst.write(alpha, len(data_indexes) + 1, window=win)
                     if on_row:
                         on_row(i, total)
+                if len(data_indexes) >= 3:
+                    dst.colorinterp = [
+                        ColorInterp.red, ColorInterp.green,
+                        ColorInterp.blue, ColorInterp.alpha,
+                    ]
+                else:
+                    dst.colorinterp = [ColorInterp.gray, ColorInterp.alpha]
     return dst_path
 
 
@@ -548,6 +574,10 @@ def _stage_tms(ctx) -> list[str]:
     if ctx.local_src is not None:
         return _tms_from_source_file(ctx, tms_dir, clip_geom)
 
+    plan = _source_tms_plan_for_task(ctx)
+    if _tms_plan_requires_source(plan):
+        return _tms_from_downloaded_sources(ctx, tms_dir, clip_geom, plan)
+
     def on_progress(done, total):
         ctx.tracker.update("tms", done=done, total=total,
                            message=f"已切 {done}/{total} 张")
@@ -590,18 +620,18 @@ def _maybe_mbtiles(ctx, stage_key: str, tiles_dir: Path, scheme: str,
     return [str(packed)]
 
 
-def _local_raster_source(ctx) -> Path:
+def _local_raster_source(ctx, source_z: int | None = None) -> Path:
     """本地源任务里,供切片使用的 4326 源图。
 
-    优先用 geotiff 阶段已产出的最高级图:它已重采样并对齐瓦片网格,切片时窗口
+    优先用 geotiff 阶段已产出的指定级别图:它已重采样并对齐瓦片网格,切片时窗口
     换算是整数、无边缘错位。该阶段未跑(用户只勾了瓦片)时才临时生成一张。
     """
     task = ctx.task
-    z_max = max(ctx.levels)
-    done = ctx.out_dir / f"{task['name']}_z{z_max}.tif"
+    z = source_z if source_z is not None else max(ctx.levels)
+    done = ctx.out_dir / f"{task['name']}_z{z}.tif"
     if done.exists() and done.stat().st_size > 0:
         return done
-    tmp = ctx.out_dir / f".local_src_z{z_max}.tif"
+    tmp = ctx.out_dir / f".local_src_z{z}.tif"
     if tmp.exists() and tmp.stat().st_size > 0:
         return tmp
 
@@ -610,28 +640,95 @@ def _local_raster_source(ctx) -> Path:
         ctx.tracker.update(ctx.cur_stage,
                            message=f"准备切片源({done_rows}/{total_r})")
 
-    tr = range_for_bbox(*ctx.bbox, z_max)
+    tr = range_for_bbox(*ctx.bbox, z)
     _resample_to_level(ctx, ctx.local_src, tmp, tr, on_row)
     return tmp
 
 
-def _tms_from_source_file(ctx, tms_dir: Path, clip_geom) -> list[str]:
-    """本地影像源出 TMS:由源图重采样切 geodetic 网格。"""
-    src = _local_raster_source(ctx)
+def _tms_tile_count(bbox, levels: list[int]) -> int:
+    """按天地图 z 级统计 TMS 源图切片任务数。"""
+    return sum(range_for_bbox(*bbox, z).count for z in levels)
+
+
+def _source_tms_plan_for_task(ctx) -> list[tuple[int, list[int]]]:
+    if ctx.task.get("tms_source_strategy") == "preserve_inputs":
+        return source_tms_level_plan_preserve_inputs(ctx.levels)
+    return source_tms_level_plan(ctx.levels)
+
+
+def _tms_plan_requires_source(plan: list[tuple[int, list[int]]]) -> bool:
+    """判断 TMS 计划是否需要从 GeoTIFF 源重切,而不能原始瓦片直拷。"""
+    return any(target_levels != [source_z]
+               for source_z, target_levels in plan)
+
+
+def _tms_from_planned_sources(ctx, tms_dir: Path, clip_geom,
+                              plan: list[tuple[int, list[int]]],
+                              source_for_level) -> list[str]:
+    """按“源层级 → 输出层级列表”计划切 TMS,供本地/在线影像共用。"""
+    total_tiles = max(sum(_tms_tile_count(ctx.bbox, lv) for _, lv in plan), 1)
+    done_base = 0
+    exported_levels: set[int] = set()
+    tms_ext = "png"
 
     def on_progress(done, total):
         _check_stop(ctx)
-        ctx.tracker.update("tms", done=done, total=total,
-                           message=f"切 TMS 瓦片({done}/{total} 张)")
+        current = min(done_base + done, total_tiles)
+        ctx.tracker.update("tms", done=current, total=total_tiles,
+                           message=f"切 TMS 瓦片({current}/{total_tiles} 张)")
 
-    _, _, tms_ext, stopped = export_tms_from_source(
-        src, ctx.bbox, ctx.levels, tms_dir, clip_geom=clip_geom,
-        on_progress=on_progress, should_stop=ctx.should_stop)
-    if stopped:
-        raise _Stopped()
+    for source_z, levels in plan:
+        src = source_for_level(source_z)
+        _, tms_levels, tms_ext, stopped = export_tms_from_source(
+            src, ctx.bbox, levels, tms_dir, clip_geom=clip_geom,
+            on_progress=on_progress, should_stop=ctx.should_stop,
+            fill_to_tms_zero=False)
+        exported_levels.update(tms_levels)
+        done_base += _tms_tile_count(ctx.bbox, levels)
+        if stopped:
+            raise _Stopped()
     write_tilemapresource(tms_dir, ctx.provider, ctx.task["name"],
-                          ctx.bbox, ctx.levels, ext=tms_ext)
+                          ctx.bbox, sorted(exported_levels), ext=tms_ext)
     return _maybe_mbtiles(ctx, "tms", tms_dir, "tms", tms_ext)
+
+
+def _downloaded_raster_source(ctx, source_z: int) -> Path:
+    """在线影像任务里,供补金字塔用的指定级别 4326 GeoTIFF 源图。"""
+    task = ctx.task
+    done = ctx.out_dir / f"{task['name']}_z{source_z}.tif"
+    if done.exists() and done.stat().st_size > 0:
+        return done
+    tmp = ctx.out_dir / f".tms_src_z{source_z}.tif"
+    if tmp.exists() and tmp.stat().st_size > 0:
+        return tmp
+
+    anno_path_fn = (ctx.anno_downloader.tile_path
+                    if ctx.anno_downloader is not None else None)
+    tr = range_for_bbox(*ctx.bbox, source_z)
+
+    def on_row(done_rows, total_r):
+        _check_stop(ctx)
+        ctx.tracker.update(ctx.cur_stage,
+                           message=f"准备切片源({source_z}级 {done_rows}/{total_r}行)")
+
+    mosaic_to_geotiff(ctx.provider, settings.cache_dir, tr, tmp,
+                      ctx.downloader.tile_path, anno_path_fn, on_row=on_row)
+    return tmp
+
+
+def _tms_from_downloaded_sources(ctx, tms_dir: Path, clip_geom,
+                                 plan: list[tuple[int, list[int]]]) -> list[str]:
+    """在线影像出 TMS:需要补层时用各级 GeoTIFF 源分段重切。"""
+    return _tms_from_planned_sources(
+        ctx, tms_dir, clip_geom, plan,
+        lambda source_z: _downloaded_raster_source(ctx, source_z))
+
+
+def _tms_from_source_file(ctx, tms_dir: Path, clip_geom) -> list[str]:
+    """本地影像源出 TMS:由源图重采样切 geodetic 网格。"""
+    return _tms_from_planned_sources(
+        ctx, tms_dir, clip_geom, _source_tms_plan_for_task(ctx),
+        lambda source_z: _local_raster_source(ctx, source_z))
 
 
 def _tms_from_dem(ctx, tms_dir: Path, clip_geom) -> list[str]:
@@ -643,13 +740,13 @@ def _tms_from_dem(ctx, tms_dir: Path, clip_geom) -> list[str]:
         ctx.tracker.update("tms", done=done, total=total,
                            message=f"切 TMS 瓦片({done}/{total} 张)")
 
-    _, _, tms_ext, stopped = export_tms_from_source(
+    _, tms_levels, tms_ext, stopped = export_tms_from_source(
         src, ctx.bbox, ctx.levels, tms_dir, clip_geom=clip_geom,
         on_progress=on_progress, should_stop=ctx.should_stop)
     if stopped:
         raise _Stopped()          # 保留可视化源,恢复时复用
     write_tilemapresource(tms_dir, ctx.provider, ctx.task["name"],
-                          ctx.bbox, ctx.levels, ext=tms_ext)
+                          ctx.bbox, tms_levels, ext=tms_ext)
     _safe_unlink(src)
     return _maybe_mbtiles(ctx, "tms", tms_dir, "tms", tms_ext)
 

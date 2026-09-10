@@ -16,7 +16,7 @@ from ..core.tiling import estimate_levels, estimate_levels_detail, estimate_tota
 from ..core.token_pool import token_pool
 from ..models import (
     TaskCreate, build_stage_defs, create_task, delete_task, get_task,
-    list_tasks, parse_export, update_task,
+    list_tasks, normalize_tms_source_strategy, parse_export, update_task,
 )
 from ..providers.buildings import is_building_provider
 from ..providers.terrain import DEM_LAYERS, is_dem_provider
@@ -696,6 +696,8 @@ async def api_update_task(task_id: str, data: TaskCreate):
         clip=1 if data.clip else 0,
         use_cache=1 if data.use_cache else 0,
         annotate=1 if data.annotate else 0,
+        tms_source_strategy=normalize_tms_source_strategy(
+            data.tms_source_strategy),
         hillshade=json.dumps(data.hillshade.model_dump()),
         stages=json.dumps(stages),
         est_bytes=est_bytes,
@@ -753,6 +755,7 @@ class AddExportReq(BaseModel):
     containers: dict[str, str] = Field(default_factory=dict)
     contour_interval: float = Field(default=0.0, gt=-1.0, le=10000.0)
     keep_tiles_dir: bool | None = Field(default=None)
+    tms_source_strategy: str | None = Field(default=None)
 
 
 @router.post("/{task_id}/add_export")
@@ -827,6 +830,10 @@ async def api_add_export(task_id: str, data: AddExportReq):
                 else float(task.get("contour_interval") or 50.0))
     keep_dir = (task.get("keep_tiles_dir", True)
                 if data.keep_tiles_dir is None else data.keep_tiles_dir)
+    extra_updates = {}
+    if data.tms_source_strategy is not None:
+        extra_updates["tms_source_strategy"] = normalize_tms_source_strategy(
+            data.tms_source_strategy)
 
     # 按合并后的格式重算阶段表:已有阶段沿用其状态(done 的会被 runner 跳过),
     # 新阶段为 pending。顺序由注册表的 order 决定,不受追加顺序影响。
@@ -853,7 +860,7 @@ async def api_add_export(task_id: str, data: AddExportReq):
                 containers=json.dumps(containers, ensure_ascii=False),
                 contour_interval=interval,
                 keep_tiles_dir=1 if keep_dir else 0,
-                stages=json.dumps(stages))
+                stages=json.dumps(stages), **extra_updates)
     await task_queue.enqueue(task_id)
     return {"id": task_id, "status": "pending", "added": added,
             "export": ",".join(merged)}

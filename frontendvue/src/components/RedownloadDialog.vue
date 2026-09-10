@@ -41,6 +41,7 @@ const crsOpts = crsOptions()
 const form = reactive({
   name: '', provider: 'tianditu_img', levels: [], export: [],
   crs: 'EPSG:4326', clip: false, use_cache: true, annotate: false,
+  tms_source_strategy: 'contiguous',
   // 三维建筑参数
   base_height_mode: 'terrain', height_offset: 0, default_height: 6, max_per_tile: 2000,
   // 本地矢量面字段映射
@@ -118,6 +119,10 @@ const ALL_LEVELS = computed(() =>
   isDem.value ? Array.from({ length: 17 }, (_, i) => i)   // 0..16(Esri Terrain3D)
     : Array.from({ length: 18 }, (_, i) => i + 1))
 const exportOptions = computed(() => (isDem.value ? demExportOptions : imageExportOptions))
+const tmsSourceStrategyOptions = [
+  { value: 'contiguous', label: '连续高层兜底(默认)' },
+  { value: 'preserve_inputs', label: '保留每个输入层级并分段补齐' },
+]
 
 const allChecked = computed(() => form.levels.length === ALL_LEVELS.value.length)
 function toggleAll(checked) { form.levels = checked ? [...ALL_LEVELS.value] : [] }
@@ -211,6 +216,7 @@ watch(() => props.visible, async (v) => {
     form.clip = !!t.clip
     form.annotate = !!t.annotate
     form.use_cache = true
+    form.tms_source_strategy = t.tms_source_strategy || 'contiguous'
     // 三维建筑参数预填
     form.base_height_mode = t.base_height_mode || 'terrain'
     form.height_offset = Number(t.height_offset) || 0
@@ -314,6 +320,7 @@ async function submit() {
     clip: !!(form.clip && props.task.geometry),
     use_cache: form.use_cache,
     annotate: form.annotate,
+    tms_source_strategy: form.tms_source_strategy,
   }
   try {
     if (inPlace.value) {
@@ -436,6 +443,12 @@ async function submit() {
       </t-form-item>
       <t-form-item v-if="!isBuildings" label="导出格式">
         <t-checkbox-group v-model="form.export" :options="exportOptions" />
+      </t-form-item>
+      <t-form-item v-if="!isBuildings && !isDem && form.export.includes('tms')"
+        label="TMS 断层策略">
+        <t-radio-group v-model="form.tms_source_strategy"
+          :options="tmsSourceStrategyOptions" />
+        <div class="rd-note">连续高层兜底会忽略断层后的低层源;分段保留会让每个输入 tif 保留自身层级,并向下补到下一个输入层级之上。</div>
       </t-form-item>
       <t-form-item v-if="!isBuildings && !isDem && form.export.includes('osm')">
         <div class="rd-note">OSM 切片需要最高级拼接图作源,已自动勾选 GeoTIFF。GeoTIFF 主文件恒为 EPSG:4326,OSM 切片直接复用它、不重复拼接(裁剪时复用裁剪前的未裁剪源,同样免自拼)。</div>

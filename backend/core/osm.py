@@ -34,6 +34,23 @@ MERC_MAX = 20037508.342789244
 LAT_LIMIT = 85.05112878
 
 
+def _has_explicit_alpha_or_mask(ds) -> bool:
+    """源图已经用 alpha/internal mask 表达透明区时,不要再用 nodata=0 覆盖它。"""
+    if any(ci == ColorInterp.alpha for ci in ds.colorinterp):
+        return True
+    return any(
+        any(flag.name in ("alpha", "per_dataset") for flag in flags)
+        for flags in ds.mask_flag_enums
+    )
+
+
+def _warped_vrt_kwargs(ds, crs: str) -> dict:
+    kwargs = {"crs": crs, "resampling": Resampling.bilinear}
+    if not _has_explicit_alpha_or_mask(ds):
+        kwargs.update(src_nodata=ds.nodata, nodata=0)
+    return kwargs
+
+
 def lonlat_to_xyz(lon: float, lat: float, z: int) -> tuple[int, int]:
     """经纬度 → OSM XYZ 瓦片行列 (x, y)。"""
     lat = max(-LAT_LIMIT, min(LAT_LIMIT, lat))
@@ -160,7 +177,8 @@ def _render_one_tile(vrt, vrt_bounds, bands, z, x, y, dst_png,
     if ow <= 0 or oh <= 0:
         return False
     window = window_from_bounds(ix0, iy0, ix1, iy1, vrt.transform)
-    sub = vrt.read(out_shape=(bands, oh, ow), window=window,
+    sub = vrt.read(indexes=list(range(1, bands + 1)),
+                   out_shape=(bands, oh, ow), window=window,
                    resampling=Resampling.bilinear).astype(np.uint8)
     submask = vrt.read_masks(1, out_shape=(oh, ow), window=window).astype(np.uint8)
     rgb[:, py0:py1, px0:px1] = sub
@@ -220,9 +238,8 @@ def export_osm(
 
     # 先取源的 3857 有效四至(用于覆盖判断);顺便拿波段数
     with rasterio.open(src_geotiff) as _ds0:
-        bands = _ds0.count
-        with WarpedVRT(_ds0, crs="EPSG:3857", resampling=Resampling.bilinear,
-                       src_nodata=_ds0.nodata, nodata=0) as _v0:
+        bands = min(_ds0.count, 3)
+        with WarpedVRT(_ds0, **_warped_vrt_kwargs(_ds0, "EPSG:3857")) as _v0:
             vb = _v0.bounds
     vrt_left, vrt_bottom, vrt_right, vrt_top = vb.left, vb.bottom, vb.right, vb.top
 
@@ -235,8 +252,7 @@ def export_osm(
         v = getattr(_tls, "vrt", None)
         if v is None:
             ds = rasterio.open(src_geotiff)
-            v = WarpedVRT(ds, crs="EPSG:3857", resampling=Resampling.bilinear,
-                          src_nodata=ds.nodata, nodata=0)
+            v = WarpedVRT(ds, **_warped_vrt_kwargs(ds, "EPSG:3857"))
             _tls.ds = ds
             _tls.vrt = v
             with lock:

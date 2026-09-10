@@ -26,7 +26,16 @@ const form = reactive({
   export: [],
   containers: {},
   contourInterval: 50,
+  tmsSourceStrategy: 'contiguous',
 })
+
+const tmsSourceStrategyOptions = [
+  { value: 'contiguous', label: '连续高层兜底(默认)' },
+  { value: 'preserve_inputs', label: '保留每个输入层级并分段补齐' },
+]
+function isRasterImageProvider(provider) {
+  return ['tianditu_img', 'tianditu_vec', 'tianditu_ter', 'local_image'].includes(provider)
+}
 
 /** 该任务已导出过的格式(不可重复补充,故置灰) */
 const existing = computed(() => {
@@ -57,6 +66,7 @@ watch(() => props.visible, async (v) => {
   form.export = []
   form.containers = {}
   form.contourInterval = Number(props.task?.contour_interval) || 50
+  form.tmsSourceStrategy = props.task?.tms_source_strategy || 'contiguous'
   if (!Object.keys(caps.value).length) {
     try { caps.value = (await api.capabilities()).providers || {} } catch (_) { /* 拿不到就只显示空列表 */ }
   }
@@ -73,6 +83,7 @@ async function submit() {
       export: form.export.join(','),
       containers: { ...form.containers },
       contour_interval: Number(form.contourInterval) || 50,
+      tms_source_strategy: form.tmsSourceStrategy,
     })
     MessagePlugin.success('已加入队列,补充导出:' + r.added.join('、'))
     emit('update:visible', false)
@@ -110,6 +121,12 @@ async function submit() {
           <t-input-number v-model="form.contourInterval" :min="1" :max="1000"
             :step="10" theme="column" style="width: 130px" />
         </t-form-item>
+        <t-form-item v-if="isRasterImageProvider(task.provider) && form.export.includes('tms')"
+          label="TMS 断层策略">
+          <t-radio-group v-model="form.tmsSourceStrategy"
+            :options="tmsSourceStrategyOptions" />
+          <div class="ae-note">连续高层兜底会忽略断层后的低层源;分段保留会让每个输入 tif 保留自身层级,并向下补到下一个输入层级之上。</div>
+        </t-form-item>
       </t-form>
     </div>
   </t-dialog>
@@ -118,4 +135,5 @@ async function submit() {
 <style scoped>
 .ae-body { font-size: 13px; }
 .ae-hint { color: #475569; line-height: 1.7; margin-bottom: 10px; }
+.ae-note { font-size: 12px; color: #0369a1; line-height: 1.6; margin-top: 6px; }
 </style>

@@ -63,6 +63,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- (一份 2GB 影像会让 data/ 再占 2GB)。代价是原文件被移动/删除后任务无法重跑,
     -- runner 启动时会校验存在性并给出明确报错。
     source_path      TEXT DEFAULT '',
+    -- 本地影像 tif 出 TMS 时的断层补齐策略:
+    -- contiguous=只用连续高层级兜底;preserve_inputs=保留每个输入层级并分段补齐。
+    tms_source_strategy TEXT DEFAULT 'contiguous',
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
@@ -113,6 +116,7 @@ _MIGRATIONS = {
     "keep_tiles_dir": "ALTER TABLE tasks ADD COLUMN keep_tiles_dir INTEGER DEFAULT 1",
     # 本地文件输入源(不下载,直接读用户磁盘上的文件)
     "source_path": "ALTER TABLE tasks ADD COLUMN source_path TEXT DEFAULT ''",
+    "tms_source_strategy": "ALTER TABLE tasks ADD COLUMN tms_source_strategy TEXT DEFAULT 'contiguous'",
 }
 
 

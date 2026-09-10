@@ -65,6 +65,64 @@ def units_per_pixel(level: int) -> float:
     return BASE_UPP / (2 ** level)
 
 
+def expand_source_tms_levels(levels: list[int]) -> list[int]:
+    """从单张源图切 TMS 时,自动补齐到 TMS 0 级。
+
+    调用方传入的是天地图 z 级;TMS 目录级号为 z-1。比如只选 z=18 时,
+    需要输出 TMS 0..17,因此实际切片用天地图 z=1..18。
+    在线瓦片无损搬运不能凭空补未下载级别,故只给 source-based TMS 使用。
+    """
+    if not levels:
+        return []
+    max_z = max(levels)
+    if max_z < 1:
+        return []
+    return list(range(1, max_z + 1))
+
+
+def source_tms_level_plan(levels: list[int]) -> list[tuple[int, list[int]]]:
+    """规划本地源图 TMS 切片的“原始层 + 兜底补层”关系。
+
+    只把从最高级开始连续的一段当作原始切片源。低于这段、或中间断档后的
+    层级都视为兜底金字塔,统一用连续段里最低的那个源图降采样补齐。
+
+    示例:传入 [18, 17, 16, 13] 时,18/17/16 是连续高层,13 已经断档;
+    因此 z16 源负责输出 z1..z16,z17 源只输出 z17,z18 源只输出 z18。
+    """
+    clean = sorted({int(z) for z in levels if int(z) >= 1}, reverse=True)
+    if not clean:
+        return []
+
+    available = set(clean)
+    high = clean[0]
+    contiguous: list[int] = []
+    z = high
+    while z in available:
+        contiguous.append(z)
+        z -= 1
+
+    base_z = contiguous[-1]
+    plan: list[tuple[int, list[int]]] = [(base_z, list(range(1, base_z + 1)))]
+    for z in sorted((lv for lv in contiguous if lv > base_z)):
+        plan.append((z, [z]))
+    return plan
+
+
+def source_tms_level_plan_preserve_inputs(levels: list[int]) -> list[tuple[int, list[int]]]:
+    """规划“保留每个输入 tif 原始层级”的 TMS 分段补齐关系。
+
+    每个输入层级都作为该层级的原始源,并向下补齐到下一个输入层级之上;
+    最低的输入层级继续补到 z1。示例:传入 [18, 17, 16, 13] 时,
+    z18 输出 z18,z17 输出 z17,z16 输出 z14..z16,z13 输出 z1..z13。
+    """
+    clean = sorted({int(z) for z in levels if int(z) >= 1}, reverse=True)
+    plan: list[tuple[int, list[int]]] = []
+    for i, source_z in enumerate(clean):
+        lower = clean[i + 1] + 1 if i + 1 < len(clean) else 1
+        plan.append((source_z, list(range(lower, source_z + 1))))
+    return plan
+
+
 def _render_tms_tile(col, row, z, out_dir, out_ext, tile_path_fn,
                      clipping, annotating, geoms, clip_bounds,
                      anno_tile_path_fn) -> bool:
@@ -205,6 +263,7 @@ def export_tms_from_source(
     on_progress=None,
     should_stop=None,
     concurrency: int | None = None,
+    fill_to_tms_zero: bool = True,
 ) -> tuple[Path, list[int], str, bool]:
     """从一张 EPSG:4326 源图重采样切出 geodetic TMS 瓦片。
 
@@ -220,6 +279,8 @@ def export_tms_from_source(
     from rasterio.windows import from_bounds as _window_from_bounds
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    levels = (expand_source_tms_levels(levels) if fill_to_tms_zero
+              else sorted({int(z) for z in levels if int(z) >= 1}))
     clip_geoms = prepare_geoms(clip_geom, "EPSG:4326") if clip_geom else None
 
     # 先数出总瓦片数,进度才有真实分母
@@ -315,7 +376,7 @@ def export_tms_from_source(
 
     if on_progress:
         on_progress(done, total)
-    return out_dir, list(levels), "png", stopped
+    return out_dir, levels, "png", stopped
 
 
 def write_tilemapresource(

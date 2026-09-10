@@ -60,6 +60,7 @@ const form = reactive({
   clip: true,
   annotate: false,
   keepTilesDir: true,
+  tmsSourceStrategy: 'contiguous',
   contourInterval: 50,
   // 本地文件
   path: '',
@@ -141,6 +142,12 @@ const bldVecOptions = computed(() => {
 const levelList = computed(() => (isDem.value ? DEM_LEVELS : IMG_LEVELS))
 const picksMbtiles = computed(() => ['tms', 'osm'].some(
   (k) => form.export.includes(k) && form.containers[k] === 'mbtiles'))
+const tmsSourceStrategyOptions = [
+  { value: 'contiguous', label: '连续高层兜底(默认)' },
+  { value: 'preserve_inputs', label: '保留每个输入层级并分段补齐' },
+]
+const showTmsSourceStrategy = computed(() =>
+  !isBuildings.value && !isDem.value && form.export.includes('tms'))
 
 function applyAutoName(force = false) {
   const next = defaultTaskName(form.provider)
@@ -296,6 +303,7 @@ function resetFormState() {
   form.clip = true
   form.annotate = false
   form.keepTilesDir = true
+  form.tmsSourceStrategy = 'contiguous'
   form.contourInterval = 50
   form.path = ''
   form.useRange = false
@@ -400,6 +408,7 @@ function buildPayload() {
       source_path: form.path,
       bbox: (form.useRange && drawStore.bbox) ? drawStore.bbox : [],
       levels: [],
+      tms_source_strategy: form.tmsSourceStrategy,
       geometry: null,
       clip: !!(form.clip && form.useRange && drawStore.bbox),
     }
@@ -430,6 +439,7 @@ function buildPayload() {
     geometry: (form.clip ? drawStore.clipGeometry : drawStore.geometry) || null,
     clip: !!(form.clip && drawStore.clipGeometry),
     annotate: isDem.value ? false : form.annotate,
+    tms_source_strategy: form.tmsSourceStrategy,
   }
 }
 
@@ -631,6 +641,13 @@ const title = computed(() => ({
                 <t-checkbox v-model="form.useRange">只处理所画范围</t-checkbox>
                 <InfoTip content="默认处理整幅文件。勾选后只处理文件与所画范围的交集。"
                   max-width="340px" />
+              </t-form-item>
+              <t-form-item v-if="showTmsSourceStrategy"
+                label="TMS 断层策略">
+                <t-radio-group v-model="form.tmsSourceStrategy"
+                  :options="tmsSourceStrategyOptions" />
+                <InfoTip content="连续高层兜底:只使用从最高层开始连续的原始层级,断层后的低层不参与。保留每个输入层级:每个输入 tif 保留自身层级,并向下补到下一个输入层级之上,如 18/17/16/13 会切成 18、17、14-16、1-13。"
+                  max-width="420px" />
               </t-form-item>
               <t-form-item v-if="isDownload ? drawStore.clippable : form.useRange"
                 label-width="0">
