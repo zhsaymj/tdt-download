@@ -4,6 +4,9 @@ import { MessagePlugin } from 'tdesign-vue-next'
 import { useTaskStore } from '../stores/task'
 import { crsOptions } from '../utils/crs'
 import { fmtSize } from '../utils/format'
+import {
+  formatPixelResolution, formatPixelSize, formatSampleSpacing, formatScale72Dpi,
+} from '../utils/taskDefaults'
 import { isBuildingProvider } from '../utils/provider'
 import { api } from '../api'
 
@@ -167,7 +170,9 @@ async function refreshEstimate() {
       levels: ALL_LEVELS.value.join(','), provider: form.provider,
     })
     const map = {}
-    for (const it of (d.levels || [])) map[it.z] = { tiles: it.tiles, bytes: it.bytes }
+    for (const it of (d.levels || [])) {
+      map[it.z] = { tiles: it.tiles, bytes: it.bytes, width: it.width, height: it.height }
+    }
     perLevel.value = map
   } catch (_) { perLevel.value = {} }
 }
@@ -182,7 +187,26 @@ const selectedSummary = computed(() => {
 })
 function levelSize(z) {
   const it = perLevel.value[z]
-  return it ? `${it.tiles}张 ~${fmtSize(it.bytes)}` : ''
+  return it ? fmtSize(it.bytes) : ''
+}
+// 与新建面板同一套口径:地形讲采样间距/成果尺寸,影像讲像素分辨率/比例尺
+const centerLat = computed(() => {
+  const b = props.task?.bbox
+  return b ? (Number(b[1]) + Number(b[3])) / 2 : 0
+})
+const levelColumns = computed(() => (isDem.value
+  ? ['高程级别', '采样间距', '总尺寸', '总大小']
+  : ['影像级别', '像素分辨率', '比例尺(72DPI)', '总大小']))
+function precisionOf(z) {
+  return isDem.value
+    ? formatSampleSpacing(z, centerLat.value)
+    : formatPixelResolution(z, centerLat.value)
+}
+function extraOf(z) {
+  const it = perLevel.value[z]
+  return isDem.value
+    ? formatPixelSize(it?.width, it?.height)
+    : formatScale72Dpi(z, centerLat.value)
 }
 
 // 仅导出 Cesium 地形切片(terrain)却多选层级时的提示(同主面板逻辑)
@@ -424,13 +448,18 @@ async function submit() {
               <span class="lv-z">全选</span>
             </label>
           </div>
+          <div class="lv-cols">
+            <span v-for="(c, i) in levelColumns" :key="i" class="lv-col">{{ c }}</span>
+          </div>
           <div class="lv-scroll">
             <div class="lv-group">
-              <label v-for="z in ALL_LEVELS" :key="z" class="lv nlv">
+              <label v-for="z in ALL_LEVELS" :key="z" class="lv nlv lv-row">
                 <input type="checkbox" :checked="form.levels.includes(z)"
                   @change="(e) => toggleLevel(z, e.target.checked)" />
-                <span class="lv-z">{{ z }}</span>
-                <span v-if="levelSize(z)" class="lv-size">{{ levelSize(z) }}</span>
+                <span class="lv-z">第 {{ z }} 级</span>
+                <span class="lv-size">{{ precisionOf(z) }}</span>
+                <span class="lv-size">{{ extraOf(z) }}</span>
+                <span class="lv-size">{{ levelSize(z) }}</span>
               </label>
             </div>
           </div>
@@ -493,6 +522,17 @@ async function submit() {
 }
 .lv-z { min-width: 18px; font-weight: 600; }
 .lv-size { font-size: 11px; color: #94a3b8; }
+/* 表头与行共用列宽,保证分辨率/比例尺/大小三列对齐 */
+.lv-cols, .lv-row {
+  display: grid;
+  grid-template-columns: 18px 62px minmax(0, 1fr) minmax(0, 1fr) minmax(0, 72px);
+  align-items: center; gap: 6px; min-width: 0;
+}
+.lv-cols { padding: 4px 2px 0; font-size: 11px; color: #94a3b8; }
+.lv-cols .lv-col:first-child { grid-column: 1 / span 2; }
+.lv-col, .lv-row .lv-size, .lv-row .lv-z {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .rd-summary { font-size: 12px; color: #0369a1; margin-top: 6px; font-weight: 600; }
 .rd-esthint { font-size: 11px; color: #94a3b8; font-weight: 400; }
 .rd-warn { font-size: 11px; color: #b45309; line-height: 1.6;

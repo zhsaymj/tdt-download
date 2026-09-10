@@ -11,7 +11,10 @@ import { MessagePlugin } from 'tdesign-vue-next'
 import { mapController } from '../composables/mapController'
 import { useDrawStore } from '../stores/draw'
 import { loadAreaIndex, fetchAreaBoundary } from '../api'
-import { parseVectorFiles, looksLikeLonLat, reprojectGeojson } from '../utils/vector'
+import {
+  parseVectorFiles, looksLikeLonLat, reprojectGeojson, geojsonToKml, downloadText,
+} from '../utils/vector'
+import { formatTimestamp } from '../utils/taskDefaults'
 import SrsModal from './SrsModal.vue'
 
 const emit = defineEmits(['request-process'])
@@ -111,6 +114,19 @@ function onSrsConfirm(epsg) {
   }
 }
 
+/** 导出当前范围面为 KML:矩形没有 geometry,用 clipGeometry 现造的矩形环兜底 */
+function exportRange() {
+  const geom = drawStore.clipGeometry
+  if (!geom) { MessagePlugin.warning('当前没有可导出的范围'); return }
+  try {
+    const name = `范围_${formatTimestamp()}`
+    downloadText(`${name}.kml`, geojsonToKml(geom, name))
+    MessagePlugin.success('范围已导出为 KML')
+  } catch (e) {
+    MessagePlugin.error('导出失败:' + (e?.message || e))
+  }
+}
+
 const rangeText = computed(() => {
   const b = drawStore.bbox
   if (!b) return ''
@@ -144,8 +160,12 @@ const rangeText = computed(() => {
       <!-- 有范围时直接给出下一步入口:画完就能开始处理,不必再去顶栏菜单 -->
       <div v-if="drawStore.hasRange" class="ready">
         <span class="rtext">{{ rangeText }}</span>
-        <t-button size="small" theme="primary"
-          @click="emit('request-process')">处理此范围</t-button>
+        <div class="racts">
+          <t-button size="small" theme="primary" class="ract"
+            @click="emit('request-process')">处理此范围</t-button>
+          <t-button size="small" variant="outline" class="ract"
+            title="把当前范围面导出为 KML 文件" @click="exportRange">导出范围</t-button>
+        </div>
       </div>
     </template>
 
@@ -192,5 +212,8 @@ const rangeText = computed(() => {
   border-top: 1px solid #eef2f7; padding-top: 8px;
 }
 .rtext { font-size: 12px; color: #0369a1; }
+/* 处理/导出各占一半宽:两个动作等权,不该让主按钮独占整行 */
+.racts { display: flex; gap: 6px; }
+.ract { flex: 1 1 0; min-width: 0; }
 .hidden { display: none; }
 </style>

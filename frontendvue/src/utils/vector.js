@@ -3,6 +3,7 @@ import proj4 from 'proj4'
 // shpjs v6:默认导出 = getShapefile(处理 zip);parseShp/parseDbf/combine 为具名导出
 import shp, { parseShp, parseDbf, combine } from 'shpjs'
 import { kml as kmlToGeoJSON } from '@tmcw/togeojson'
+import { GeoJSON, KML } from 'ol/format'
 
 // GeoJSON 规范几何类型(首字母大写)。部分工具导出小写(如 "polygon"),
 // OpenLayers 按规范只认标准写法,故导入后统一规范化,避免静默读不出几何。
@@ -120,6 +121,33 @@ function kmlFallback(dom) {
     }
   }
   return { type: 'FeatureCollection', features }
+}
+
+// 把 geojson 几何/要素写成 KML 文本(输入须为 WGS84,KML 规范同样是 WGS84)
+export function geojsonToKml(geojson, name = 'range') {
+  const src = (geojson.type === 'FeatureCollection' || geojson.type === 'Feature')
+    ? geojson
+    : { type: 'Feature', properties: {}, geometry: geojson }
+  const features = new GeoJSON().readFeatures(src)
+  if (!features.length) throw new Error('没有可导出的图形')
+  features.forEach((f, i) => {
+    f.setProperties({ name: features.length > 1 ? `${name}_${i + 1}` : name })
+  })
+  return new KML().writeFeatures(features)
+}
+
+// 触发浏览器下载文本文件
+export function downloadText(filename, text,
+  mime = 'application/vnd.google-earth.kml+xml') {
+  const url = URL.createObjectURL(new Blob([text], { type: `${mime};charset=utf-8` }))
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  // 立即 revoke 会让部分浏览器取消下载,延后一拍
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
 // 解析文件列表为 geojson,返回 { geojson, prjText }

@@ -218,15 +218,20 @@ def estimate_levels_detail(
 ) -> dict:
     """按选中级别逐层估算瓦片数与字节数,并给出合计。
 
-    返回 {levels:[{z,tiles,bytes}], total_tiles, total_bytes}。
+    返回 {levels:[{z,tiles,bytes,cols,rows,width,height}], total_tiles,
+    total_bytes}。width/height 是该级拼接成果的像素尺寸(瓦片数 × 256),前端用它
+    显示"总尺寸",让用户在勾级别时就知道成果有多大一张图。
     """
     w, s, e, n = bbox
     avg = AVG_TILE_BYTES.get(provider, DEFAULT_TILE_BYTES)
     per = []
     total_tiles = 0
     for z in sorted(set(levels)):
-        tiles = range_for_bbox(w, s, e, n, z).count
-        per.append({"z": z, "tiles": tiles, "bytes": tiles * avg})
+        tr = range_for_bbox(w, s, e, n, z)
+        tiles = tr.count
+        per.append({"z": z, "tiles": tiles, "bytes": tiles * avg,
+                    "cols": tr.cols, "rows": tr.rows,
+                    "width": tr.cols * TILE_SIZE, "height": tr.rows * TILE_SIZE})
         total_tiles += tiles
     return {
         "levels": per,

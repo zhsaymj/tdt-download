@@ -55,11 +55,17 @@ test('浏览器页签图标使用地球 emoji', () => {
   }
 })
 
-test('地形下载层级描述会展示大小和精度', () => {
-  assert.ok(componentSource.includes('formatTerrainPrecision'))
+test('层级列表按数据类型展示分辨率/比例尺/尺寸/大小四列', () => {
+  assert.ok(componentSource.includes('formatSampleSpacing'))
+  assert.ok(componentSource.includes('formatPixelResolution'))
+  assert.ok(componentSource.includes('formatScale72Dpi'))
+  assert.ok(componentSource.includes('formatPixelSize'))
   assert.ok(componentSource.includes('precisionOf(z)'))
-  assert.ok(componentSource.includes('levelMetaText(z)'))
-  assert.ok(taskDefaultsSource.includes('精度约'))
+  assert.ok(componentSource.includes('extraOf(z)'))
+  assert.ok(componentSource.includes('levelColumns'))
+  assert.ok(componentSource.includes("'高程级别', '采样间距', '总尺寸', '总大小'"))
+  assert.ok(componentSource.includes("'影像级别', '像素分辨率', '比例尺(72DPI)', '总大小'"))
+  assert.ok(taskDefaultsSource.includes('levelResolutionMeters'))
 })
 
 test('影像 TMS 支持选择分段保留输入层级策略', () => {

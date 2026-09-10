@@ -8,9 +8,12 @@ import {
   defaultContainersForStages,
   downloadDefaultsForProvider,
   ensureImageTmsLevels,
-  formatTerrainPrecision,
+  formatPixelResolution,
+  formatPixelSize,
+  formatSampleSpacing,
+  formatScale72Dpi,
+  levelResolutionMeters,
   normalizeContainerMap,
-  terrainPrecisionMeters,
 } from './taskDefaults.js'
 
 test('任务名称默认使用数据源和当前时间', () => {
@@ -83,9 +86,17 @@ test('地形下载默认导出 GeoTIFF 和 Cesium 地形切片', () => {
   assert.deepEqual(DEM_LEVELS.slice(0, 3), [0, 1, 2])
 })
 
-test('地形精度按层级和纬度显示为米每像素', () => {
-  assert.equal(Math.round(terrainPrecisionMeters(0)), 156543)
-  assert.equal(Math.round(terrainPrecisionMeters(1)), 78272)
-  assert.ok(terrainPrecisionMeters(13, 30) < terrainPrecisionMeters(13, 0))
-  assert.equal(formatTerrainPrecision(13, 30), '精度约 16.5 米/像素')
+test('级别分辨率按层级和纬度换算为米', () => {
+  assert.equal(Math.round(levelResolutionMeters(0)), 156543)
+  assert.equal(Math.round(levelResolutionMeters(1)), 78272)
+  assert.ok(levelResolutionMeters(13, 30) < levelResolutionMeters(13, 0))
+  assert.equal(formatSampleSpacing(13, 30), '16.5 米')
+  assert.equal(formatPixelResolution(13, 30), '16.5 米')
+})
+
+test('影像级别显示 72DPI 比例尺,地形级别显示成果像素尺寸', () => {
+  // 16.5 米/像素 ÷ 0.000352778 米/像素(72DPI)≈ 1:46,700
+  assert.match(formatScale72Dpi(13, 30), /^1:4[0-9],\d{3}$/)
+  assert.equal(formatPixelSize(1072, 1008), '1072×1008')
+  assert.equal(formatPixelSize(0, 256), '')
 })
