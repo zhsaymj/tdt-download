@@ -107,6 +107,12 @@ class TileDownloader:
                         if resp.status == 200:
                             data = await resp.read()
                             if data:
+                                # 占位"空瓦片"(如 Esri 超出可用 LOD 返回的 67 字节
+                                # 空 LERC)不写缓存:写了会被断点续传当成有效数据,
+                                # 拼接时又解不出像素,最终产出全 nodata 的成果。
+                                # 请求本身是成功的(该处确实无数据),故不计失败。
+                                if self.provider.is_empty_tile(data):
+                                    return True
                                 path.write_bytes(data)
                                 return True
                         # 非 200 或空响应,进入重试

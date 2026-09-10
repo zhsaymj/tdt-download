@@ -152,6 +152,7 @@ def mosaic_dem_geotiff(
     # 逐"瓦片行"分块写入,避免整幅 float32 canvas 占用几十 GB 内存
     # (与 mosaic.py 同策略;缺失瓦片保持 DEM_NODATA 填充)。
     total_rows = tr.rows
+    decoded = 0
     with rasterio.open(out_path, "w", **profile) as dst:
         for ri, y in enumerate(range(tr.row_min, tr.row_max + 1), start=1):
             row_buf = np.full((TILE_SIZE, width), DEM_NODATA, dtype=np.float32)
@@ -159,6 +160,7 @@ def mosaic_dem_geotiff(
                 elev = decode_lerc(tile_path_fn(x, y, tr.z))
                 if elev is None:
                     continue
+                decoded += 1
                 h, w = elev.shape
                 h = min(h, TILE_SIZE)
                 w = min(w, TILE_SIZE)
@@ -171,6 +173,14 @@ def mosaic_dem_geotiff(
         if build_overviews:
             dst.build_overviews([2, 4, 8, 16], Resampling.average)
             dst.update_tags(ns="rio_overview", resampling="average")
+
+    # 一张瓦片都没解出来:成果会是全 nodata 的空高程图,后续等高线/地形切片
+    # 也全是平地。这种情况必须报错而不是产出一份"看起来正常"的空文件。
+    if decoded == 0:
+        out_path.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"第 {tr.z} 级共 {tr.count} 张瓦片全部无高程数据,无法拼接。"
+            "该数据源在此范围的最高可用级别低于所选级别,请改用更低的级别。")
 
     return out_path
 

@@ -10,7 +10,10 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from ..config import settings
-from ..core.dem_tiling import estimate_dem_tiles, mercator_range_for_bbox
+from ..core.dem_tiling import (
+    TILE_SIZE as DEM_TILE_SIZE, estimate_dem_tiles, mercator_range_for_bbox,
+)
+from ..core.logs import logger
 from ..core.queue import task_queue
 from ..core.tiling import estimate_levels, estimate_levels_detail, estimate_total_tiles
 from ..core.token_pool import token_pool
@@ -41,11 +44,48 @@ def _estimate_detail(bbox, levels: list[int], provider: str) -> dict:
     per = []
     total_tiles = 0
     for z in sorted(set(levels)):
-        tiles = mercator_range_for_bbox(w, s, e, n, z).count
-        per.append({"z": z, "tiles": tiles, "bytes": tiles * _DEM_AVG_BYTES})
+        tr = mercator_range_for_bbox(w, s, e, n, z)
+        tiles = tr.count
+        per.append({"z": z, "tiles": tiles, "bytes": tiles * _DEM_AVG_BYTES,
+                    "cols": tr.cols, "rows": tr.rows,
+                    "width": tr.cols * DEM_TILE_SIZE,
+                    "height": tr.rows * DEM_TILE_SIZE})
         total_tiles += tiles
     return {"levels": per, "total_tiles": total_tiles,
             "total_bytes": total_tiles * _DEM_AVG_BYTES}
+
+
+async def _probe_dem_max_level(bbox, provider: str) -> int | None:
+    """探测 DEM 数据源在该范围的最高可用级别;None 表示探测失败(网络问题)。"""
+    from ..providers.terrain import probe_max_level
+    # 探测是阻塞网络请求,放线程池避免阻塞事件循环
+    return await asyncio.to_thread(probe_max_level, bbox, provider)
+
+
+async def _clamp_dem_levels(bbox, levels: list[int], provider: str
+                            ) -> tuple[list[int], str]:
+    """把超出 Esri 可用 LOD 的 DEM 级别下调到该范围真实可用的最高级。
+
+    为什么必须做:Esri Terrain3D 各区域最高 LOD 不同(新疆一带实测只到 14 级),
+    超限时服务返回 HTTP 200 + 67 字节"空瓦片"而非 404。下载器只看状态码与响应体
+    非空,会把它当成功写进缓存;拼接阶段解码后全是 nodata,最终产出一张有效像素
+    为 0 的高程 GeoTIFF 与一套平地地形切片——整个过程无任何报错,用户白等一场。
+
+    返回 (最终级别列表, 提示信息)。提示为空串表示未做调整。
+    """
+    if not is_dem_provider(provider) or not levels:
+        return levels, ""
+    max_level = await _probe_dem_max_level(bbox, provider)
+    if max_level is None or max(levels) <= max_level:
+        return levels, ""
+    kept = [z for z in levels if z <= max_level]
+    dropped = [z for z in levels if z > max_level]
+    # 全部超限时至少保留可用最高级,否则任务会因"没有级别"直接失败
+    out = kept or [max_level]
+    note = (f"所选范围在该地形数据源最高只有 {max_level} 级"
+            f"(已跳过无数据的 {'、'.join(str(z) for z in dropped)} 级)")
+    return out, note
+
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -115,14 +155,11 @@ async def api_dem_max_level(west: float, south: float, east: float, north: float
     """
     if not is_dem_provider(provider):
         raise HTTPException(400, "该数据源不支持地形级别探测")
-    import asyncio
-
-    from ..providers.terrain import probe_max_level
-    # 探测是阻塞网络请求,放线程池避免阻塞事件循环
-    max_level = await asyncio.to_thread(
-        probe_max_level, (west, south, east, north), provider)
+    service_max = DEM_LAYERS[provider][2]
+    max_level = await _probe_dem_max_level((west, south, east, north), provider)
+    # max_level 为 null 表示探测失败(网络问题),前端此时不应禁用任何级别
     return {"provider": provider, "max_level": max_level,
-            "service_max": DEM_LAYERS[provider][2]}
+            "service_max": service_max}
 
 
 @router.get("/{task_id}")
@@ -510,6 +547,12 @@ async def api_create_task(data: TaskCreate):
         raise HTTPException(400, "请至少选择一个下载级别")
 
     west, south, east, north = data.bbox
+    # DEM 超出该范围真实可用 LOD 的级别会拼出全 nodata 成果,提交时就下调
+    levels, level_note = await _clamp_dem_levels(
+        (west, south, east, north), levels, data.provider)
+    if level_note:
+        data.levels = levels
+        logger.info("任务[%s] %s", data.name, level_note)
     detail = _estimate_detail((west, south, east, north), levels, data.provider)
     total = detail["total_tiles"]
     if total == 0:
@@ -523,7 +566,8 @@ async def api_create_task(data: TaskCreate):
 
     task_id = create_task(data, total, est_bytes)
     await task_queue.enqueue(task_id)
-    return {"id": task_id, "total": total, "status": "pending"}
+    return {"id": task_id, "total": total, "status": "pending",
+            "levels": levels, "level_note": level_note}
 
 
 async def _create_local_task(data: TaskCreate):
@@ -668,6 +712,11 @@ async def api_update_task(task_id: str, data: TaskCreate):
 
     # 范围沿用原任务(前端不改范围);用原 bbox 重新估算总数
     west, south, east, north = task["bbox"]
+    # 与新建任务同理:DEM 超限级别只会拼出全 nodata,重下时同样下调
+    levels, level_note = await _clamp_dem_levels(
+        (west, south, east, north), levels, data.provider)
+    if level_note:
+        logger.info("任务[%s] %s", task["name"], level_note)
     total = _estimate_total((west, south, east, north), levels, data.provider)
     if total == 0:
         raise HTTPException(400, "所选范围在该级别下没有瓦片,请检查范围或级别")
@@ -706,7 +755,8 @@ async def api_update_task(task_id: str, data: TaskCreate):
     )
     task_queue.clear_control(task_id)
     await task_queue.enqueue(task_id)
-    return {"id": task_id, "total": total, "status": "pending"}
+    return {"id": task_id, "total": total, "status": "pending",
+            "levels": levels, "level_note": level_note}
 
 
 @router.post("/{task_id}/pause")

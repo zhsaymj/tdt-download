@@ -33,3 +33,11 @@ class TileProvider(ABC):
 
     def max_zoom(self) -> int:
         return 18
+
+    def is_empty_tile(self, data: bytes) -> bool:
+        """响应体是否为"该位置没有数据"的占位瓦片(默认认为都有数据)。
+
+        有些服务(如 Esri Terrain3D)超出可用级别时返回 HTTP 200 + 极小的空瓦片
+        而非 404。下载器据此判定不写入缓存,避免空瓦片被当成有效数据续传复用。
+        """
+        return False

@@ -18,7 +18,8 @@ import { fmtNum, fmtSize } from '../utils/format'
 import {
   DEM_CRS_HINT, DEM_LEVELS, IMG_LEVELS,
   defaultContainersForStages, defaultTaskName,
-  downloadDefaultsForProvider, ensureImageTmsLevels, formatTerrainPrecision,
+  downloadDefaultsForProvider, ensureImageTmsLevels,
+  formatPixelResolution, formatPixelSize, formatSampleSpacing, formatScale72Dpi,
   normalizeContainerMap,
 } from '../utils/taskDefaults'
 import { api } from '../api'
@@ -227,6 +228,31 @@ function lowRatio(z) {
   return r != null && r < 0.25
 }
 
+// ---- DEM 可用最高级别(仅在线地形)----
+// Esri Terrain3D 各区域最高 LOD 不同(新疆一带只到 14 级),超限时服务返回
+// HTTP 200 + 空瓦片,拼出来是一张全无数据的高程图。这里探测后置灰超限级别。
+// null = 探测失败(网络问题),此时不禁用任何级别,由后端提交时兜底下调。
+const demMaxLevel = ref(null)
+async function loadDemMaxLevel() {
+  demMaxLevel.value = null
+  const b = drawStore.bbox
+  if (!b || !isDownload.value || form.provider !== 'esri_terrain') return
+  try {
+    const d = await api.demMaxLevel({
+      west: b[0], south: b[1], east: b[2], north: b[3], provider: form.provider,
+    })
+    demMaxLevel.value = d?.max_level ?? null
+  } catch (_) { demMaxLevel.value = null }
+  // 已勾上的超限级别要摘掉:留着提交也会被后端下调,不如当场如实反映
+  if (demMaxLevel.value != null) {
+    const kept = form.levels.filter((z) => z <= demMaxLevel.value)
+    if (kept.length !== form.levels.length) form.levels = kept
+  }
+}
+function levelUnavailable(z) {
+  return demMaxLevel.value != null && z > demMaxLevel.value
+}
+
 // ---- 各级瓦片数/大小预估 ----
 // 每级都要标出大小:级别每加一级瓦片数翻四倍,不显示的话用户很难预判
 // 勾到 18 级会下多久、占多大。只按选区算,与勾选无关,故一次取全级别。
@@ -249,25 +275,42 @@ function sizeOf(z) {
   const b = est.value?.[z]?.bytes
   return b == null ? '' : fmtSize(b)
 }
-function precisionOf(z) {
-  if (!isDem.value) return ''
+/** 选区中心纬度:分辨率随纬度收缩,用中心纬比用赤道值贴近实际 */
+const centerLat = computed(() => {
   const b = drawStore.bbox
-  const lat = b ? (Number(b[1]) + Number(b[3])) / 2 : 0
-  return formatTerrainPrecision(z, lat)
+  return b ? (Number(b[1]) + Number(b[3])) / 2 : 0
+})
+/** 地形=采样间距;影像=像素分辨率。两者同一公式,只是叫法与语义不同 */
+function precisionOf(z) {
+  return isDem.value
+    ? formatSampleSpacing(z, centerLat.value)
+    : formatPixelResolution(z, centerLat.value)
 }
-function levelMetaText(z) {
-  const parts = []
-  const size = sizeOf(z)
-  const precision = precisionOf(z)
-  if (size) parts.push(`约 ${size}`)
-  if (precision) parts.push(precision)
-  return parts.join(' · ')
+/** 影像第三列:72DPI 下的比例尺;地形第三列:拼接成果像素尺寸 */
+function extraOf(z) {
+  const r = est.value?.[z]
+  return isDem.value
+    ? formatPixelSize(r?.width, r?.height)
+    : formatScale72Dpi(z, centerLat.value)
 }
+/** 级别表头随数据类型变化(地形讲采样间距/尺寸,影像讲分辨率/比例尺) */
+const levelColumns = computed(() => (isDem.value
+  ? ['高程级别', '采样间距', '总尺寸', '总大小']
+  : ['影像级别', '像素分辨率', '比例尺(72DPI)', '总大小']))
 function levelTitle(z) {
+  if (levelUnavailable(z)) {
+    return `${z} 级:该范围的地形数据源最高只到 ${demMaxLevel.value} 级，此级别没有高程数据`
+  }
+  const cols = levelColumns.value
+  const parts = [`${z} 级`]
   const tiles = tilesOf(z)
-  const base = tiles != null ? `${z} 级:${fmtNum(tiles)} 张瓦片` : `${z} 级`
-  const meta = levelMetaText(z)
-  return meta ? `${base} · ${meta}` : base
+  if (tiles != null) parts.push(`${fmtNum(tiles)} 张瓦片`)
+  parts.push(`${cols[1]} ${precisionOf(z)}`)
+  const extra = extraOf(z)
+  if (extra) parts.push(`${cols[2]} ${extra}`)
+  const size = sizeOf(z)
+  if (size) parts.push(`${cols[3]}约 ${size}`)
+  return parts.join(' · ')
 }
 /** 已勾选级别的合计(瓦片数 + 大小),注记翻倍与后端提交口径一致 */
 const estTotal = computed(() => {
@@ -285,13 +328,17 @@ const estTotal = computed(() => {
 })
 
 // ---- 级别勾选 ----
+/** 可勾选级别:排除该范围没有数据的 DEM 超限级别 */
+const availableLevels = computed(() => levelList.value.filter((z) => !levelUnavailable(z)))
 function toggleLevel(z, on) {
+  if (levelUnavailable(z)) return
   const s = new Set(form.levels)
   on ? s.add(z) : s.delete(z)
   form.levels = [...s].sort((a, b) => a - b)
 }
-const allChecked = computed(() => levelList.value.every((z) => form.levels.includes(z)))
-function toggleAll(on) { form.levels = on ? [...levelList.value] : [] }
+const allChecked = computed(() => availableLevels.value.length > 0
+  && availableLevels.value.every((z) => form.levels.includes(z)))
+function toggleAll(on) { form.levels = on ? [...availableLevels.value] : [] }
 
 function resetFormState() {
   form.name = ''
@@ -316,6 +363,7 @@ function resetFormState() {
   lastAutoName.value = ''
   suggest.value = null
   est.value = null
+  demMaxLevel.value = null
   bldParams.value = null
   bldBbox.value = null
   submitting.value = false
@@ -330,6 +378,7 @@ async function initForCurrentSource() {
     applyDownloadDefaults(true)
     await loadSuggest()
     await loadEstimate()
+    await loadDemMaxLevel()
     return
   }
 
@@ -363,11 +412,13 @@ watch(() => form.provider, async () => {
   }
   await loadSuggest()
   await loadEstimate()
+  await loadDemMaxLevel()
 })
 
 watch(() => drawStore.bbox, async () => {
   await loadSuggest()
   await loadEstimate()
+  await loadDemMaxLevel()
 }, { deep: true })
 
 /** 勾 OSM 自动带上 GeoTIFF:OSM 切片以最高级拼接图作源,后端会直接复用 */
@@ -490,6 +541,8 @@ async function submit() {
   submitting.value = true
   try {
     const created = await taskStore.create(buildPayload())
+    // 后端可能因数据源在该范围没有高程数据而下调了级别,如实告知
+    if (created?.level_note) MessagePlugin.warning(created.level_note)
     MessagePlugin.success('任务已加入队列')
     emit('created', created)
     emit('update:visible', false)
@@ -593,16 +646,33 @@ const title = computed(() => ({
                 <a @click.prevent="form.levels = [...suggest.recommended]">采用</a>
               </span>
             </div>
+            <!-- 四列表格:级别 / 分辨率(采样间距) / 比例尺(总尺寸) / 总大小。
+                 只给大小不给分辨率的话,用户没法判断"这一级够不够用" -->
+            <div class="lv-cols">
+              <span v-for="(c, i) in levelColumns" :key="i" class="lv-col">{{ c }}</span>
+            </div>
             <div class="lv-grid">
               <label v-for="z in levelList" :key="z" class="lv"
-                :class="{ low: lowRatio(z) }"
+                :class="{ low: lowRatio(z), off: levelUnavailable(z) }"
                 :title="levelTitle(z)">
                 <input type="checkbox" :checked="form.levels.includes(z)"
+                  :disabled="levelUnavailable(z)"
                   @change="(e) => toggleLevel(z, e.target.checked)" />
-                <span class="lv-z">{{ z }} 级<span v-if="lowRatio(z)" class="lowtag"
+                <span class="lv-z">第 {{ z }} 级<span v-if="lowRatio(z)" class="lowtag"
                   :title="`仅 ${(ratioOf(z) * 100).toFixed(1)}% 内容落在选区内`">·</span></span>
-                <span v-if="levelMetaText(z)" class="lv-sz">{{ levelMetaText(z) }}</span>
+                <template v-if="levelUnavailable(z)">
+                  <span class="lv-sz">无数据</span><span /><span />
+                </template>
+                <template v-else>
+                  <span class="lv-sz">{{ precisionOf(z) }}</span>
+                  <span class="lv-sz">{{ extraOf(z) }}</span>
+                  <span class="lv-sz">{{ sizeOf(z) }}</span>
+                </template>
               </label>
+            </div>
+            <div v-if="demMaxLevel != null && demMaxLevel < levelList[levelList.length - 1]"
+              class="lv-note">
+              该范围的地形数据源最高只到 {{ demMaxLevel }} 级，更高级别没有高程数据，已置灰。
             </div>
             <div v-if="estTotal" class="lv-total">
               已选 {{ form.levels.length }} 级，共 {{ fmtNum(estTotal.tiles) }} 张瓦片，
@@ -718,9 +788,20 @@ const title = computed(() => ({
   display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
   font-size: 12px; color: #334155;
 }
+/* 表头与行共用同一套列宽,否则数字与标题对不齐 */
+.lv-cols, .lv-grid .lv {
+  display: grid;
+  grid-template-columns: 22px 62px minmax(0, 1fr) minmax(0, 1fr) minmax(0, 76px);
+  align-items: center; min-width: 0;
+}
+.lv-cols {
+  padding: 0 10px 4px 6px; font-size: 11px; color: #94a3b8;
+}
+/* 表头第一格空出复选框列 */
+.lv-cols .lv-col:first-child { grid-column: 1 / span 2; }
+.lv-col { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .lv-grid .lv {
-  display: grid; grid-template-columns: 22px 54px minmax(0, 1fr); align-items: center;
-  padding: 4px 6px; border-radius: 4px; min-width: 0;
+  padding: 4px 6px; border-radius: 4px;
 }
 .lv-grid .lv:hover { background: #f8fafc; }
 .lv.low { color: #94a3b8; }
@@ -730,6 +811,9 @@ const title = computed(() => ({
   overflow: hidden; text-overflow: ellipsis; min-width: 0;
 }
 .lowtag { color: #d97706; font-weight: 700; }
+.lv.off { color: #cbd5e1; cursor: not-allowed; }
+.lv.off .lv-sz { color: #cbd5e1; }
+.lv-note { margin-top: 6px; color: #d97706; font-size: 12px; line-height: 1.6; }
 .lv-total { margin-top: 6px; color: #475569; font-size: 12px; line-height: 1.6; }
 .adv { margin-bottom: 10px; }
 .adv :deep(.t-collapse-panel__body) { padding: 8px 0 0; }

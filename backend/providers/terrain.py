@@ -64,6 +64,11 @@ class TerrainProvider(TileProvider):
     def max_zoom(self) -> int:
         return self._zmax
 
+    def is_empty_tile(self, data: bytes) -> bool:
+        """Esri 超出该区域最高 LOD 时返回 HTTP 200 + 约 67 字节的空 LERC。"""
+        from ..core.dem import is_empty_lerc
+        return is_empty_lerc(data)
+
 
 def is_dem_provider(key: str) -> bool:
     return key in DEM_PROVIDERS
@@ -74,12 +79,15 @@ def build_terrain_provider(key: str = "esri_terrain") -> TerrainProvider:
 
 
 def probe_max_level(bbox: tuple[float, float, float, float],
-                    key: str = "esri_terrain") -> int:
+                    key: str = "esri_terrain") -> int | None:
     """探测某范围在 Esri Terrain3D 上的最高可用级别(有真实数据的最大 LOD)。
 
-    Esri 超出某区域最高 LOD 时返回空瓦片(约 67 字节)而非 404,且最高 LOD
-    随地理位置变化(城市/发达地区更高)。这里从服务最高级往下,取范围中心
-    瓦片逐级探测,返回第一个非空级别;全空则回退到 min_zoom。
+    Esri 超出某区域最高 LOD 时返回空瓦片(约 67 字节、HTTP 200)而非 404,且最高
+    LOD 随地理位置变化(新疆等西部区域实测只到 14 级,城市可到 16 级)。这里从服务
+    最高级往下,取范围中心瓦片逐级探测,返回第一个有数据的级别。
+
+    返回 None 表示**无法判定**(网络不通/全程超时)。调用方据此放行用户选的级别,
+    而不是误判成"该范围没有高程"把级别一路降到 0。
     """
     import urllib.error
     import urllib.request
@@ -90,24 +98,33 @@ def probe_max_level(bbox: tuple[float, float, float, float],
     provider = build_terrain_provider(key)
     zmax, zmin = provider.max_zoom(), provider.min_zoom()
 
-    def center_tile_empty(z: int) -> bool:
+    def probe(z: int) -> str:
+        """探测一级,返回 ok(有数据)/ empty(无数据)/ error(判不了)。"""
         tr = mercator_range_for_bbox(*bbox, z)
         cx = (tr.col_min + tr.col_max) // 2
         cy = (tr.row_min + tr.row_max) // 2
         url = provider.tile_url(cx, cy, z)
-        try:
-            req = urllib.request.Request(url, headers=provider.headers)
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                if resp.status != 200:
-                    return True
-                return is_empty_lerc(resp.read())
-        except urllib.error.HTTPError:
-            return True
-        except Exception:
-            # 网络异常无法判定,保守认为该级不可用
-            return True
+        # Esri 偶发读超时,重试一次再判定,避免把网络抖动当成"没数据"
+        for attempt in range(2):
+            try:
+                req = urllib.request.Request(url, headers=provider.headers)
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    if resp.status != 200:
+                        return "empty"
+                    return "empty" if is_empty_lerc(resp.read()) else "ok"
+            except urllib.error.HTTPError:
+                return "empty"
+            except Exception:
+                if attempt:
+                    return "error"
+        return "error"
 
+    determined = False
     for z in range(zmax, zmin - 1, -1):
-        if not center_tile_empty(z):
+        state = probe(z)
+        if state == "ok":
             return z
-    return zmin
+        if state == "empty":
+            determined = True
+    # 逐级都返回空瓦片:该范围确实无高程数据(如深海),取最低级别兜底
+    return zmin if determined else None
