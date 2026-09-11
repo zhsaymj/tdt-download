@@ -17,6 +17,19 @@ export function fmtNum(n) {
   return Number(n).toLocaleString('en-US')
 }
 
+// 长度(米)→ 人类可读(统一保留 3 位小数,量测读数需要毫米级对齐)
+export function fmtLen(m) {
+  if (m == null || !Number.isFinite(m)) return '—'
+  return m < 1000 ? `${m.toFixed(3)} m` : `${(m / 1000).toFixed(3)} km`
+}
+
+// 面积(平方米)→ 人类可读:超过 1 km² 换算成平方千米
+export function fmtArea(m2) {
+  if (m2 == null || !Number.isFinite(m2)) return '—'
+  if (m2 < 1e6) return `${m2.toFixed(3)} m²`
+  return `${(m2 / 1e6).toFixed(3)} km²`
+}
+
 // 剩余秒数 → 人类可读(剩 1分30秒 / 剩 2小时5分)
 export function fmtEta(sec) {
   if (sec == null || sec < 0) return ''

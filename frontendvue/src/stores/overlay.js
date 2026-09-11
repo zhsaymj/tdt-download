@@ -12,6 +12,7 @@ import {
   addOverlay, removeOverlay, applyOrder,
   setOverlayVisible, setOverlayOpacity, zoomToOverlay,
 } from '../composables/overlays'
+import { useTaskStore } from './task'
 
 /** key 约定:任务 id + 图层 id,跨任务唯一 */
 export function overlayKey(taskId, layerId) { return `${taskId}:${layerId}` }
@@ -48,8 +49,17 @@ export const useOverlayStore = defineStore('overlay', {
         key, taskId, taskName, desc, visible: true, opacity: 1,
       }]
       this._sync()
-      if (first) zoomToOverlay(map, key)
+      if (first) this.zoomTo(key)
       return true
+    },
+
+    /** 图层自身没有范围时的兜底:用所属任务的 bbox(任务必有范围) */
+    _fallbackBbox(key) {
+      const it = this.items.find((x) => x.key === key)
+      if (!it) return null
+      const t = useTaskStore().byId(it.taskId)
+      const b = t?.bbox
+      return Array.isArray(b) && b.length === 4 ? b : null
     },
 
     remove(key) {
@@ -95,7 +105,10 @@ export const useOverlayStore = defineStore('overlay', {
       this._sync()
     },
 
-    zoomTo(key) { zoomToOverlay(mapController.value?.map, key) },
+    /** 定位到图层范围;返回是否成功(失败由调用方提示,不能静默) */
+    zoomTo(key) {
+      return zoomToOverlay(mapController.value?.map, key, this._fallbackBbox(key))
+    },
 
     clear() {
       const map = mapController.value?.map

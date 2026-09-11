@@ -218,14 +218,21 @@ export function setOverlayOpacity(key, v) {
   added.get(key)?.layer.setOpacity(Math.min(1, Math.max(0, v)))
 }
 
-/** 缩放到某图层范围(拿不到范围时不动) */
-export function zoomToOverlay(map, key) {
+/**
+ * 缩放到某图层范围。返回是否定位成功。
+ *
+ * 只有栅格类图层的 desc 带 bounds_wgs84(后端 _inspect_raster 读的),瓦片目录、
+ * MBTiles 与矢量都没有——而本工具的主产物恰是 TMS 瓦片包,所以必须用任务 bbox
+ * 兜底,否则最常见的图层点「定位」毫无反应。
+ */
+export function zoomToOverlay(map, key, fallbackBbox = null) {
   const hit = added.get(key)
-  if (!hit || !map) return
-  const b = hit.desc.bounds_wgs84
-  if (!b) return
+  if (!hit || !map) return false
+  const b = hit.desc.bounds_wgs84 || fallbackBbox
+  if (!b || b.length !== 4) return false
   map.getView().fit(transformExtent(b, 'EPSG:4326', 'EPSG:3857'),
     { padding: [40, 40, 40, 40], duration: 300, maxZoom: 19 })
+  return true
 }
 
 export function clearOverlays(map) {

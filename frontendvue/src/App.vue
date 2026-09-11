@@ -13,6 +13,7 @@ import AppStatusBar from './components/AppStatusBar.vue'
 import MapView from './components/MapView.vue'
 import LayerPanel from './components/LayerPanel.vue'
 import MapTools from './components/MapTools.vue'
+import MeasurePanel from './components/MeasurePanel.vue'
 import ProcessDialog from './components/ProcessDialog.vue'
 import DataDialog from './components/DataDialog.vue'
 import TaskDialog from './components/TaskDialog.vue'
@@ -87,6 +88,8 @@ onMounted(() => registerProj4Defs())
     <main class="map-main" :style="padStyle">
       <MapView />
       <MapTools @request-process="openProcess({ kind: 'download' })" />
+      <!-- 量测与绘制分开:前者产出读数,后者产出下载范围,合在一起容易混淆 -->
+      <MeasurePanel />
       <!-- 图层面板只管已叠上的图层;「从哪份成果挑图层」在「数据」面板里 -->
       <LayerPanel @open-data="openData" />
       <TaskDetail />

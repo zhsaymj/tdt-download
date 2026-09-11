@@ -15,6 +15,7 @@ import Collection from 'ol/Collection'
 import { never } from 'ol/events/condition'
 import { unByKey } from 'ol/Observable'
 import { DRAW_Z } from './overlays'
+import { createMeasureTool } from './measure'
 import { basemapTypesFor, basemapZIndexForLevel } from '../utils/basemap'
 
 const geojsonFmt = new GeoJSON()
@@ -244,6 +245,7 @@ export function createMapController(target, hooks = {}) {
   }
 
   function startDrawRect() {
+    measure.stop()
     removeEditInteractions()
     if (drawInteraction) map.removeInteraction(drawInteraction)
     vectorSource.clear()
@@ -257,6 +259,7 @@ export function createMapController(target, hooks = {}) {
   }
 
   function startDrawPolygon() {
+    measure.stop()
     removeEditInteractions()
     if (drawInteraction) map.removeInteraction(drawInteraction)
     vectorSource.clear()
@@ -299,6 +302,7 @@ export function createMapController(target, hooks = {}) {
   function toggleEdit() {
     if (!state.feature) return
     if (state.editing) { removeEditInteractions(); return }
+    measure.stop()
     // vector(导入矢量/行政区)与 polygon 一样支持加点/删点;rect 固定矩形不删点
     const isPolygonLike = state.shape === 'polygon' || state.shape === 'vector'
     const opts = { source: vectorSource }
@@ -381,13 +385,22 @@ export function createMapController(target, hooks = {}) {
     map.getView().fit(ext, { padding: [60, 60, 60, 60], duration: 400, maxZoom: 16 })
   }
 
+  // ---- 量测 ----
+  // 与范围绘制/编辑互斥:两个 Draw 同时挂着,一次点击会同时被两边收到。
+  const measure = createMeasureTool(map, {
+    beforeStart: () => {
+      removeEditInteractions()
+      if (drawInteraction) { map.removeInteraction(drawInteraction); drawInteraction = null }
+    },
+  })
+
   emitInfo()
 
   return {
     map, setupBasemap, setOverlayByProvider, setBasemap,
     setBasemapOpacity, setBasemapLevel,
     startDrawRect, startDrawPolygon, toggleEdit, clearDraw, loadGeojson,
-    showPreview, clearPreview, zoomTo,
+    showPreview, clearPreview, zoomTo, measure,
     hasFeature: () => !!state.feature,
   }
 }

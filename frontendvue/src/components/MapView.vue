@@ -56,6 +56,16 @@ onBeforeUnmount(() => {
 <style scoped>
 .map-wrap { position: relative; width: 100%; height: 100%; }
 .map-canvas { width: 100%; height: 100%; }
+
+/* OL 缩放控件默认在左上,会和量测面板打架。统一挪到右下、量测面板正上方,
+   并随右侧面板宽度避让——OL 生成的 DOM 不带 scoped 属性,只能用 :deep 命中。
+   量测面板向上展开,高度不定,故由它把实时高度写进 --measure-h(见 MeasurePanel.vue)。 */
+.map-canvas :deep(.ol-zoom) {
+  top: auto; left: auto;
+  bottom: calc(18px + var(--measure-h, 0px));
+  right: calc(10px + var(--pad-right, 0px));
+  transition: right .22s ease, bottom .22s ease;
+}
 .map-info {
   position: absolute; left: 0; bottom: 0; z-index: 10;
   left: 50%;

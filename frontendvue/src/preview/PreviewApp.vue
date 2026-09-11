@@ -1,11 +1,12 @@
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, shallowRef, computed, onMounted, onBeforeUnmount } from 'vue'
 import {
   Viewer, TileMapServiceImageryProvider, UrlTemplateImageryProvider,
   Rectangle, GeographicTilingScheme, WebMercatorTilingScheme, Ion,
   CesiumTerrainProvider, EllipsoidTerrainProvider,
   Cesium3DTileset, Color, Cartesian3,
 } from 'cesium'
+import { createCesiumMeasure } from './measure3d'
 
 // 离线自用:不使用任何 Cesium Ion 在线资源
 Ion.defaultAccessToken = ''
@@ -34,6 +35,40 @@ let tileset3d = null      // 三维建筑 b3dm 瓦片集
 const flatTerrain = new EllipsoidTerrainProvider()   // 关闭地形时回落的平面椭球
 const terrainLoading = ref(false)   // 全国地形加载中(首次勾选需联网)
 const terrainError = ref('')        // 全国地形加载失败提示(面板内,不阻断预览)
+
+// ---- 量测 ----
+// 结果只在本页内存里,刷新即清(见 measure3d.js 顶部说明)。
+// 必须 shallowRef:普通 ref 会深度响应化并解包内部的 items ref,
+// 那样 measure.value.items.value 就取不到东西了。
+const measure = shallowRef(null)
+const measureCollapsed = ref(true)
+const measureItems = computed(() => measure.value?.items?.value || [])
+const measureMode = computed(() => measure.value?.mode?.value || null)
+// color 与 measure3d.js 里的 COLOR 保持一致,列表标签和图上图形同色
+const MEASURE_MODES = [
+  { key: 'point', icon: '📍', label: '点坐标', color: '#2563eb' },
+  { key: 'line', icon: '📏', label: '距离', color: '#16a34a' },
+  { key: 'area', icon: '⬛', label: '面积', color: '#ea580c' },
+]
+const MEASURE_TIP = {
+  point: '点击地表取点,高程取自当前地形。',
+  line: '依次点击折点,双击结束;右键移除上一拐点。',
+  area: '依次点击顶点,双击结束;右键移除上一拐点。',
+}
+// 未挂真实地形时高程恒为 0,必须说清楚,否则读数会误导
+const flatHint = computed(
+  () => !layers.value.some((it) => TERRAIN_KEYS.includes(it.key) && it.show))
+
+function toggleMeasurePanel() {
+  measureCollapsed.value = !measureCollapsed.value
+  if (measureCollapsed.value) measure.value?.stop()
+}
+
+/** 结果行的类型标签底色跟随该类量测的配色 */
+function measureTagStyle(type) {
+  const c = MEASURE_MODES.find((x) => x.key === type)?.color
+  return c ? { color: '#fff', background: c } : null
+}
 
 // 是否同时存在两个地形项(本任务切片 + 全国 30m):此时才需提示互斥关系
 const hasBothTerrain = computed(
@@ -230,6 +265,7 @@ async function init() {
     selectionIndicator: false,
   })
   viewer.scene.globe.baseColor = window.Cesium?.Color?.DARKSLATEGRAY || undefined
+  measure.value = createCesiumMeasure(viewer)
 
   // 底图(最底层):NaturalEarthII 离线 geodetic TMS
   try {
@@ -379,6 +415,52 @@ onBeforeUnmount(() => { if (viewer && !viewer.isDestroyed()) viewer.destroy() })
       <span v-if="taskPath" class="path" :title="taskPath">📁 {{ taskPath }}</span>
     </div>
 
+    <div v-if="measure" class="mpanel" :class="{ collapsed: measureCollapsed }">
+      <button class="mfold" @click="toggleMeasurePanel">
+        {{ measureCollapsed ? '📐 量测' : '× 量测' }}
+        <span v-if="measureItems.length" class="mcnt">{{ measureItems.length }}</span>
+      </button>
+      <template v-if="!measureCollapsed">
+        <div class="mgrp">
+          <button v-for="x in MEASURE_MODES" :key="x.key" class="mtool"
+            :class="{ on: measureMode === x.key }" :title="x.label"
+            :style="measureMode === x.key
+              ? { background: x.color, borderColor: x.color, color: '#fff' } : null"
+            @click="measure.start(x.key)">{{ x.icon }}</button>
+          <button class="mtool" title="清除全部量测结果" :disabled="!measureItems.length"
+            @click="measure.clearAll()">🗑</button>
+        </div>
+        <div v-if="measureMode" class="tip">{{ MEASURE_TIP[measureMode] }}再点按钮可退出。</div>
+        <div v-if="measureMode === 'point' && flatHint" class="warn">
+          当前未启用地形,高程读数为椭球面 0 米。需要真实高程请先勾选一个地形图层。
+        </div>
+        <div class="mlist">
+          <div v-for="it in measureItems" :key="it.id" class="mrow">
+            <div class="mr-hd">
+              <span class="mtag" :style="measureTagStyle(it.type)">
+                {{ MEASURE_MODES.find((x) => x.key === it.type)?.label }}
+              </span>
+              <!-- 点结果读数是多行坐标,放到下方独占行,标题行只留操作按钮 -->
+              <span v-if="it.type !== 'point'" class="mval">{{ it.text }}</span>
+              <span v-else class="mval" />
+              <button class="mmini" title="飞到该结果" @click="measure.locate(it.id)">定位</button>
+              <button class="mmini del" title="删除该结果" @click="measure.removeItem(it.id)">✕</button>
+            </div>
+            <!-- 高程已随两行坐标一起显示,这里只补充它的来源 -->
+            <div v-if="it.type === 'point'" class="mr-sub">
+              <div>{{ it.lonLatText }}</div>
+              <div>{{ it.planeText }}</div>
+              <div v-if="it.cmText">{{ it.cmText }}</div>
+              <div v-if="it.sampled">高程来源:地形精采</div>
+            </div>
+          </div>
+        </div>
+        <div v-if="!measureItems.length && !measureMode" class="tip">
+          选一种量测方式后在场景中绘制。结果不保存,刷新即清。
+        </div>
+      </template>
+    </div>
+
     <div v-if="layers.length" class="panel">
       <div class="panel-title">叠加图层</div>
       <label v-for="it in layers" :key="it.key" class="layer-row">
@@ -418,6 +500,55 @@ onBeforeUnmount(() => { if (viewer && !viewer.isDestroyed()) viewer.destroy() })
   box-shadow: 0 6px 20px rgba(14,165,233,.18); padding: 12px 14px; font-size: 13px;
 }
 .panel-title { font-weight: 700; color: #0369a1; margin-bottom: 8px; }
+/* 量测面板停在左上:右侧是图层面板,左下/右下是 Cesium 自带控件 */
+.mpanel {
+  position: absolute; top: 56px; left: 12px; z-index: 10; width: 288px;
+  background: rgba(255,255,255,.95); border: 1px solid #e2e8f0; border-radius: 10px;
+  box-shadow: 0 6px 20px rgba(14,165,233,.18); padding: 8px 10px; font-size: 13px;
+}
+.mpanel.collapsed { width: auto; padding: 4px 8px; }
+.mfold {
+  display: flex; align-items: center; gap: 5px;
+  border: 0; background: transparent; cursor: pointer;
+  color: #475569; font-size: 13px; padding: 2px 4px;
+}
+.mcnt {
+  color: #15803d; background: #dcfce7; border-radius: 8px;
+  padding: 0 6px; font-size: 11px; line-height: 16px;
+}
+.mgrp { display: flex; gap: 4px; margin-top: 6px; }
+.mtool {
+  flex: 1 1 auto; border: 1px solid #dbe3ec; background: #fff;
+  border-radius: 6px; cursor: pointer; font-size: 14px; padding: 5px 0; color: #334155;
+}
+.mtool:hover:not(:disabled) { background: #f0fdf4; border-color: #86efac; }
+.mtool.on { background: #16a34a; border-color: #16a34a; color: #fff; }
+.mtool:disabled { opacity: .4; cursor: not-allowed; }
+.mlist { max-height: 40vh; overflow-y: auto; margin-top: 6px; }
+.mrow {
+  border: 1px solid #eef2f7; border-radius: 5px; padding: 4px 6px;
+  margin-bottom: 5px; background: #fff;
+}
+.mr-hd { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.mtag {
+  flex: 0 0 auto; font-size: 10px; color: #15803d;
+  background: #dcfce7; border-radius: 3px; padding: 0 4px; line-height: 16px;
+}
+.mval {
+  flex: 1 1 auto; min-width: 0; font-size: 12px; color: #334155;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: Consolas, monospace;
+}
+.mr-sub {
+  margin-top: 3px; font-size: 11px; color: #64748b; line-height: 1.7;
+  font-family: Consolas, monospace; word-break: break-all;
+}
+.mmini {
+  flex: 0 0 auto; border: 1px solid #dbe3ec; background: #fff;
+  border-radius: 4px; cursor: pointer; font-size: 11px; color: #475569; padding: 1px 5px;
+}
+.mmini:hover { background: #f0f9ff; border-color: #7dd3fc; }
+.mmini.del { color: #b91c1c; border-color: #fecaca; }
 .layer-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; cursor: pointer; }
 .loading-tag { font-size: 11px; color: #0ea5e9; flex: 0 0 auto; }
 .tip { margin-top: 8px; font-size: 11px; color: #94a3b8; }

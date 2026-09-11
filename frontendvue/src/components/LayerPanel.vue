@@ -13,6 +13,7 @@
  * 反转一次),与 QGIS/ArcGIS 的图层树习惯相同。
  */
 import { computed, ref, watch } from 'vue'
+import { MessagePlugin } from 'tdesign-vue-next'
 import { useOverlayStore } from '../stores/overlay'
 import { mapController } from '../composables/mapController'
 import { useBasemapStore } from '../stores/basemap'
@@ -48,6 +49,11 @@ const KIND_TEXT = {
 /** 透明度滑块用整数百分比,避免浮点值在界面上显示成 0.7000000000000001 */
 function pct(it) { return Math.round(it.opacity * 100) }
 function onPct(key, v) { overlayStore.setOpacity(key, v / 100) }
+
+/** 定位到图层。取不到范围时给提示,不能点了没反应 */
+function locate(key) {
+  if (!overlayStore.zoomTo(key)) MessagePlugin.warning('该图层没有可用的范围信息,无法定位')
+}
 
 function openData() {
   collapsed.value = true
@@ -101,7 +107,7 @@ function openData() {
           <button class="mini" title="下移一层" :disabled="i === rows.length - 1"
             @click="overlayStore.moveDown(it.key)">⤓</button>
           <button class="mini" title="缩放到该图层范围"
-            @click="overlayStore.zoomTo(it.key)">定位</button>
+            @click="locate(it.key)">定位</button>
           <button class="mini del" title="从地图移除"
             @click="overlayStore.remove(it.key)">✕</button>
         </div>
