@@ -23,9 +23,8 @@ from .api import ws as ws_api
 
 # 只读资源根:开发时为项目根,打包后为 _MEIPASS 解包目录
 RES_DIR = resource_root()
-# 优先挂 Vue 版构建产物(frontendvue/dist);未构建时回退旧版纯静态 frontend
-_VUE_DIST = RES_DIR / "frontendvue" / "dist"
-FRONTEND_DIR = _VUE_DIST if (_VUE_DIST / "index.html").exists() else RES_DIR / "frontend"
+# 挂 Vue 版构建产物(frontendvue/dist,已删除的旧版纯静态 frontend 不再回退)
+FRONTEND_DIR = RES_DIR / "frontendvue" / "dist"
 # 预览页读取的静态资源:成果目录(可写,走 settings) + NaturalEarthII 离线底图(只读)
 OUTPUT_DIR = settings.output_dir
 BASEMAP_DIR = RES_DIR / "exmple-data" / "NaturalEarthII"
