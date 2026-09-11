@@ -25,9 +25,29 @@ import {
   toCgcs2000, fmtLonLatText, fmtPlaneText, fmtCentralMeridianText,
 } from '../utils/crs'
 import { fmtLen, fmtArea } from '../utils/format'
+import { cullLabelBoxes, MAX_OVERLAP } from '../utils/labelCull'
 
 /** 量测图形压在绘制层之上:量的往往就是刚画的范围,被范围填充盖住就没意义了 */
 const MEASURE_Z = DRAW_Z + 10
+
+/** 标注元素相对锚点的像素偏移,与 makeOverlay 的 positioning/offset 必须一致 */
+const LABEL_OFFSET_Y = -10
+
+/**
+ * 标注 DOM 尺寸缓存。尺寸只跟文本有关(CSS 像素固定,不随地图缩放变),
+ * 缓存后缩放过程中每帧只做坐标换算,不再读 offsetWidth 触发重排。
+ * 文本是中文+数字多行混排,字宽差近一倍,只能实测不能估算。
+ */
+const labelSizes = new WeakMap()
+
+function labelSize(el) {
+  const hit = labelSizes.get(el)
+  if (hit && hit.text === el.textContent) return hit
+  const size = { text: el.textContent, w: el.offsetWidth, h: el.offsetHeight }
+  // 量到 0 说明这一刻还没排版(容器隐藏等),别缓存,否则这个标注永远按零尺寸参与判定
+  if (size.w > 0 && size.h > 0) labelSizes.set(el, size)
+  return size
+}
 
 const OL_TYPE = { point: 'Point', line: 'LineString', area: 'Polygon' }
 
@@ -113,6 +133,75 @@ export function createMeasureTool(map, hooks = {}) {
   let sketchKey = null
   let vertexOverlays = []       // 绘制过程中每个已确认拐点的即时标注(临时)
   let seq = 0
+  let pendingFrame = 0
+
+  /**
+   * 碰撞剔除的优先级序:靠前的保留、靠后的让位。必须是稳定的确定序,
+   * 否则每次重算保下来的标注会跳变闪烁。
+   * 1) 绘制中的动态读数——当前正在操作的焦点,永不隐藏
+   * 2) 绘制中已确认的拐点——越靠后越新
+   * 3) 已完成的量测——items 本身就是新在前;同一条线内部按拐点倒序
+   */
+  function collectLabels() {
+    const out = []
+    if (sketchOverlay && sketchOverlay.getPosition()) out.push(sketchOverlay)
+    for (let i = vertexOverlays.length - 1; i >= 0; i--) out.push(vertexOverlays[i])
+    const seen = new Set()
+    for (const it of items.value) {
+      const list = overlays.get(it.id)
+      if (!list) continue
+      seen.add(it.id)
+      for (let i = list.length - 1; i >= 0; i--) out.push(list[i])
+    }
+    // drawend 里标注先落图、items 后更新,补上还没进 items 的那批
+    for (const [id, list] of overlays) {
+      if (seen.has(id)) continue
+      for (let i = list.length - 1; i >= 0; i--) out.push(list[i])
+    }
+    return out
+  }
+
+  /**
+   * 标注碰撞剔除:按优先级逐个放行,与已放行标注的重叠超过阈值的隐藏。
+   *
+   * 隐藏用 visibility 而不是 display:none —— 后者会让 offsetWidth/offsetHeight 归零,
+   * 下一轮就再也测不出尺寸;也不用 setPosition(undefined),那是 stopSketch 表达
+   * "本次绘制结束"的语义,复用会打架。
+   *
+   * 全量重算不做增量:状态残留会让标注永久消失。
+   */
+  function relayout() {
+    const size = map.getSize()
+    if (!size) return
+    const labels = collectLabels()
+    // 先全部读(像素换算 + 尺寸),再全部写 visibility,避免读写交错反复触发重排
+    const boxes = []
+    for (const ov of labels) {
+      const el = ov.getElement()
+      const pos = ov.getPosition()
+      if (!el || !pos) continue
+      const px = map.getPixelFromCoordinate(pos)
+      if (!px) continue
+      const { w, h } = labelSize(el)
+      if (w <= 0 || h <= 0) continue
+      const left = px[0] - w / 2
+      const top = px[1] + LABEL_OFFSET_Y - h
+      boxes.push({ el, left, top, right: left + w, bottom: top + h, area: w * h })
+    }
+    const hidden = cullLabelBoxes(boxes, size, MAX_OVERLAP)
+    boxes.forEach((box, i) => {
+      box.el.style.visibility = hidden[i] ? 'hidden' : 'visible'
+    })
+  }
+
+  /** 同一帧内多次请求只重算一次(缩放动画、几何 change 都是高频) */
+  function scheduleRelayout() {
+    if (pendingFrame) return
+    pendingFrame = requestAnimationFrame(() => {
+      pendingFrame = 0
+      relayout()
+    })
+  }
 
   // 绘制中右键:移除上一个拐点(回退一点重画)。只注册一次,
   // 通过模块级 draw/mode 判断当前是否在量测绘制中,避免每次 start 都挂一个监听
@@ -191,11 +280,13 @@ export function createMeasureTool(map, hooks = {}) {
   /** labels: [{ text, position }],线量测一条会落多个拐点标注 */
   function addLabels(id, labels, type) {
     overlays.set(id, labels.map((l) => makeOverlay(l.text, l.position, type)))
+    scheduleRelayout()
   }
 
   function clearVertexOverlays() {
     for (const ov of vertexOverlays) map.removeOverlay(ov)
     vertexOverlays = []
+    scheduleRelayout()
   }
 
   /**
@@ -214,11 +305,16 @@ export function createMeasureTool(map, hooks = {}) {
       const ov = vertexOverlays.pop()
       map.removeOverlay(ov)
     }
+    scheduleRelayout()
   }
 
   function stopSketch() {
     if (sketchKey) { unByKey(sketchKey); sketchKey = null }
-    if (sketchOverlay) sketchOverlay.setPosition(undefined)
+    if (sketchOverlay) {
+      sketchOverlay.setPosition(undefined)
+      // 隐藏状态不能留给下次绘制:setPosition 只挪位置,visibility 是我们自己写的
+      sketchOverlay.getElement().style.visibility = 'visible'
+    }
   }
 
   /** 开始量测。同一模式再点即停止(按钮起到开关作用) */
@@ -260,6 +356,7 @@ export function createMeasureTool(map, hooks = {}) {
         const last = r.labels?.[r.labels.length - 1]
         sketchOverlay.getElement().textContent = last ? last.text : r.text
         sketchOverlay.setPosition(labelPosition(geom, type))
+        scheduleRelayout()
       })
       syncVertexLabels(geom, type)
     })
@@ -300,6 +397,8 @@ export function createMeasureTool(map, hooks = {}) {
     for (const ov of overlays.get(id) || []) map.removeOverlay(ov)
     overlays.delete(id)
     items.value = items.value.filter((x) => x.id !== id)
+    // 删掉一条后原先被它挤掉的标注要放出来
+    scheduleRelayout()
   }
 
   function clearAll() {
@@ -326,5 +425,5 @@ export function createMeasureTool(map, hooks = {}) {
       { padding: [60, 60, 60, 60], duration: 300, maxZoom: 19 })
   }
 
-  return { items, mode, start, stop, removeItem, clearAll, locate }
+  return { items, mode, start, stop, removeItem, clearAll, locate, relayout: scheduleRelayout }
 }

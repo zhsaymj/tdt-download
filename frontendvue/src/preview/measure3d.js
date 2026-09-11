@@ -12,12 +12,14 @@ import {
   Cartesian3, Cartographic, Color, EllipsoidGeodesic, Math as CesiumMath,
   ScreenSpaceEventHandler, ScreenSpaceEventType, CallbackProperty,
   HeightReference, LabelStyle, VerticalOrigin, HorizontalOrigin, Cartesian2,
+  SceneTransforms,
   sampleTerrainMostDetailed,
 } from 'cesium'
 import {
   toCgcs2000, fmtLonLatText, fmtPlaneText, fmtCentralMeridianText,
 } from '../utils/crs'
 import { fmtLen, fmtArea } from '../utils/format'
+import { cullLabelBoxes, MAX_OVERLAP } from '../utils/labelCull'
 
 /** WGS84 等面积半径:球面多边形面积公式用它,在本工具的范围尺度上误差可忽略 */
 const AUTHALIC_R = 6371007.18
@@ -133,6 +135,19 @@ function labelBoxWidth(text) {
 }
 
 /**
+ * 15px 字体单行行高的估算值(px)。Cesium Label 是 WebGL 渲染,拿不到 DOM 尺寸,
+ * 只能按字体估。碰撞判定有 20% 容差,不必像素级精确。
+ */
+const LABEL_LINE_HEIGHT = 20
+
+/** 标注背景框的完整像素尺寸(含 padding):宽取最长行,高按行数累加 */
+function labelBoxSize(text) {
+  const w = labelBoxWidth(text)
+  const h = String(text).split('\n').length * LABEL_LINE_HEIGHT + LABEL_PAD.y * 2
+  return { w, h }
+}
+
+/**
  * Cesium 的 Label 在 horizontalOrigin=LEFT 下,每一行都从同一个左边界起排
  * (文字内部左对齐,这是我们要的);但整个背景框会从锚点向右展开,看起来是
  * "标注挂在点的右边"。把 pixelOffset.x 左移半个框宽,框就以点为中心,
@@ -198,6 +213,98 @@ export function createCesiumMeasure(viewer) {
   let cursorPos = null
   const owned = new Map()   // id → entity 数组
   let seq = 0
+  let pendingFrame = 0
+
+  /**
+   * 参与碰撞判定的标注,按优先级从高到低:
+   * 1) 绘制中的动态读数(跟随鼠标)——当前正在操作的焦点
+   * 2) 绘制中已确认的拐点标注——越靠后越新
+   * 3) 已完成的量测——items 新在前;同一条线内部按拐点倒序
+   */
+  function collectLabelEntities() {
+    const out = []
+    for (const e of sketchEntities) if (e.label) out.push(e)
+    for (let i = pendingLabels.length - 1; i >= 0; i--) out.push(pendingLabels[i])
+    for (const it of items.value) {
+      const ents = owned.get(it.id)
+      if (!ents) continue
+      const labels = ents.filter((e) => e.label)
+      for (let i = labels.length - 1; i >= 0; i--) out.push(labels[i])
+    }
+    return out
+  }
+
+  /**
+   * 贴地标注(CLAMP_TO_GROUND)的实际渲染位置钉在地形表面,而 entity.position 里
+   * 存的是拾取高度或椭球面 0 高。投影屏幕时按地形高度修正,否则起伏大的区域
+   * 标注框会飘在真实显示位置之外,碰撞判定失真。globe.getHeight 同步返回当前
+   * 瓦片插值高度,拿不到(瓦片未加载)就回落原位置。
+   */
+  function projectToScreen(e, time) {
+    const scene = viewer.scene
+    const pos = e.position.getValue(time)
+    if (!pos) return null
+    let anchor = pos
+    if (e.label.heightReference === HeightReference.CLAMP_TO_GROUND) {
+      const c = Cartographic.fromCartesian(pos)
+      const h = scene.globe.getHeight(c)
+      if (h !== undefined) {
+        anchor = Cartesian3.fromRadians(c.longitude, c.latitude, h)
+      }
+    }
+    return SceneTransforms.worldToWindowCoordinates(scene, anchor)
+  }
+
+  /**
+   * 标注碰撞剔除:与 2D 同一套算法(utils/labelCull),屏幕空间 AABB 相交,
+   * 重叠超过 20% 的让位隐藏。全量重算,不依赖增量状态。
+   *
+   * 框的几何关系与 labelGraphics 的定位参数必须一致:
+   * horizontalOrigin=LEFT、verticalOrigin=BOTTOM,背景框在文本外扩 padding,
+   * 锚点像素坐标再叠加 pixelOffset(动态标注的偏移会随文本变宽变窄)。
+   */
+  function relayout() {
+    if (viewer.isDestroyed()) return
+    const canvas = viewer.scene.canvas
+    const viewport = [canvas.clientWidth, canvas.clientHeight]
+    if (!viewport[0] || !viewport[1]) return
+    const time = viewer.clock.currentTime
+    const boxes = []
+    for (const e of collectLabelEntities()) {
+      const text = e.label.text.getValue(time)
+      if (!text) continue
+      const sp = projectToScreen(e, time)
+      if (!sp) continue          // 相机背面:视口外,不参与判定
+      const po = e.label.pixelOffset.getValue(time)
+      const cx = sp.x + po.x
+      const cy = sp.y + po.y
+      const { w, h } = labelBoxSize(text)
+      boxes.push({
+        el: e,
+        left: cx - LABEL_PAD.x,
+        top: cy - h + LABEL_PAD.y,
+        right: cx - LABEL_PAD.x + w,
+        bottom: cy + LABEL_PAD.y,
+        area: w * h,
+      })
+    }
+    const hidden = cullLabelBoxes(boxes, viewport, MAX_OVERLAP)
+    boxes.forEach((b, i) => { b.el.label.show = !hidden[i] })
+  }
+
+  /** 同一帧内多次触发只重算一次(相机移动、鼠标移动都高频) */
+  function scheduleRelayout() {
+    if (pendingFrame) return
+    pendingFrame = requestAnimationFrame(() => {
+      pendingFrame = 0
+      relayout()
+    })
+  }
+
+  // 相机一动标注在屏幕上的位置就变,碰撞关系随之变化。moveEnd 覆盖动画结束,
+  // changed 覆盖持续缩放/平移过程(两者都走 rAF 节流)。
+  viewer.camera.moveEnd.addEventListener(scheduleRelayout)
+  viewer.camera.changed.addEventListener(scheduleRelayout)
 
   function pick(windowPos) {
     const ray = viewer.camera.getPickRay(windowPos)
@@ -216,6 +323,7 @@ export function createCesiumMeasure(viewer) {
     pendingLabels = []
     pending = []
     floating = null
+    scheduleRelayout()
   }
 
   /**
@@ -287,6 +395,7 @@ export function createCesiumMeasure(viewer) {
         pixelOffset: dynamicLabelOffset(sketchText),
       },
     }))
+    scheduleRelayout()
   }
 
   /** 点量测:高程取自地形。有地形时再精采一次,否则读的是当前瓦片层级的粗值 */
@@ -328,6 +437,7 @@ export function createCesiumMeasure(viewer) {
       lonLatText, planeText, cmText,
       position,
     }, ...items.value]
+    scheduleRelayout()
   }
 
   function finishShape(type) {
@@ -417,6 +527,7 @@ export function createCesiumMeasure(viewer) {
         if (last) g.label = labelGraphics(last.text, type, true)
       }
       pendingLabels.push(viewer.entities.add(g))
+      scheduleRelayout()
     }, ScreenSpaceEventType.LEFT_CLICK)
 
     // 光标点跟随鼠标。线/面还要顺带更新 sketch 的跟随顶点——只能合在这一个
@@ -425,6 +536,8 @@ export function createCesiumMeasure(viewer) {
       const pos = pick(e.endPosition)
       cursorPos = pos
       if (type !== 'point' && pos && pending.length) floating = pos
+      // 鼠标移动只改 cursor/sketch 位置,相机没动,碰撞关系仍要重算(高频,已节流)
+      scheduleRelayout()
     }, ScreenSpaceEventType.MOUSE_MOVE)
 
     if (type !== 'point') {
@@ -451,6 +564,7 @@ export function createCesiumMeasure(viewer) {
         const lab = pendingLabels.pop()
         if (lab) viewer.entities.remove(lab)
         floating = pending.length ? pending[pending.length - 1] : null
+        scheduleRelayout()
       }, ScreenSpaceEventType.RIGHT_CLICK)
     }
   }
@@ -466,11 +580,14 @@ export function createCesiumMeasure(viewer) {
     for (const e of owned.get(id) || []) viewer.entities.remove(e)
     owned.delete(id)
     items.value = items.value.filter((x) => x.id !== id)
+    // 删掉一条后原先被它挤掉的标注要放出来
+    scheduleRelayout()
   }
 
   function clearAll() {
     stop()
     for (const id of [...owned.keys()]) removeItem(id)
+    scheduleRelayout()
   }
 
   /** 飞到某条量测结果 */

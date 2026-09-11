@@ -394,6 +394,11 @@ export function createMapController(target, hooks = {}) {
     },
   })
 
+  // 标注间距随缩放变化,视图一动就要重算碰撞剔除。挂在 measure 创建之后避免 TDZ。
+  // pointermove 不挂:那条太频繁,而且鼠标移动不改变标注之间的相对位置
+  map.getView().on('change:resolution', () => measure.relayout())
+  map.on('moveend', () => measure.relayout())
+
   emitInfo()
 
   return {
