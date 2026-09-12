@@ -50,6 +50,7 @@ import tempfile
 from pathlib import Path
 
 from .base import BaseProcessor, ProcResult, ProcessorError
+from .base import _decode_line as _decode
 
 #: pdal info --summary 读取 LAS 头的超时(秒);LAZ 需解压头部,留足余量
 _INFO_TIMEOUT = 60
@@ -125,13 +126,12 @@ class LasToDem(BaseProcessor):
                 "pc_crs=local:输出 GeoTIFF 不带坐标参考,仅可作本地成果使用;"
                 "如需正确落点,请在任务参数中填 EPSG 码(如 EPSG:4547)。")
         elif crs:
-            # writers.gdal 无 srs 选项,由 reader 的 override_srs 传播
+            # writers.gdal 的 SRS 自动继承自输入数据,由 reader 传播,无需另设
             reader["override_srs"] = crs
 
         writer = {
             "type": "writers.gdal",
-            # 用原始字符串而非 str(Path(...)):避免 Windows 下路径被转成反斜杠
-            "filename": str(output),
+            "filename": str(output),  # json.dumps 自动处理 Windows 反斜杠转义
             "gdaldriver": "GTiff",
             "data_type": "float32",
             "resolution": float(resolution),
@@ -270,11 +270,3 @@ class LasToDem(BaseProcessor):
             warnings.append("LAS 头部点数为 0 或缺失,文件可能为空或损坏。")
         info["warnings"] = warnings
         return info
-
-
-def _decode(raw: bytes) -> str:
-    """解码 pdal 输出:先 utf-8,失败回落 gbk(与 base._decode_line 同策略)。"""
-    try:
-        return raw.decode("utf-8")
-    except UnicodeDecodeError:
-        return raw.decode("gbk", errors="replace")

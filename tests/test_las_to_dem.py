@@ -172,6 +172,63 @@ class RunPipelineTest(unittest.TestCase):
             # run 返回后临时 pipeline 文件已清理
             self.assertFalse(Path(seen["cmd"][2]).exists())
 
+    def test_run_pipeline_cleans_up_on_cancel(self):
+        """run 抛 ProcessorCancelled(取消)时 finally 仍清理临时文件。"""
+        from backend.core.processors.base import ProcessorCancelled
+        p = LasToDem(pdal_exe="pdal")
+        seen = {}
+
+        def cancel_run(cmd, **kw):
+            seen["tmp"] = Path(cmd[2])
+            raise ProcessorCancelled()
+
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(p, "run", side_effect=cancel_run):
+                with self.assertRaises(ProcessorCancelled):
+                    p.run_pipeline(input="a.las", output=Path(d) / "a_dsm.tif",
+                                   kind="dsm", resolution=1.0)
+            self.assertFalse(seen["tmp"].exists())
+
+
+class PreflightSubprocessTest(unittest.TestCase):
+    """preflight 实际执行 pdal info 的失败分支(mock subprocess.run)。"""
+
+    def _las(self, d: str) -> Path:
+        f = Path(d) / "a.las"
+        f.write_bytes(b"LASF")  # 只需存在,pdal 调用被 mock
+        return f
+
+    def test_preflight_timeout(self):
+        import subprocess as sp
+        p = LasToDem(pdal_exe="pdal")
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch("backend.core.processors.las_to_dem.subprocess.run",
+                            side_effect=sp.TimeoutExpired(["pdal"], 30)):
+                with self.assertRaises(ProcessorError) as ctx:
+                    p.preflight(self._las(d))
+            self.assertIn("超时", ctx.exception.args[0])
+
+    def test_preflight_nonzero_exit(self):
+        import subprocess as sp
+        p = LasToDem(pdal_exe="pdal")
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch(
+                    "backend.core.processors.las_to_dem.subprocess.run",
+                    return_value=sp.CompletedProcess(
+                        ["pdal"], 1, stdout=b"", stderr=b"bad file")):
+                with self.assertRaises(ProcessorError) as ctx:
+                    p.preflight(self._las(d))
+            self.assertIn("损坏", ctx.exception.args[0])
+
+    def test_preflight_oserror(self):
+        p = LasToDem(pdal_exe="pdal")
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch("backend.core.processors.las_to_dem.subprocess.run",
+                            side_effect=OSError("WinError 2")):
+                with self.assertRaises(ProcessorError) as ctx:
+                    p.preflight(self._las(d))
+            self.assertIn("无法启动", ctx.exception.args[0])
+
 
 class ParseInfoSummaryTest(unittest.TestCase):
     """`pdal info --summary` 输出解析:点数/bbox/SRS。"""

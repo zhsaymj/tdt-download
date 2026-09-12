@@ -364,7 +364,9 @@ def test_build_pipeline_dsm():
 - [ ] **Step 3: 实现**
 
 - pipeline 生成：DSM = `readers.las` → `writers.gdal`（`output_type: max`, `resolution`, `nodata`, 可选 `filters.fillpings`/空洞填充）；DEM = `readers.las` → `filters.smrf`（地面分类）→ `filters.range`（Classification[2:2]）→ `writers.gdal`（`output_type: idw` 或 `mean`）。
+  > 实施订正（Task 6 审查核实）：PDAL 无 `filters.fillpings`，不臆造；空洞填充后续可用 `writers.gdal` 的 `window_size`。
 - CRS：input LAS 头部有 SRS 则沿用；任务 `pc_crs` 非空时写 `readers.las.override_srs`/`writers.gdal` 的 srs。`pc_crs == "local"` 则不加 srs 并给警告。
+  > 实施订正：只写 `readers.las.override_srs`（官方注明输出 SRS 自动继承自输入，writer 无需另设）。
 - 把 pipeline JSON 写临时文件，`pdal pipeline tmp.json` 执行；`--nostream` 视版本决定（实现时确认）。
 - `preflight`：`pdal info --summary` 读 LAS 头，返回点数/bbox/SRS 供提交前校验接口复用。
 - 产物检测：输出 tif 存在、非空、可被 rasterio 打开（环境已有 rasterio/GDAL）。
