@@ -16,6 +16,19 @@ env_logger 按行日志,无进度行;C++ 层(osgb23dtile.cpp)因网络限制未�
 2. 提供 progress_by_output_count 兜底:按 out_dir 下已生成 b3dm
    数量 / 预估总数估算,供上层 runner 定时轮询。
 待真实 exe + OSGB 样例验证后再收紧正则(报告已注明)。
+
+Task 8 集成契约(runner_3d 必读,2026-09 审查经上游 master 源码核实):
+1. 部分瓦片失败对适配器不可见:上游转换单个 Tile 失败仅记
+   `failed: ...`/`ERROR` 日志后跳过继续,进程仍 exit 0,root tileset.json
+   静默剔除失败 Tile。b3dm 非空检查挡不住"10 个 Tile 挂 2 个"。
+   → runner 必须用 on_stdout_line/on_stderr_line 透传钩子扫描
+   `failed:`/`ERROR` 行,出现即判阶段失败或至少向用户告警。
+2. 文本进度大概率全程不命中(上游 Rust 层 rayon 并行、无 x/y 或 %
+   进度行,只有 info/error 日志),实际进度依赖 progress_by_output_count。
+   → runner 调用时 estimated_total 建议取「输入目录递归 .osgb 总数」
+   (每个 osgb 节点约对应一个 b3dm,是可得的最接近代理);
+   分母偏小会被 min(..., 1.0) 封顶导致进度条过早钉在 100%。
+3. 必须以 cfg.tools.tiles3d_exe 构造实例(build_cmd 不回落配置)。
 """
 from __future__ import annotations
 
@@ -68,6 +81,11 @@ class OsgbTo3dTiles(BaseProcessor):
 
     def build_cmd(self, *, input_dir, out_dir) -> list[str]:
         """构造命令:`3dtiles -f osgb -i <输入目录> -o <输出目录>`。"""
+        if not self._exe:
+            raise ProcessorError(
+                self.name, None,
+                hint="未配置 3dtiles 可执行文件路径:请以 "
+                     "cfg.tools.tiles3d_exe 构造本适配器")
         return [self._exe, "-f", "osgb", "-i", str(input_dir),
                 "-o", str(out_dir)]
 
