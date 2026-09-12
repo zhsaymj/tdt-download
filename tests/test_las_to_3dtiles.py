@@ -43,6 +43,22 @@ class BuildCmdTest(unittest.TestCase):
             p.build_cmd(input_file="a.las", out_dir="out")
         self.assertIn("py3dtiles_python", str(cm.exception))
 
+    def test_build_cmd_with_srs(self):
+        """SRS 接线:pc_crs 为 EPSG 码时 runner 传 --srs_in + --srs_out 4978。"""
+        p = LasTo3dTiles(python="py.exe")
+        cmd = p.build_cmd(input_file="a.las", out_dir="out",
+                          srs_in="EPSG:4547", srs_out="4978")
+        self.assertEqual(cmd, ["py.exe", "-m", "py3dtiles.command_line",
+                               "convert", "a.las", "--out", "out",
+                               "--srs_in", "EPSG:4547", "--srs_out", "4978"])
+
+    def test_build_cmd_srs_default_omitted(self):
+        """srs_in/srs_out 默认空串时不出现在命令里(行为与一期一致)。"""
+        p = LasTo3dTiles(python="py.exe")
+        cmd = p.build_cmd(input_file="a.las", out_dir="out")
+        self.assertNotIn("--srs_in", cmd)
+        self.assertNotIn("--srs_out", cmd)
+
 
 class ParseProgressTest(unittest.TestCase):
     """进度解析:尽力解析 x/y 与 %;无法解析返回 None。

@@ -25,6 +25,22 @@ class TaskQueue:
         """注册任务执行函数:async runner(task_id, emit)。"""
         self._runner = runner
 
+    def _resolve_runner(self, task_id: str):
+        """按任务 provider 分发执行管线(分发即守卫)。
+
+        local_osgb / local_pointcloud 是本地三维数据(osgb 目录 / las 文件),
+        没有瓦片行列号,必须走 runner_3d;若不经分发会误入 runner.py 栅格
+        管线(点云单文件恰好能通过 runner.py 的本地文件校验,后果更隐蔽)。
+        惰性 import:避免 queue 与 models/runner_3d 形成模块级循环依赖。
+        """
+        from ..models import get_task
+
+        task = get_task(task_id)
+        if task and task.get("provider") in ("local_osgb", "local_pointcloud"):
+            from .runner_3d import run_task as run_3d
+            return run_3d
+        return self._runner
+
     def start(self):
         if self._worker is None:
             self._worker = asyncio.create_task(self._loop())
@@ -72,7 +88,8 @@ class TaskQueue:
         while True:
             task_id = await self._queue.get()
             try:
-                if self._runner is None:
+                runner = self._resolve_runner(task_id)
+                if runner is None:
                     continue
                 # 出队时若已被取消(删除),跳过不执行
                 if self._control.get(task_id) == "cancel":
@@ -83,7 +100,7 @@ class TaskQueue:
                 def emit(msg: dict, _loop=loop):
                     asyncio.run_coroutine_threadsafe(self._broadcast(msg), _loop)
 
-                await self._runner(task_id, emit)
+                await runner(task_id, emit)
             except Exception as e:  # 单个任务失败不拖垮 worker
                 try:
                     from .logs import logger

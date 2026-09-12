@@ -117,19 +117,27 @@ class LasTo3dTiles(BaseProcessor):
                            "tools.py3dtiles_python 指向装有 py3dtiles 的独立 venv")
         return True, "py3dtiles 可用"
 
-    def build_cmd(self, *, input_file, out_dir) -> list[str]:
+    def build_cmd(self, *, input_file, out_dir,
+                  srs_in: str = "", srs_out: str = "") -> list[str]:
         """构造命令:`python -m py3dtiles.command_line convert <输入> --out <目录>`。
 
-        最保守参数集(一期固定):只传输入文件与输出目录,其余参数
-        (SRS/字段/overwrite 等)均不传,理由见模块 docstring。
+        最保守参数集为默认:srs_in/srs_out 为空串时不传,行为与一期一致。
+        runner_3d 按任务 pc_crs 三态接线(EPSG → srs_in=pc_crs +
+        srs_out="4978";"local"/空 → 均不传,产物保持原坐标),
+        语义见模块 docstring「CRS 行为」与 las_to_dem。
         """
         if not self._python:
             raise ProcessorError(
                 self.name, None,
                 hint="未配置 py3dtiles 解释器路径:请以 "
                      "cfg.tools.py3dtiles_python 构造本适配器")
-        return [self._python, "-m", "py3dtiles.command_line", "convert",
-                str(input_file), "--out", str(out_dir)]
+        cmd = [self._python, "-m", "py3dtiles.command_line", "convert",
+               str(input_file), "--out", str(out_dir)]
+        if srs_in:
+            cmd += ["--srs_in", srs_in]
+        if srs_out:
+            cmd += ["--srs_out", srs_out]
+        return cmd
 
     def parse_progress(self, line: str) -> float | None:
         """从一行输出解析进度(0~1)。
