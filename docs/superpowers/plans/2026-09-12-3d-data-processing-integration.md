@@ -506,20 +506,20 @@ git commit -m "feat: support directory/osgb and las inspect in local pick apis"
 - Modify: `frontendvue/src/utils/taskDefaults.js`
 - Test: `frontendvue/src/components/ProcessDialog.local3d.test.js`（新建）
 
-- [ ] **Step 1: 失败测试（源码字符串断言风格，参照 ProcessDialog.reset.test.js）**
+- [x] **Step 1: 失败测试（源码字符串断言风格，参照 ProcessDialog.reset.test.js）**
 
 ```js
 // 断言：sourceOptions 含 local_3d；buildPayload 对 local_osgb 带 source_path+export={tile_3d:true}；
 // local_pointcloud 的 export 面板显示 tile_3d/dsm/dem 三项
 ```
 
-- [ ] **Step 2: 确认失败**
+- [x] **Step 2: 确认失败**
 
 ```powershell
 cd frontendvue; node --test src/components/ProcessDialog.local3d.test.js
 ```
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 - `props.source.kind` 支持 `"local_3d"`；来源内再选数据类型：OSGB 目录 / 点云文件或目录（radio）。
 - `browse()`：OSGB → `api.localPick({kind:'dir'})`；点云 → `kind:'file'` + LAS/LAZ 过滤 或 `kind:'dir'`。
@@ -527,15 +527,17 @@ cd frontendvue; node --test src/components/ProcessDialog.local3d.test.js
 - 输出勾选：OSGB 固定显示「3D Tiles」（只读勾选）；点云显示 3D Tiles / DSM / DEM 三选，默认全选；「高级设置」折叠面板放分辨率（`pc_resolution`，默认自动）。
 - 提交前调 `/api/tools/diagnose`：所需工具不可用时中文报错并阻止提交（OSGB→tiles3d_exe；点云 DEM/DSM→pdal_exe；点云 3D Tiles→py3dtiles_python）。
 - taskDefaults.js：`PROVIDER_LABELS` 加 `local_osgb: '本地 OSGB'`、`local_pointcloud: '本地点云'`；`defaultTaskName` 按目录名/文件名生成。
+  （**实现批注**：按目录名/文件名命名落在 ProcessDialog 组件内 `autoName3d`——`defaultTaskName(provider)` 拿不到所选路径；与既有 local raster/vector 的组件内自动命名惯例一致。）
 - 入口：主界面「本地数据处理」菜单/按钮组新增「三维数据」项，打开 ProcessDialog 时传 `source:{kind:'local_3d'}`。
+  （**实现批注**：入口落在顶栏「+ 新建」菜单 `new-3d` 事件；另修复 backend/main.py capabilities——三维 kind 的 stages 过滤管线改为 PIPE_3D，否则 local_osgb/local_pointcloud 的 stages 为空。）
 
-- [ ] **Step 4: 测试通过**
+- [x] **Step 4: 测试通过**
 
 ```powershell
 cd frontendvue; node --test src/components/ProcessDialog.local3d.test.js
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add frontendvue/src/components/ProcessDialog.vue frontendvue/src/api frontendvue/src/utils/taskDefaults.js frontendvue/src/components/ProcessDialog.local3d.test.js
