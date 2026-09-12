@@ -140,8 +140,9 @@ async def api_inspect_osgb(request: Request, data: InspectReq):
 def _inspect_pointcloud(p: Path, cfg) -> dict:
     """点云提交前预检(同步,放线程里跑:目录枚举与 pdal info 都是阻塞操作)。
 
-    目录输入时 files 给递归 LAS/LAZ 清单,但一期只对排序后的第一个文件做
-    pdal 预检(与 LasToDem 单文件支持一致)。
+    目录输入时 files 给递归 LAS/LAZ 清单(相对路径,区分子目录同名文件);
+    一期只对排序后的第一个文件做 pdal 预检——每个文件一次 pdal 子进程,
+    大目录太慢;其余文件的问题在任务运行期才暴露。
     「无 LAS 文件」「pdal 不可用」「preflight 失败」都不抛 HTTP 错,
     经 error 字段返回中文原因(HTTP 仍 200),前端按 error 是否为空分支;
     只有路径本身非法(非绝对/不存在)才在路由层 4xx。
@@ -163,7 +164,9 @@ def _inspect_pointcloud(p: Path, cfg) -> dict:
         result["error"] = f"点云数据源只支持 las/laz 文件:{p}"
         return result
 
-    result["files"] = [f.name for f in files]
+    # 目录输入给相对路径(不同子目录的同名 LAS 可区分),单文件给文件名
+    result["files"] = ([str(f.relative_to(p)) for f in files]
+                       if p.is_dir() else [files[0].name])
     try:
         info = LasToDem().preflight(files[0], cfg)
     except ProcessorError as e:

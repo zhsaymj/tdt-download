@@ -222,7 +222,8 @@ class InspectPointcloudTest(unittest.TestCase):
         self.assertIsNone(resp["srs"])
 
     def test_directory_lists_las_and_preflights_first(self):
-        # 目录输入:files 给递归清单(排序),preflight 只打第一个文件
+        # 目录输入:files 给递归相对路径清单(子目录文件带前缀,同名可区分),
+        # preflight 只打排序后的第一个文件
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             (root / "b.laz").write_bytes(b"LASF")
@@ -232,7 +233,8 @@ class InspectPointcloudTest(unittest.TestCase):
             (root / "c.txt").write_text("x", encoding="utf-8")
             with self._patch_preflight(return_value=dict(self._INFO)) as pf:
                 resp = self._inspect(d)
-        self.assertEqual(resp["files"], ["b.laz", "a.las"])
+        self.assertEqual(resp["files"],
+                         ["b.laz", str(Path("sub") / "a.las")])
         self.assertEqual(Path(pf.call_args.args[0]).name, "b.laz")
         self.assertIsNone(resp["error"])
         self.assertEqual(resp["count"], 1234)
