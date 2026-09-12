@@ -34,8 +34,9 @@ CRS 行为(源码核实的重要风险登记,point_tiler.get_transformer):
 - 传 --srs_out 但 LAS 头无 SRS(国内数据常见)→ 抛 SrsInMissingException,
   需同时给 --srs_in;
 - 传 --srs_out 4978 且 LAS 头有 SRS → 正确转 ECEF,并有旋转矩阵优化。
-一期仍固定最保守参数集不接 SRS 参数(任务纪律),Step 5 真实样例验证后
-由 Task 8/二期决定是否把 --srs_in/--srs_out 接到任务 pc_crs 字段。
+SRS 接线已在 Task 8 落地(2026-09):build_cmd 增加 srs_in/srs_out 参数,
+runner_3d 按任务 pc_crs 三态传入(EPSG 码 → srs_in=<crs>, srs_out="4978";
+"local"/空 → 两参数省略,产物保持原坐标并记警告)。
 
 进度说明(与 osgb 适配器同理的双保险):
 py3dtiles 默认 verbose=0 时 stdout 几乎无输出(仅 Warning/Error),
@@ -56,10 +57,9 @@ Task 8 集成契约(runner_3d 必读):
    runner 亦可退化为按文件粒度报进度(单文件转换为原子阶段)。
 4. 输出目录须为空目录或不存在:非空目录 py3dtiles 会报
    FileExistsError(本适配器刻意不传 --overwrite,防误清数据)。
-5. CRS 落点风险见上文「CRS 行为」:默认参数下产物保持 LAS 原坐标,
-   Cesium 落点大概率错误。Task 8 必办(计划已回写):把 --srs_out 4978
-   接到任务 pc_crs 字段(缺 SRS 的 LAS 还需 --srs_in,三态语义参照
-   las_to_dem);接线需给 build_cmd 加参数,Task 8 是唯一调用方,零成本。
+5. CRS 落点风险见上文「CRS 行为」:不传 srs 参数时产物保持 LAS 原坐标,
+   Cesium 落点大概率错误。Task 8 已接线:srs_in/srs_out 由 runner 按任务
+   pc_crs 传入(缺 SRS 的 LAS 靠 pc_crs 提供 srs_in)。
 """
 from __future__ import annotations
 
