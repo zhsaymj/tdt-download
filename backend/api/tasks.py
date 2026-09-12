@@ -586,7 +586,9 @@ async def _create_local_task(data: TaskCreate):
         raise HTTPException(400, f"源路径不是绝对路径:{p}")
 
     # 三维源(OSGB 目录 / 点云 las-laz)不是栅格:跳过栅格 inspect 与范围交集,另走一套
-    if data.provider in ("local_osgb", "local_pointcloud"):
+    # provider 名单不硬编码,从 formats 注册表按数据类型推导(单一事实源)
+    from ..core.formats import DataKind, kind_of
+    if kind_of(data.provider) in (DataKind.MESH_OSGB, DataKind.POINT_CLOUD):
         return await _create_local_3d_task(data, p)
 
     if not p.is_file():
@@ -626,6 +628,16 @@ async def _create_local_task(data: TaskCreate):
             "kind": info["kind"], "levels": data.level_list()}
 
 
+def _dir_has_las(p: Path) -> bool:
+    """递归枚举目录,是否含至少一个 las/laz 文件。
+
+    同步遍历,调用方需用 asyncio.to_thread 放到线程里跑:
+    大目录且无 las 时全量 rglob 会阻塞事件循环(单进程 uvicorn 整体冻结)。
+    """
+    return any(f.suffix.lower() in (".las", ".laz")
+               for f in p.rglob("*") if f.is_file())
+
+
 async def _create_local_3d_task(data: TaskCreate, p: Path):
     """本地三维源(OSGB / 点云)建任务:跳过栅格 inspect,只做存在性与形态校验。
 
@@ -639,9 +651,8 @@ async def _create_local_3d_task(data: TaskCreate, p: Path):
             raise HTTPException(400, f"OSGB 数据源需要选择已存在的目录:{p}")
     else:  # local_pointcloud
         if p.is_dir():
-            has_las = any(f.suffix.lower() in (".las", ".laz")
-                          for f in p.rglob("*") if f.is_file())
-            if not has_las:
+            # 目录枚举放线程里跑,避免阻塞事件循环(同栅格分支 inspect_for_import 的写法)
+            if not await asyncio.to_thread(_dir_has_las, p):
                 raise HTTPException(400, f"目录下没有找到 las/laz 点云文件:{p}")
         elif not p.is_file():
             raise HTTPException(400, f"点云文件不存在:{p}")
