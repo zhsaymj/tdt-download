@@ -288,7 +288,7 @@ def _stage_pc_dem(ctx) -> list[str]:
 
 
 def _stage_pc_tile_3d(ctx) -> list[str]:
-    """LAS/LAZ → 3D Tiles(pnts)。多文件各转一个 3dtiles/<stem>/ 子目录。
+    """LAS/LAZ → 3D Tiles(pnts)。多文件各转一个 3dtiles/{序号}_{stem}/ 子目录。
 
     py3dtiles 无增量续传、非空目录直接 FileExistsError,故开始前无条件清空
     自己的 3dtiles/ 目录(设计决策 3)。
