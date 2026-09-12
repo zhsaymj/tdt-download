@@ -587,19 +587,23 @@ git commit -m "feat: add local 3d source to process dialog with preflight checks
 - Modify: `docs/input/新增需求/需求描述.md`（在需求27末尾勾选验收结论，如需）
 - Test: 手工端到端
 
-- [ ] **Step 1: 全量后端测试**
+- [x] **Step 1: 全量后端测试**
 
 ```powershell
 .venv\Scripts\python.exe -m unittest discover tests -v
 ```
 
-- [ ] **Step 2: 前端构建 + 测试**
+结果：161/161 通过。
+
+- [x] **Step 2: 前端构建 + 测试**
 
 ```powershell
 cd frontendvue; node --test src/; npm run build
 ```
 
-- [ ] **Step 3: 端到端真实样例（按技术验证顺序）**
+实际命令用 `node --test "src/**/*.test.js"`（Node 24 目录直参误报，见执行注意）。结果：前端 73/73、build 通过。
+
+- [ ] **Step 3: 端到端真实样例（按技术验证顺序）**（阻塞：`tools/` 目录尚不存在，外部工具二进制与 OSGB/LAS 样例数据待提供）
 
 1. OSGB 小样例：提交 local_osgb 任务 → tile_3d 阶段完成 → 任务卡片点预览 → Cesium 加载 tileset.json，核对坐标/高程/纹理。
 2. LAS/LAZ 小样例：提交 local_pointcloud（DSM+DEM）→ 产物 `{name}_dsm.tif`/`{name}_dem.tif` 可下载 → 用「本地 DEM 导入」接力验证 terrain/contour。
@@ -607,9 +611,11 @@ cd frontendvue; node --test src/; npm run build
 4. 长任务：验证进度推进、暂停、取消、失败重跑（删除任务不清缓存语义沿用）、服务重启后 paused 任务可恢复。
 5. 错误路径：未配置工具路径、OSGB 缺 metadata.xml、LAS 缺 CRS、磁盘空间不足（可 mock）——均给出明确中文错误。
 
-- [ ] **Step 4: 更新 CLAUDE.md 架构要点（三维管线一段：runner_3d + processors + tools 配置约定）**
+- [x] **Step 4: 更新 CLAUDE.md 架构要点（三维管线一段：runner_3d + processors + tools 配置约定）**
 
-- [ ] **Step 5: Commit**
+另顺带更新过时的「无测试套件」注记为实际测试命令。
+
+- [x] **Step 5: Commit**
 
 ```powershell
 git add docs CLAUDE.md

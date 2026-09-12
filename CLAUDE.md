@@ -21,6 +21,12 @@ cd frontendvue && npm run dev        # http://localhost:5173
 # 前端构建（产物落到 frontendvue/dist，后端会自动挂载它）
 cd frontendvue && npm run build
 
+# 后端测试（标准库 unittest，约 160+ 用例）
+.venv/Scripts/python.exe -m unittest discover tests
+
+# 前端测试（Node 内置 runner；必须 glob 直参，Node 24 下 `node --test src/` 目录直参会误报）
+cd frontendvue && node --test "src/**/*.test.js"
+
 # 重建 Python 虚拟环境（新机器）
 python -m venv .venv
 .venv/Scripts/python.exe -m pip install -r requirements.txt
@@ -28,7 +34,7 @@ python -m venv .venv
 
 访问入口:后端运行后打开 http://127.0.0.1:8000（生产/自用），或前端 dev 时用 5173 端口（带热更新）。
 
-> 项目当前没有测试套件，也未配置 lint 工具。
+> 未配置 lint 工具。
 
 ## 架构要点
 
@@ -56,6 +62,17 @@ python -m venv .venv
 ### 数据源抽象
 
 `providers/base.py::TileProvider` 是抽象基类（`key`/`ext`/`bands`/`tile_url`）。当前只实现 `providers/tianditu.py`（img/vec/ter 三图层，t0~t7 子域名轮询）。下载器与拼接管线只依赖抽象接口，新增 DEM 等数据源时实现同一接口并在 `build_provider` 登记即可，无需改上层。
+
+### 三维处理管线（OSGB/点云）
+
+独立于下载管线的第二条执行链路，处理本地三维数据（需求27）:
+
+- **入口**:`api/tasks.py::_create_local_3d_task`，provider 为 `local_osgb`（OSGB 倾斜模型目录）/`local_pointcloud`（LAS/LAZ 文件或目录）。任务不带 bbox 与级别（占位 `[0,0,0,0]`、`total=0`），真实范围转换阶段才解析；点云任务另有 `pc_crs`/`pc_resolution` 字段。
+- **执行**:`core/runner_3d.py::run_3d_task`（`queue.py` 按 pipeline=`PIPE_3D` 分发，与下载任务同队列同 worker）。阶段 key 四个、全部 default_on:`convert_3d`(OSGB→3D Tiles)、`pc_dsm`/`pc_dem`(点云→DSM/DEM GeoTIFF)、`pc_tile_3d`(点云→pnts 瓦片）。
+- **适配层**:`core/processors/` 每个外部工具一个 adapter（CLI 调用，非源码集成）:OSGB→3D Tiles 用 fanvanzh/3dtiles exe；点云→DEM/DSM 用 PDAL；点云→3D Tiles 用 py3dtiles（独立 venv)。新增/替换工具时实现同一 adapter 接口即可。
+- **工具配置**:`config.yaml` 的 `tools:` 节（`ToolsConfig`）指向 `tools/3dtiles/`、`tools/pdal/`、`tools/py3dtiles-venv/`（该目录已 gitignore，体积大不进库）;`/api/diagnostics/tools` 可探测各工具是否就绪。
+- **产物约定**:3D Tiles → `{output}/3dtiles/`；点云栅格 → `{任务名}_dsm.tif`/`{任务名}_dem.tif`。多文件点云的主 tileset 在 `3dtiles/001_{首个文件名去扩展}/tileset.json`（零填充序号子目录，字典序首个恒为 001_*）;layers 接口的 `preview3d` 项经 `url` 字段下发该地址。
+- **无续切语义**：四个阶段都不支持增量续传（fanvanzh 整目录转换、py3dtiles 遇非空目录报错、PDAL 逐文件覆盖），前端对这些阶段只提供「删除并重试」；purge 重跑时由 runner_3d 清对应产物目录。
 
 ### 配置
 
