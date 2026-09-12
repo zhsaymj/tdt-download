@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -638,6 +639,12 @@ def _dir_has_las(p: Path) -> bool:
                for f in p.rglob("*") if f.is_file())
 
 
+#: pc_crs 合法形式:空串(自动读 LAS 头)、local(本地坐标)、EPSG:数字;
+#: 大小写均不敏感。其余形式(裸数字/WKT/带空格等) runner 阶段无法处理,
+#: 在建任务时就拦下,避免入队后才失败。
+_PC_CRS_RE = re.compile(r"^(?:EPSG:\d+|local)$", re.IGNORECASE)
+
+
 async def _create_local_3d_task(data: TaskCreate, p: Path):
     """本地三维源(OSGB / 点云)建任务:跳过栅格 inspect,只做存在性与形态校验。
 
@@ -646,6 +653,10 @@ async def _create_local_3d_task(data: TaskCreate, p: Path):
     bbox/级别此时读不出来(OSGB metadata、LAS 头要到 runner 阶段才解析),
     bbox 缺省置 [0,0,0,0] 占位;没有下载阶段,total 恒为 0。
     """
+    pc_crs = data.pc_crs or ""
+    if pc_crs and not _PC_CRS_RE.match(pc_crs):
+        raise HTTPException(
+            400, f"pc_crs 只支持 EPSG:数字 或 local(收到:{pc_crs})")
     if data.provider == "local_osgb":
         if not p.is_dir():
             raise HTTPException(400, f"OSGB 数据源需要选择已存在的目录:{p}")

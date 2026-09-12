@@ -196,6 +196,38 @@ class Local3DTaskCreateApiTest(_TempDbCase):
                 self._create(data)
         self.assertEqual(cm.exception.status_code, 400)
 
+    def test_pointcloud_pc_crs_valid_forms_accepted(self):
+        # pc_crs 合法形式:空(自动读 LAS 头)、local(大小写不敏感)、EPSG:数字
+        from backend.models import TaskCreate
+
+        with tempfile.TemporaryDirectory() as d:
+            las = Path(d) / "a.las"
+            las.write_bytes(b"LASF")
+            for crs in ("", "local", "LOCAL", "EPSG:4547", "epsg:4547"):
+                with self.subTest(pc_crs=crs):
+                    data = TaskCreate(provider="local_pointcloud",
+                                      bbox=[0, 0, 0, 0], export="dsm",
+                                      source_path=str(las), pc_crs=crs)
+                    resp = self._create(data)
+                    self.assertEqual(resp["status"], "pending")
+
+    def test_pointcloud_pc_crs_bad_form_rejected(self):
+        from fastapi import HTTPException
+        from backend.models import TaskCreate
+
+        with tempfile.TemporaryDirectory() as d:
+            las = Path(d) / "a.las"
+            las.write_bytes(b"LASF")
+            for crs in ("4547", "EPSG:", "EPSG:abc", "wgs84", "EPSG:4547 "):
+                with self.subTest(pc_crs=crs):
+                    data = TaskCreate(provider="local_pointcloud",
+                                      bbox=[0, 0, 0, 0], export="dsm",
+                                      source_path=str(las), pc_crs=crs)
+                    with self.assertRaises(HTTPException) as cm:
+                        self._create(data)
+                    self.assertEqual(cm.exception.status_code, 400)
+                    self.assertIn("pc_crs", cm.exception.detail)
+
 
 class OldDbMigrationTest(unittest.TestCase):
     """旧库(无 pc_crs/pc_resolution 列)经 init_db 迁移后补齐新列。"""
