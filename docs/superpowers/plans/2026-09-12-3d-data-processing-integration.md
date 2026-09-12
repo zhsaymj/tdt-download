@@ -554,38 +554,30 @@ git commit -m "feat: add local 3d source to process dialog with preflight checks
 - Modify: `frontendvue/src/components/DataDialog.vue`
 - Modify: `frontendvue/src/preview/PreviewApp.vue`
 - Test: `frontendvue/src/utils/provider.test.js`（无则新建）
+- 实际增加: `backend/api/tasks.py`（`_scan_output_size` 三维标签）、`backend/core/overlay.py`（layers 接口 preview3d 标签 + `url` 字段）、`frontendvue/src/components/TaskDetail.vue`（model3d 分支）、`frontendvue/src/components/AddExportDialog.vue`（提示文案）
+- 实际增加 Test: `frontendvue/src/components/TaskQueue.model3d.test.js`、`frontendvue/src/components/TaskDetail.model3d.test.js`、`tests/test_3d_results_display.py`
 
-- [ ] **Step 1: 失败测试**
+- [x] **Step 1: 失败测试**（`taskKindOf` 两个三维 provider → `'model3d'`，按 TDD 先红）
 
-```js
-// taskKindOf({provider:'local_osgb'}) === 'model3d'
-// taskKindOf({provider:'local_pointcloud'}) === 'model3d'
-```
+- [x] **Step 2: 确认失败**（`node --test src/utils/provider.test.js` 如预期失败）
 
-- [ ] **Step 2: 确认失败**
+- [x] **Step 3: 实现**
 
-```powershell
-cd frontendvue; node --test src/utils/provider.test.js
-```
+- provider.js：`MODEL3D_PROVIDERS`、`taskKindOf` 加 `'model3d'` 分支、`isModel3dProvider` 导出，均按计划落地。另集中导出 `PREVIEWABLE_STAGE_KEYS` / `TILESET_STAGE_KEYS` 常量（质量审发现：判定数组曾三处硬编码，重蹈 provider.js 文件头注释记录的"四组件漏判"覆辙，改为单点维护）。
+- TaskQueue.vue / DataDialog.vue：kindClass 第四种色（实际取青色 #0d9488，紫色已被 buildings 占用）；`previewable(t)` 改引用 `PREVIEWABLE_STAGE_KEYS`（在原 4 key 基础上追加 `convert_3d`、`pc_tile_3d`）。
+- 计划外补充（质量审 Important 发现）：
+  - TaskQueue 对 `convert_3d`/`pc_dsm`/`pc_dem`/`pc_tile_3d` 四阶段隐藏「续切」按钮（`NO_RESUME_STAGES`）：三维四阶段均无增量续传语义（fanvanzh 整目录转换、py3dtiles 非空目录报错、PDAL 逐文件覆盖），只留「删除并重试」。
+  - TaskQueue 对 model3d 隐藏「重新下载」按钮（RedownloadDialog 为影像/建筑语义，无 local_* 选项，点了只会困惑报错）。
+  - TaskDetail.vue 补 model3d 模板分支（原计划漏列该接触面）：源路径/pcCrs/pcResolution 显示、范围行占位文案、全零 bbox 守卫、checkbox/缩放按钮排除。教训：后续 Task 范围声明应列该类型全部 UI 接触面。
+  - DataDialog `canRepairNodata` 排除 model3d（修复针对旧版 RGB 影像）；export 串经 `EXPORT_TEXT_M3D` 映射中文。
+- PreviewApp.vue：`ready.buildings` 改用 `TILESET_STAGE_KEYS.some(stageDone)`；model3d 任务经 `/api/tasks/{id}/layers` 取 `preview3d` 项 `url` 作 tileset 地址（多文件点云主 tileset 在 `001_{stem}/` 子目录，overlay.py 按零填充序号字典序首个下发，与 runner_3d `tiles3d_output` 约定一致）；全零占位 bbox 置 null 改 `viewer.zoomTo(tileset3d)`（否则飞几内亚湾）；label 按 provider 区分「倾斜模型/点云 3D Tiles」。Cesium 加载逻辑不动。
+- 点云 DEM/DSM 产物复用现有栅格成果行：`{name}_dem.tif`/`{name}_dsm.tif` 命名约定下 DataDialog 成果枚举（overlay.py 栅格 `glob("*.tif")`）与后端 `_scan_output_size` 均无后缀硬编码，下载/叠加链接天然可用；后端仅调标签（`{name}_dsm.tif` 精确等值摘出，不误伤影像任务 `{name}_dsm_z*.tif`），并补 `tests/test_3d_results_display.py` 8 用例。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 4: 测试通过**（全量验证：前端 73/73（64 基线 + 9 新增）、后端 161/161、`npm run build` 通过）
 
-- provider.js：`MODEL3D_PROVIDERS = ['local_osgb', 'local_pointcloud']`；`taskKindOf` 加分支返回 `'model3d'`；`isModel3dProvider` 导出。
-- TaskQueue.vue / DataDialog.vue：kindClass 三色加第四种色（如紫色）；`previewable(t)` 判定数组在现有 `['tms','osm','terrain','tile_3d']` 基础上追加 `'convert_3d'`、`'pc_tile_3d'`。
-- PreviewApp.vue 小改：`stageDone('tile_3d')` 的判定扩展为 `stageDone('tile_3d') || stageDone('convert_3d') || stageDone('pc_tile_3d')`（三维任务 stages 里只有新 key）；`3dtiles/tileset.json` 路径约定一致，Cesium 加载逻辑不动。点云 DEM/DSM 产物如需在成果面板显示下载链接，复用现有栅格成果行（按 `{name}_dem.tif`/`{name}_dsm.tif` 命名约定匹配，实现时核对 DataDialog 的成果枚举逻辑是否硬编码文件后缀）。
+- [x] **Step 5: Commit**
 
-- [ ] **Step 4: 测试通过**
-
-```powershell
-cd frontendvue; node --test src/utils/provider.test.js
-```
-
-- [ ] **Step 5: Commit**
-
-```powershell
-git add frontendvue/src/utils/provider.js frontendvue/src/components/TaskQueue.vue frontendvue/src/components/DataDialog.vue frontendvue/src/preview/PreviewApp.vue frontendvue/src/utils/provider.test.js
-git commit -m "feat: show 3d task kind in queue and data panels"
-```
+实际提交：实现 `b71012e`（9 文件 +406/-28）+ 质量审修复 `453b783`（10 文件 +195/-40）。
 
 ---
 
