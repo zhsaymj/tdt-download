@@ -465,31 +465,31 @@ git commit -m "feat: add runner_3d pipeline dispatching osgb/pointcloud tasks"
 - Modify: `backend/api/local.py`
 - Test: `tests/test_local_pick_3d.py`
 
-- [ ] **Step 1: 失败测试**
+- [x] **Step 1: 失败测试**
 
 - `PickReq.kind == "dir"` → 走 `askdirectory` 分支（mock tkinter）。
-- `_checked_path` 支持目录（OSGB）：存在且是目录、内含至少一个 `.osgb`（递归一层）→ ok；缺 `metadata.xml` → 返回 warning 字段。
+- `_checked_path` 支持目录（OSGB）：存在且是目录、内含至少一个 `.osgb`（**实现为全递归 rglob**：真实 ContextCapture 结构为 `Data/Tile_*/ *.osgb` 需 ≥2 层，规格"递归一层"不够用）→ ok；缺 `metadata.xml` → 返回 warning 字段。
 - 新接口 `POST /api/local/inspect_pointcloud`：body 为路径，调 LasToDem.preflight 返回 `{files, count, bbox, srs, error}`；CRS 缺失时 `srs=null` 前端提示选择 EPSG 或本地坐标。
 
-- [ ] **Step 2: 确认失败**
+- [x] **Step 2: 确认失败**
 
 ```powershell
 .venv\Scripts\python.exe -m unittest tests.test_local_pick_3d -v
 ```
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 - file_dialog.py：`POINTCLOUD_PATTERNS = [("LAS/LAZ 点云", "*.las *.laz")]`；`pick(kind)` 分发 `file|dir`；`dir` 用 `tk.filedialog.askdirectory`。
-- local.py：`PickReq.kind` Literal 加 `"dir"`；`_checked_path` 拆 `_checked_file` / `_checked_dir`；新增 osgb 目录检查与点云 inspect 接口（均 `_require_local` 保护）。
+- local.py：`PickReq.kind` Literal 加 `"dir"` 与 `"pointcloud"`（后者为 POINTCLOUD_PATTERNS 的唯一消费方，Task 10 前端点云多选必需）；`_checked_path` 拆 `_checked_file` / `_checked_dir`；新增 osgb 目录检查与点云 inspect 接口（均 `_require_local` 保护）。
 - 保留手输路径兜底（现有输入框直填路径仍可用）。
 
-- [ ] **Step 4: 测试通过**
+- [x] **Step 4: 测试通过**
 
 ```powershell
 .venv\Scripts\python.exe -m unittest tests.test_local_pick_3d -v
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add backend/core/file_dialog.py backend/api/local.py tests/test_local_pick_3d.py
