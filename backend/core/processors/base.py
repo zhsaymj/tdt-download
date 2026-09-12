@@ -84,7 +84,7 @@ class _StderrTail:
     只有 stderr 读取线程一个写入者,无需加锁。
     """
 
-    def __init__(self, limit: int = _STDERR_TAIL * 2):
+    def __init__(self, limit: int = _STDERR_TAIL):
         self._buf = ""
         self._limit = limit
 
@@ -134,11 +134,17 @@ def run_cli(cmd: list[str], *, cwd=None, cancel_event: threading.Event | None = 
     取消/超时/失败前都会先等读取线程收尾,保证输出行不丢、线程不泄漏。
     """
     tool = tool or Path(cmd[0]).name
-    proc = subprocess.Popen(
-        cmd, cwd=cwd,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        creationflags=_CREATE_NO_WINDOW,
-    )
+    try:
+        proc = subprocess.Popen(
+            cmd, cwd=cwd,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            creationflags=_CREATE_NO_WINDOW,
+        )
+    except OSError as e:
+        # exe 无法启动(路径不存在/权限不足/损坏/架构不符),
+        # 与其他失败一样归一化为 ProcessorError
+        raise ProcessorError(tool, None, str(e),
+                             hint="无法启动,请检查 tools 配置中的路径") from e
     tail = _StderrTail()
     t_out = threading.Thread(target=_pump,
                              args=(proc.stdout, on_stdout_line, None),
@@ -211,18 +217,22 @@ class BaseProcessor(ABC):
 
     def run(self, cmd: list[str], *, out_dir, cwd=None,
             cancel_event: threading.Event | None = None,
-            on_progress=None, on_stderr_line=None,
+            on_progress=None, on_stderr_line=None, on_stdout_line=None,
             timeout: float | None = None) -> ProcResult:
-        """执行命令 → stdout 进度解析 → 产物校验。
+        """执行命令 → stdout 行透传 + 进度解析 → 产物校验。
 
-        - 进度:stdout 逐行经 parse_progress 解析,结果非 None 则回调
-          on_progress(0~1);stderr 行经 on_stderr_line 透传(日志用)
+        - 透传:stdout/stderr 逐行先经 on_stdout_line/on_stderr_line 透传
+          (日志用;fanvanzh/pdal/py3dtiles 的有效日志主要走 stdout)
+        - 进度:stdout 每行透传后再经 parse_progress 解析,结果非 None
+          则回调 on_progress(0~1)
         - 取消:cancel_event 置位时 run_cli 抛 ProcessorCancelled,
           由 runner_3d 转换为 _Stopped(暂停/取消语义),本层不落库
         - 失败:非零退出/超时抛 ProcessorError;进程正常结束但产物
           缺失或为 0 字节,同样抛 ProcessorError(中文提示)
         """
         def _on_stdout(line: str):
+            if on_stdout_line is not None:
+                on_stdout_line(line)
             if on_progress is None:
                 return
             p = self.parse_progress(line)

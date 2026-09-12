@@ -172,6 +172,47 @@ class BaseProcessorRunTest(unittest.TestCase):
             self.assertEqual(progress, [0.25, 0.5, 0.75, 1.0])
             self.assertEqual(result.outputs, [str(Path(d) / "out.txt")])
 
+    def test_run_passthrough_stdout_lines_and_progress(self):
+        # on_stdout_line 收到全部 stdout 行(含无法解析进度的行),
+        # on_progress 只收到解析成功的进度
+        with tempfile.TemporaryDirectory() as d:
+            script = (
+                "import pathlib\n"
+                "print('some log line', flush=True)\n"
+                "print('PROGRESS 50', flush=True)\n"
+                f"pathlib.Path(r'{d}').joinpath('out.txt')"
+                ".write_text('done', encoding='utf-8')\n"
+            )
+            lines, progress = [], []
+            result = _FakeProcessor().run(
+                _py(script), out_dir=d,
+                on_stdout_line=lines.append, on_progress=progress.append)
+            self.assertTrue(result.ok)
+            self.assertEqual(lines, ["some log line", "PROGRESS 50"])
+            self.assertEqual(progress, [0.5])
+
+    def test_run_stdout_line_callback_exception_still_completes(self):
+        # 透传回调抛异常不应杀死读取线程:run 正常完成,
+        # 且所有行都送达过回调(用计数列表验证行数)
+        with tempfile.TemporaryDirectory() as d:
+            script = (
+                "import pathlib\n"
+                "for i in range(3):\n"
+                "    print('line %d' % i, flush=True)\n"
+                f"pathlib.Path(r'{d}').joinpath('out.txt')"
+                ".write_text('done', encoding='utf-8')\n"
+            )
+            seen = []
+
+            def cb(line):
+                seen.append(line)
+                raise RuntimeError("boom")
+
+            result = _FakeProcessor().run(
+                _py(script), out_dir=d, on_stdout_line=cb)
+            self.assertTrue(result.ok)
+            self.assertEqual(seen, ["line 0", "line 1", "line 2"])
+
     def test_run_missing_output_raises_chinese_error(self):
         with tempfile.TemporaryDirectory() as d:
             # 进程正常结束(退出码 0)但没产出预期产物 → ProcessorError
