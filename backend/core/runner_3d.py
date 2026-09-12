@@ -19,8 +19,9 @@
    文件输入(目录展开本来就是 runner 的职责);按文件粒度能给出 n/N 进度、
    失败定位到具体文件、文件间隙可响应取消;PDAL 对多 LAS 无内建 mosaic
    输出,rasterio.merge 是现成可靠的最后一步。单文件则直接出成果 tif。
-2. **pc_tile_3d 目录输入逐文件各转一个 3dtiles/<stem>/ 子目录**,
-   tiles3d_output 返回主(第一个文件的)tileset.json。
+2. **pc_tile_3d 目录输入逐文件各转一个 3dtiles/{序号}_{stem}/ 子目录**
+   (序号前缀防目录递归时同名 LAS 互覆),tiles3d_output 返回主(第一个
+   文件的)tileset.json。
 3. **pc_tile_3d 开始前无条件清空自己的 3dtiles/ 目录**:py3dtiles 无增量
    续传、非空目录直接 FileExistsError(适配器刻意不传 --overwrite 防误清);
    点云任务的 3dtiles/ 专属本阶段,清空不伤及其他阶段。
@@ -92,7 +93,8 @@ def tiles3d_output(task: dict) -> Path:
     if task.get("provider") == "local_pointcloud":
         files = _las_files(task)
         if len(files) > 1:
-            return root / files[0].stem / "tileset.json"
+            # 与 _stage_pc_tile_3d 的子目录命名一致(序号前缀防同名互覆)
+            return root / f"001_{files[0].stem}" / "tileset.json"
     return root / "tileset.json"
 
 
@@ -127,13 +129,18 @@ def _stage_convert_3d(ctx) -> list[str]:
                       message=f"转换 OSGB(约 {estimated_total} 个节点)")
 
     # fanvanzh 单 Tile 失败只打 `failed:`/`ERROR` 日志仍 exit 0(适配器契约),
-    # 必须扫描输出行才能发现部分失败
-    bad_lines: list[str] = []
+    # 必须扫描输出行才能发现部分失败。计数与样本分离:海量错误行时只留
+    # 前几行样本,不无限攒列表。
+    bad_count = 0
+    bad_samples: list[str] = []
 
     def _scan(line: str):
+        nonlocal bad_count
         low = line.lower()
         if "failed:" in low or "error" in low:
-            bad_lines.append(line.strip())
+            bad_count += 1
+            if len(bad_samples) < 5:
+                bad_samples.append(line.strip())
             logger.warning("任务[%s] convert_3d 输出命中失败行:%s",
                            task["name"], line[:200])
         else:
@@ -148,10 +155,15 @@ def _stage_convert_3d(ctx) -> list[str]:
     poll_stop = threading.Event()
 
     def _poll():
-        while not poll_stop.wait(1.0):
-            p = OsgbTo3dTiles.progress_by_output_count(out_dir, estimated_total)
-            if p is not None:
-                _on_progress(p)
+        try:
+            while not poll_stop.wait(1.0):
+                p = OsgbTo3dTiles.progress_by_output_count(out_dir,
+                                                           estimated_total)
+                if p is not None:
+                    _on_progress(p)
+        except Exception:  # 扫盘竞态等异常记日志,不让线程静默死亡
+            logger.exception("任务[%s] convert_3d 进度轮询线程异常",
+                             task["name"])
 
     poll = threading.Thread(target=_poll, daemon=True,
                             name=f"convert3d-poll-{task['id'][:8]}")
@@ -165,10 +177,10 @@ def _stage_convert_3d(ctx) -> list[str]:
         poll_stop.set()
         poll.join(timeout=2)
 
-    if bad_lines:
+    if bad_count:
         raise RuntimeError(
-            f"convert_3d 部分瓦片转换失败(命中 {len(bad_lines)} 行错误日志),"
-            f"如:{bad_lines[0][:120]}")
+            f"convert_3d 部分瓦片转换失败(命中 {bad_count} 行错误日志),"
+            f"如:{bad_samples[0][:120]}")
     tileset = out_dir / "tileset.json"
     if not tileset.is_file():
         raise RuntimeError(f"产物缺失:{tileset.name}")
@@ -195,18 +207,22 @@ def _estimate_resolution(proc: LasToDem, path: Path) -> tuple[float, str]:
 
 
 def _merge_tifs(parts: list[Path], out_tif: Path) -> None:
-    """把多幅分幅 tif 用 rasterio.merge 拼成一幅成果 tif。"""
+    """把多幅分幅 tif 用 rasterio.merge 拼成一幅成果 tif。
+
+    dst_path 模式逐窗口边算边落盘,不一次性把全部分幅读进内存(大场景
+    防 OOM);BIGTIFF/LZW/tiled 与 dem.py 的工程实践对齐,防成果超 4GB。
+    """
     import rasterio
     from rasterio.merge import merge
 
     srcs = [rasterio.open(p) for p in parts]
     try:
-        arr, transform = merge(srcs)
         profile = srcs[0].profile.copy()
-        profile.update(height=arr.shape[1], width=arr.shape[2],
-                       count=arr.shape[0], transform=transform)
-        with rasterio.open(out_tif, "w", **profile) as ds:
-            ds.write(arr)
+        # 显式 256 块:tiled 要求块尺寸是 16 的倍数,缺省时 GDAL 可能取
+        # 源图尺寸当块大小(小图非 16 倍数直接报错)
+        profile.update(BIGTIFF="YES", compress="LZW", tiled=True,
+                       blockxsize=256, blockysize=256)
+        merge(srcs, dst_path=str(out_tif), dst_kwds=profile)
     finally:
         for s in srcs:
             s.close()
@@ -241,7 +257,8 @@ def _run_pc_raster(ctx, key: str, kind: str, out_tif: Path) -> list[str]:
     for i, f in enumerate(files, 1):
         if ctx.should_stop():
             raise _Stopped()
-        out = out_tif if single else parts_dir / f"{f.stem}.tif"
+        # 枚举序号前缀:目录递归收集时不同子目录的同名 LAS 不互相覆盖
+        out = out_tif if single else parts_dir / f"{i:03d}_{f.stem}.tif"
         out.parent.mkdir(parents=True, exist_ok=True)
         proc.run_pipeline(
             input=str(f), output=str(out), kind=kind, resolution=resolution,
@@ -313,7 +330,8 @@ def _stage_pc_tile_3d(ctx) -> list[str]:
     for i, f in enumerate(files, 1):
         if ctx.should_stop():
             raise _Stopped()
-        out_sub = tiles_root if single else tiles_root / f.stem
+        # 序号前缀与 tiles3d_output 的主产物推导保持一致(防同名互覆)
+        out_sub = tiles_root if single else tiles_root / f"{i:03d}_{f.stem}"
         out_sub.mkdir(parents=True, exist_ok=True)
         # pnts 总数事先不可知(取决于点数与八叉树深度),进度退化为文件粒度
         cmd = proc.build_cmd(input_file=str(f), out_dir=str(out_sub),
@@ -375,7 +393,6 @@ async def run_task(task_id: str, emit) -> None:
     if _ENABLE_WATCHER:
         watcher = threading.Thread(target=_watch, daemon=True,
                                    name=f"runner3d-watch-{task_id[:8]}")
-        watcher.start()
 
     ctx = _Ctx(task=task, out_dir=out_dir, tracker=tracker,
                should_stop=should_stop, cancel_event=cancel_event)
@@ -387,6 +404,9 @@ async def run_task(task_id: str, emit) -> None:
 
     any_failed = False
     try:
+        # start 放进 try:此后任何异常都经 finally 停掉 watcher,不泄漏线程
+        if watcher is not None:
+            watcher.start()
         for stage in list(tracker.stages):
             key = stage["key"]
             if key not in _EXECUTORS or tracker.is_done(key):
@@ -440,7 +460,9 @@ async def run_task(task_id: str, emit) -> None:
                     "有阶段失败" if any_failed else "成功")
     finally:
         watch_stop.set()
-        if watcher is not None:
+        # is_alive 守卫:start() 自身抛错时线程未启动,join 会 RuntimeError;
+        # 已自行退出的线程也无需再 join
+        if watcher is not None and watcher.is_alive():
             watcher.join(timeout=2)
 
 

@@ -3,11 +3,15 @@
 三个外部处理器（OsgbTo3dTiles / LasToDem / LasTo3dTiles）一律 mock，
 patch 点为 backend.core.runner_3d 模块内的类引用；产物文件由 mock 的
 side_effect 伪造。watcher 线程默认关闭（_ENABLE_WATCHER=False），暂停/取消
-通过 ProcessorCancelled + request_pause 确定性模拟，避免线程竞态。
+通过 ProcessorCancelled + request_pause 确定性模拟，避免线程竞态；
+仅 test_watcher_* 用例保留 watcher，验证「队列控制标志 → cancel_event」
+这条生产暂停/取消的唯一通路。
 """
 
 import asyncio
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -56,11 +60,14 @@ class Runner3dCase(_TempDbCase):
         super().setUp()
         self.tmp = Path(self._tmp.name)
 
-    def _patch_processors(self):
+    def _patch_processors(self, enable_watcher: bool = False):
         p_osgb = mock.patch("backend.core.runner_3d.OsgbTo3dTiles").start()
         p_dem = mock.patch("backend.core.runner_3d.LasToDem").start()
         p_py = mock.patch("backend.core.runner_3d.LasTo3dTiles").start()
-        mock.patch("backend.core.runner_3d._ENABLE_WATCHER", False).start()
+        if not enable_watcher:
+            mock.patch(
+                "backend.core.runner_3d._ENABLE_WATCHER", False
+            ).start()
         self.addCleanup(mock.patch.stopall)
         for proc in (p_osgb.return_value, p_dem.return_value, p_py.return_value):
             proc.check_available.return_value = (True, "ok")
@@ -86,6 +93,22 @@ class Runner3dCase(_TempDbCase):
     @staticmethod
     def _ok_result(*outputs: Path):
         return mock.Mock(ok=True, outputs=[str(p) for p in outputs], message="")
+
+    @staticmethod
+    def _write_tif(path: Path, origin_x: float):
+        """写一幅 2x2 float32 tif，x 范围 [origin_x, origin_x+2)。"""
+        profile = {
+            "driver": "GTiff",
+            "height": 2,
+            "width": 2,
+            "count": 1,
+            "dtype": "float32",
+            "crs": "EPSG:4326",
+            "transform": from_origin(origin_x, 2, 1, 1),
+            "nodata": -9999.0,
+        }
+        with rasterio.open(path, "w", **profile) as ds:
+            ds.write(np.zeros((1, 2, 2), dtype=np.float32))
 
     # 1. local_osgb 任务只跑 convert_3d 阶段
     def test_osgb_task_runs_only_convert_3d(self):
@@ -412,24 +435,11 @@ class Runner3dCase(_TempDbCase):
             total=2,
         )
 
-        def _write_tif(path: Path, origin_x: float):
-            profile = {
-                "driver": "GTiff",
-                "height": 2,
-                "width": 2,
-                "count": 1,
-                "dtype": "float32",
-                "crs": "EPSG:4326",
-                "transform": from_origin(origin_x, 2, 1, 1),
-                "nodata": -9999.0,
-            }
-            with rasterio.open(path, "w", **profile) as ds:
-                ds.write(np.zeros((1, 2, 2), dtype=np.float32))
-
         def fake_pipeline(**kwargs):
             out = Path(kwargs["output"])
             out.parent.mkdir(parents=True, exist_ok=True)
-            _write_tif(out, 0.0 if out.stem == "a" else 2.0)
+            # 分幅命名带序号前缀（001_a.tif / 002_b.tif）
+            self._write_tif(out, 0.0 if out.stem.endswith("_a") else 2.0)
             return self._ok_result(out)
 
         p_dem.return_value.run_pipeline.side_effect = fake_pipeline
@@ -441,10 +451,56 @@ class Runner3dCase(_TempDbCase):
         out_tif = Path(final["output_path"]) / "多文件DSM_dsm.tif"
         with rasterio.open(out_tif) as ds:
             arr = ds.read()
+            # 合并成果带压缩/分块工程参数（BIGTIFF 不是数据集属性读不回）
+            self.assertEqual(ds.profile.get("compress"), "lzw")
+            self.assertTrue(ds.profile.get("tiled"))
         # 两幅 2x2 横向相邻（x: 0..2 与 2..4）→ 合并后 2 行 4 列
         self.assertEqual(arr.shape, (1, 2, 4))
         # 临时分幅目录已清理
         self.assertFalse((Path(final["output_path"]) / "_dsm_parts").exists())
+
+    # 10b. 目录递归收集时同名 LAS 靠序号前缀分幅命名,不互相覆盖
+    def test_multi_las_same_stem_no_overwrite(self):
+        p_osgb, p_dem, p_py = self._patch_processors()
+        src_dir = self.tmp / "las_dir"
+        for flight in ("flight1", "flight2"):
+            d = src_dir / flight
+            d.mkdir(parents=True)
+            (d / "data.las").write_bytes(b"x")
+        task_id = create_task(
+            TaskCreate(
+                name="同名LAS",
+                provider="local_pointcloud",
+                bbox=BBOX,
+                source_path=str(src_dir),
+                export="dsm",
+                pc_resolution=1.0,
+            ),
+            total=2,
+        )
+        outputs: list[str] = []
+
+        def fake_pipeline(**kwargs):
+            out = Path(kwargs["output"])
+            outputs.append(out.name)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            # 第 1 个文件 x∈[0,2)、第 2 个 x∈[2,4)
+            self._write_tif(out, 2.0 * (len(outputs) - 1))
+            return self._ok_result(out)
+
+        p_dem.return_value.run_pipeline.side_effect = fake_pipeline
+        self._run(task_id)
+
+        final = get_task(task_id)
+        self.assertEqual(final["status"], "done", msg=str(final.get("stages")))
+        # 两个同名 data.las 的分幅输出名带序号前缀,互不相同
+        self.assertEqual(len(set(outputs)), 2)
+        self.assertTrue(all(n[:3].isdigit() for n in outputs), msg=str(outputs))
+        out_tif = Path(final["output_path"]) / "同名LAS_dsm.tif"
+        with rasterio.open(out_tif) as ds:
+            arr = ds.read()
+        # 两幅都进了合并(若互覆则只剩一幅,宽度只有 2)
+        self.assertEqual(arr.shape, (1, 2, 4))
 
     # 11. pc_resolution=0 时由 preflight 的 bbox/points 自动估算
     def test_resolution_estimated_from_preflight_when_zero(self):
@@ -507,6 +563,70 @@ class Runner3dCase(_TempDbCase):
         stages = {s["key"]: s for s in final["stages"]}
         self.assertEqual(stages["pc_tile_3d"]["status"], "failed")
         self.assertIn("未配置 py3dtiles_python", stages["pc_tile_3d"]["message"])
+
+    def _run_with_watcher(self, control: str):
+        """watcher 开启下跑一个会阻塞在 cancel_event 上的 dsm 任务。
+
+        fake_pipeline 阻塞等 watcher 把队列控制标志桥接进 cancel_event;
+        另一线程在 pipeline 进入后 request_pause/request_cancel。
+        """
+        p_osgb, p_dem, p_py = self._patch_processors(enable_watcher=True)
+        src = _mk_src(self.tmp)
+        task_id = create_task(
+            TaskCreate(
+                name=f"watcher{control}",
+                provider="local_pointcloud",
+                bbox=BBOX,
+                source_path=str(src),
+                export="dsm",
+                pc_resolution=1.0,
+            ),
+            total=1,
+        )
+        entered = threading.Event()
+
+        def fake_pipeline(**kwargs):
+            entered.set()
+            # 阻塞至 watcher 置位(5s 护栏防测试挂死)
+            if kwargs["cancel_event"].wait(timeout=5.0):
+                raise ProcessorCancelled("pdal")
+            raise AssertionError("watcher 未在 5s 内置位 cancel_event")
+
+        p_dem.return_value.run_pipeline.side_effect = fake_pipeline
+
+        def _stop():
+            if entered.wait(timeout=5.0):
+                if control == "pause":
+                    task_queue.request_pause(task_id)
+                else:
+                    task_queue.request_cancel(task_id)
+
+        t = threading.Thread(target=_stop, daemon=True)
+        t.start()
+        try:
+            t0 = time.monotonic()
+            self._run(task_id)
+            # 0.5s 轮询,正常 1~2s 内响应;超时说明 watcher 通路断了
+            self.assertLess(time.monotonic() - t0, 5.0)
+        finally:
+            task_queue._control.pop(task_id, None)
+            t.join(timeout=6.0)
+        return task_id
+
+    # 13. watcher 是生产暂停唯一通路:request_pause → cancel_event → paused
+    def test_watcher_pause_lands_paused(self):
+        task_id = self._run_with_watcher("pause")
+        self.assertEqual(get_task(task_id)["status"], "paused")
+        # watcher 线程随 run_task 结束 join,不泄漏
+        alive = {t.name for t in threading.enumerate()}
+        self.assertNotIn(f"runner3d-watch-{task_id[:8]}", alive)
+
+    # 14. watcher 取消通路:request_cancel → canceled
+    def test_watcher_cancel_lands_canceled(self):
+        task_id = self._run_with_watcher("cancel")
+        self.assertEqual(get_task(task_id)["status"], "canceled")
+        alive = {t.name for t in threading.enumerate()}
+        self.assertNotIn(f"runner3d-watch-{task_id[:8]}", alive)
 
 
 class QueueDispatchCase(_TempDbCase):
