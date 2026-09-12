@@ -66,6 +66,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- 本地影像 tif 出 TMS 时的断层补齐策略:
     -- contiguous=只用连续高层级兜底;preserve_inputs=保留每个输入层级并分段补齐。
     tms_source_strategy TEXT DEFAULT 'contiguous',
+    -- 点云任务的 CRS 处理策略:''=自动读 LAS 头;'local'=按本地坐标;否则为 EPSG 码(如 EPSG:4547)。
+    pc_crs       TEXT NOT NULL DEFAULT '',
+    -- 点云出 DEM/DSM 的栅格分辨率(米),0=按点云密度自动估算。
+    pc_resolution REAL NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
@@ -117,6 +121,10 @@ _MIGRATIONS = {
     # 本地文件输入源(不下载,直接读用户磁盘上的文件)
     "source_path": "ALTER TABLE tasks ADD COLUMN source_path TEXT DEFAULT ''",
     "tms_source_strategy": "ALTER TABLE tasks ADD COLUMN tms_source_strategy TEXT DEFAULT 'contiguous'",
+    # 点云任务:CRS 处理策略(''=自动读 LAS 头;'local'=本地坐标;否则为 EPSG 码)
+    "pc_crs": "ALTER TABLE tasks ADD COLUMN pc_crs TEXT NOT NULL DEFAULT ''",
+    # 点云出 DEM/DSM 的栅格分辨率(米),0=自动
+    "pc_resolution": "ALTER TABLE tasks ADD COLUMN pc_resolution REAL NOT NULL DEFAULT 0",
 }
 
 

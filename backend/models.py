@@ -208,6 +208,12 @@ class TaskCreate(BaseModel):
     tms_source_strategy: str = Field(
         default="contiguous",
         description="本地影像出 TMS 的断层策略:contiguous/preserve_inputs")
+    pc_crs: str = Field(
+        default="",
+        description="点云任务 CRS 处理策略:''=自动读 LAS 头;'local'=本地坐标;否则为 EPSG 码(如 EPSG:4547)")
+    pc_resolution: float = Field(
+        default=0.0, ge=0.0, le=1000.0,
+        description="点云出 DEM/DSM 的栅格分辨率(米),0=按点云密度自动估算")
 
     def level_list(self) -> list[int]:
         """归一化出去重升序的级别列表:优先 levels,回退 z_min..z_max。
@@ -260,10 +266,10 @@ def create_task(data: TaskCreate, total: int, est_bytes: int = 0) -> str:
                 upload_id, height_field, height_mode, height_scale,
                 floor_height, name_field, keep_fields, dem_upload_id,
                 containers, contour_interval, keep_tiles_dir, source_path,
-                tms_source_strategy,
+                tms_source_strategy, pc_crs, pc_resolution,
                 created_at, updated_at)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-                       ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 task_id, data.name, data.provider, json.dumps(data.bbox),
                 z_min, z_max, data.export,
@@ -287,6 +293,8 @@ def create_task(data: TaskCreate, total: int, est_bytes: int = 0) -> str:
                 1 if data.keep_tiles_dir else 0,
                 (data.source_path or "").strip(),
                 normalize_tms_source_strategy(data.tms_source_strategy),
+                (data.pc_crs or "").strip(),
+                float(data.pc_resolution or 0.0),
                 now, now,
             ),
         )
@@ -390,6 +398,9 @@ def _row_to_dict(row) -> dict:
     d["source_path"] = d.get("source_path") or ""
     d["tms_source_strategy"] = normalize_tms_source_strategy(
         d.get("tms_source_strategy"))
+    # 点云字段:旧任务缺列时 get 返回 None → 回落默认('' 自动读 LAS 头 / 0 自动分辨率)
+    d["pc_crs"] = d.get("pc_crs") or ""
+    d["pc_resolution"] = float(d.get("pc_resolution") or 0.0)
     # 阶段化进度:优先存储的 stages;旧任务(空)按 export/status 合成兼容视图
     st = d.get("stages")
     stages = json.loads(st) if st else []

@@ -582,8 +582,15 @@ async def _create_local_task(data: TaskCreate):
     from ..core import local_raster
 
     p = Path((data.source_path or "").strip().strip('"'))
-    if not p.is_absolute() or not p.is_file():
-        raise HTTPException(400, f"源文件不存在或不是绝对路径:{p}")
+    if not p.is_absolute():
+        raise HTTPException(400, f"源路径不是绝对路径:{p}")
+
+    # 三维源(OSGB 目录 / 点云 las-laz)不是栅格:跳过栅格 inspect 与范围交集,另走一套
+    if data.provider in ("local_osgb", "local_pointcloud"):
+        return await _create_local_3d_task(data, p)
+
+    if not p.is_file():
+        raise HTTPException(400, f"源文件不存在:{p}")
 
     try:
         info = await asyncio.to_thread(local_raster.inspect_for_import, p)
@@ -617,6 +624,36 @@ async def _create_local_task(data: TaskCreate):
     await task_queue.enqueue(task_id)
     return {"id": task_id, "total": 0, "status": "pending",
             "kind": info["kind"], "levels": data.level_list()}
+
+
+async def _create_local_3d_task(data: TaskCreate, p: Path):
+    """本地三维源(OSGB / 点云)建任务:跳过栅格 inspect,只做存在性与形态校验。
+
+    - local_osgb:OSGB 是目录结构(Data/ + metadata.xml),只接受已存在的目录
+    - local_pointcloud:接受单个 las/laz 文件,或包含至少一个 las/laz 的目录(递归枚举)
+    bbox/级别此时读不出来(OSGB metadata、LAS 头要到 runner 阶段才解析),
+    bbox 缺省置 [0,0,0,0] 占位;没有下载阶段,total 恒为 0。
+    """
+    if data.provider == "local_osgb":
+        if not p.is_dir():
+            raise HTTPException(400, f"OSGB 数据源需要选择已存在的目录:{p}")
+    else:  # local_pointcloud
+        if p.is_dir():
+            has_las = any(f.suffix.lower() in (".las", ".laz")
+                          for f in p.rglob("*") if f.is_file())
+            if not has_las:
+                raise HTTPException(400, f"目录下没有找到 las/laz 点云文件:{p}")
+        elif not p.is_file():
+            raise HTTPException(400, f"点云文件不存在:{p}")
+        elif p.suffix.lower() not in (".las", ".laz"):
+            raise HTTPException(400, f"点云数据源只支持 las/laz 文件:{p}")
+
+    if not data.bbox or len(data.bbox) != 4:
+        data.bbox = [0.0, 0.0, 0.0, 0.0]
+
+    task_id = create_task(data, 0, 0)
+    await task_queue.enqueue(task_id)
+    return {"id": task_id, "total": 0, "status": "pending"}
 
 
 async def _update_buildings_task(task_id: str, data: TaskCreate):

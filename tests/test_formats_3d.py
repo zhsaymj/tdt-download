@@ -1,6 +1,7 @@
 import unittest
 
-from backend.core.formats import DataKind, PROVIDER_KIND, STAGES, plan_stages
+from backend.core.formats import (DataKind, PROVIDER_KIND, STAGES, plan_stages,
+                                  stages_for)
 
 
 class Formats3DTest(unittest.TestCase):
@@ -27,6 +28,12 @@ class Formats3DTest(unittest.TestCase):
         # dem/tile_3d 已被栅格/建筑管线占用(ExportStage 单实例、pipeline 字段互斥),三维必须另起 key
         self.assertEqual(STAGES["dem"].pipeline, "raster")
         self.assertEqual(STAGES["tile_3d"].pipeline, "building")
+
+    def test_pointcloud_stages_not_in_raster_dem(self):
+        # 点云专属的 pc_dsm/pc_dem 不得串进栅格 DEM 的阶段列表(kind 互斥)
+        keys = [s.key for s in stages_for(DataKind.RASTER_DEM)]
+        self.assertNotIn("pc_dem", keys)
+        self.assertNotIn("pc_dsm", keys)
 
 
 if __name__ == "__main__":
