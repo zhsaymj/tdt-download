@@ -10,7 +10,7 @@ import { computed } from 'vue'
 import { useTaskStore } from '../stores/task'
 
 const emit = defineEmits([
-  'new-download', 'new-local', 'new-vector',
+  'new-download', 'new-local', 'new-vector', 'new-3d',
   'open-data', 'open-tasks', 'open-tokens', 'open-logs', 'open-about',
 ])
 
@@ -41,6 +41,9 @@ const activeCount = computed(() => taskStore.tasks.filter(
           </t-dropdown-item>
           <t-dropdown-item @click="emit('new-vector')">
             选本地矢量文件转换
+          </t-dropdown-item>
+          <t-dropdown-item @click="emit('new-3d')">
+            选本地三维数据处理(OSGB / 点云)
           </t-dropdown-item>
         </t-dropdown-menu>
       </t-dropdown>

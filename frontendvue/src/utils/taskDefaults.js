@@ -13,6 +13,8 @@ const PROVIDER_LABELS = {
   local_vector: '本地矢量白模',
   local_image: '本地影像',
   local_dem: '本地地形',
+  local_osgb: '本地 OSGB',
+  local_pointcloud: '本地点云',
 }
 
 export function isDemProvider(provider) {

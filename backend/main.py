@@ -86,7 +86,7 @@ async def api_capabilities():
     前端据此渲染格式勾选与容器下拉,不再各 tab 硬编码——新增格式只需改
     core.formats 注册表,界面自动跟上。
     """
-    from .core.formats import (CONTAINERS, PIPE_BUILDING, PIPE_RASTER,
+    from .core.formats import (CONTAINERS, PIPE_3D, PIPE_BUILDING, PIPE_RASTER,
                                PROVIDER_KIND, DataKind, kind_of, stages_for)
 
     def stage_json(s):
@@ -103,10 +103,17 @@ async def api_capabilities():
             ],
         }
 
+    # 数据类型 → 管线。三维阶段(pipeline="3d")若按 PIPE_RASTER 过滤会全部
+    # 被排除,local_osgb/local_pointcloud 的 stages 变空、前端渲染不出格式勾选。
+    kind_pipe = {
+        DataKind.VECTOR_POLYGON: PIPE_BUILDING,
+        DataKind.MESH_OSGB: PIPE_3D,
+        DataKind.POINT_CLOUD: PIPE_3D,
+    }
     providers = {}
     for key in PROVIDER_KIND:
         kind = kind_of(key)
-        pipe = (PIPE_BUILDING if kind == DataKind.VECTOR_POLYGON else PIPE_RASTER)
+        pipe = kind_pipe.get(kind, PIPE_RASTER)
         providers[key] = {
             "kind": kind,
             "stages": [stage_json(s) for s in stages_for(kind, pipe)],

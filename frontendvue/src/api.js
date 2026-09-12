@@ -53,6 +53,21 @@ export const api = {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path }),
     }),
+  // 检查 OSGB 目录:无 .osgb 文件走 HTTP 400;缺 metadata.xml 经 warning 提示
+  localInspectOsgb: (path) =>
+    req('/api/local/inspect_osgb', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    }),
+  // 检查本地 LAS/LAZ 点云:文件清单/点数/bbox/CRS。「无 LAS」「pdal 不可用」
+  // 等错误经返回体的 error 字段返回(HTTP 仍 200),调用方按 error 分支
+  localInspectPointCloud: (path) =>
+    req('/api/local/inspect_pointcloud', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    }),
+  // 外部三维处理器诊断(tiles3d/pdal/py3dtiles),提交三维任务前自检
+  toolsDiagnose: () => req('/api/tools/diagnose'),
   // 矢量容器转换(单步完成,不进任务队列)
   localConvertVector: (payload) =>
     req('/api/local/convert_vector', {

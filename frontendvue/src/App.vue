@@ -28,7 +28,7 @@ const aboutVisible = ref(false)
 const dataVisible = ref(false)
 const taskVisible = ref(false)
 
-// 处理面板:三种数据来源(下载/本地栅格/本地矢量)共用它,由 source 区分。
+// 处理面板:四种数据来源(下载/本地栅格/本地矢量/本地三维)共用它,由 source 区分。
 // 统一一个面板而非各来源一套,是为了让"选格式"这件事只有一份实现——
 // 旧版格式定义散在 2 个文件、容器选择散在 3 个文件。
 const processVisible = ref(false)
@@ -78,6 +78,7 @@ onMounted(() => registerProj4Defs())
       @new-download="openProcess({ kind: 'download' })"
       @new-local="openProcess({ kind: 'local_raster' })"
       @new-vector="openProcess({ kind: 'local_vector' })"
+      @new-3d="openProcess({ kind: 'local_3d' })"
       @open-data="openData"
       @open-tasks="openTasks"
       @open-tokens="tokenMgrVisible = true"

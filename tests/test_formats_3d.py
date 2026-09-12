@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 
 from backend.core.formats import (DataKind, PROVIDER_KIND, STAGES, plan_stages,
@@ -34,6 +35,36 @@ class Formats3DTest(unittest.TestCase):
         keys = [s.key for s in stages_for(DataKind.RASTER_DEM)]
         self.assertNotIn("pc_dem", keys)
         self.assertNotIn("pc_dsm", keys)
+
+
+class Capabilities3DTest(unittest.TestCase):
+    """前端能力表(/api/capabilities)必须暴露三维阶段,否则格式勾选渲染不出来。
+
+    回归:capabilities 曾一律按 PIPE_RASTER 过滤阶段,三维阶段(pipeline="3d")
+    全被排除,local_osgb/local_pointcloud 的 stages 为空表。
+    """
+
+    @staticmethod
+    def _caps():
+        from backend.main import api_capabilities
+        return asyncio.run(api_capabilities())["providers"]
+
+    def test_osgb_stages_exposed(self):
+        stages = self._caps()["local_osgb"]["stages"]
+        self.assertEqual([s["key"] for s in stages], ["convert_3d"])
+
+    def test_pointcloud_stages_exposed(self):
+        stages = self._caps()["local_pointcloud"]["stages"]
+        # 按 order:dsm(10) → dem(20) → tile_3d(30)
+        self.assertEqual([s["key"] for s in stages],
+                         ["pc_dsm", "pc_dem", "pc_tile_3d"])
+        self.assertTrue(all(s["default_on"] for s in stages))
+
+    def test_existing_providers_unaffected(self):
+        caps = self._caps()
+        # 栅格/建筑管线的既有推导不能因三维分支而变
+        self.assertIn("geotiff", [s["key"] for s in caps["tianditu_img"]["stages"]])
+        self.assertIn("tile_3d", [s["key"] for s in caps["osm_buildings"]["stages"]])
 
 
 if __name__ == "__main__":
