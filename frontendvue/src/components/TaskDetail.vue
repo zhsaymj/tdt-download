@@ -4,7 +4,7 @@ import { MessagePlugin } from 'tdesign-vue-next'
 import { useTaskStore, STATUS_TEXT } from '../stores/task'
 import { mapController } from '../composables/mapController'
 import { fmtSize } from '../utils/format'
-import { isBuildingProvider } from '../utils/provider'
+import { isBuildingProvider, isModel3dProvider } from '../utils/provider'
 import { api } from '../api'
 
 const taskStore = useTaskStore()
@@ -19,6 +19,7 @@ const sizeLoading = ref(false)
 const FORMAT_TEXT = {
   geotiff: 'GeoTIFF', tms: 'TMS', osm: 'OSM', tiles: '原始瓦片',
   hillshade: '晕渲图', terrain: 'Cesium 地形', b3dm: '3D Tiles(b3dm)',
+  tile_3d: '3D Tiles', dsm: 'DSM(点云)', dem: 'DEM(点云)',
 }
 const PROVIDER_TEXT = {
   tianditu_img: '天地图影像', tianditu_vec: '天地图矢量底图', tianditu_ter: '天地图地形晕渲',
@@ -26,6 +27,8 @@ const PROVIDER_TEXT = {
   overture_buildings: '三维建筑白模(Overture)',
   osm_buildings: '三维建筑白模(OSM/Overpass)',
   local_vector: '三维建筑白模(本地矢量面)',
+  local_osgb: '倾斜模型(本地 OSGB)',
+  local_pointcloud: '点云(本地 LAS/LAZ)',
 }
 // 本地矢量的高度来源模式
 const HEIGHT_MODE_TEXT = {
@@ -37,6 +40,8 @@ const BASE_MODE_TEXT = {
 }
 // 是否三维建筑任务:参数含义与栅格不同,详情面板分开展示
 const isBuildings = (t) => isBuildingProvider(t?.provider)
+// 是否三维数据任务(本地 OSGB/点云):无级别/瓦片计数,bbox 是占位值,同样分开展示
+const isModel3d = (t) => isModel3dProvider(t?.provider)
 
 // 导出格式:兼容旧值 both/geotiff+tms 与新的逗号分隔多值
 function fmtExport(v) {
@@ -59,15 +64,29 @@ function fmtBbox(b) {
   return `西 ${b[0].toFixed(4)}｜南 ${b[1].toFixed(4)}｜东 ${b[2].toFixed(4)}｜北 ${b[3].toFixed(4)}`
 }
 
-// 切换显示范围
+// 点云坐标系:空串=自动(读 LAS 头),local=本地坐标不转 ECEF,EPSG:xxxx 原样
+function pcCrsText(t) {
+  const v = String(t.pc_crs || '')
+  if (!v) return '自动(读 LAS 头)'
+  if (v === 'local') return '本地坐标(不转 ECEF)'
+  return v
+}
+// 点云采样分辨率:>0 显示米数,否则为自动
+function pcResolutionText(t) {
+  const n = Number(t.pc_resolution)
+  return n > 0 ? `${n} m` : '自动'
+}
+
+// 切换显示范围(model3d 的 bbox 是占位值,不画)
 watch(showRange, (v) => {
-  if (!t.value) return
+  if (!t.value || isModel3d(t.value)) return
   if (v) mapController.value?.showPreview(t.value.bbox, t.value.geometry)
   else mapController.value?.clearPreview()
 })
 
-// 详情任务变化时,若勾选显示则重画范围
+// 详情任务变化时,若勾选显示则重画范围(model3d 同上跳过)
 watch(() => taskStore.activeId, () => {
+  if (isModel3d(t.value)) return
   if (t.value && showRange.value) mapController.value?.showPreview(t.value.bbox, t.value.geometry)
 })
 
@@ -75,7 +94,11 @@ function close() {
   taskStore.clearActive()
   mapController.value?.clearPreview()
 }
-function zoom() { if (t.value) mapController.value?.zoomTo(t.value.bbox) }
+function zoom() {
+  // 全零 bbox 是占位值(三维任务),直飞会落到几内亚湾
+  if (!t.value || t.value.bbox?.every((v) => v === 0)) return
+  mapController.value?.zoomTo(t.value.bbox)
+}
 async function openOutputDir() {
   if (!t.value?.output_path) return
   try {
@@ -130,6 +153,16 @@ async function openOutputDir() {
         </template>
       </template>
 
+      <!-- 三维数据(OSGB/点云):无级别/瓦片计数,展示输入源与点云参数 -->
+      <template v-else-if="isModel3d(t)">
+        <div class="kv"><span class="k">导出格式</span><span class="v">{{ fmtExport(t.export) }}</span></div>
+        <div class="kv"><span class="k">源路径</span><span class="v">{{ t.source_path }}</span></div>
+        <template v-if="t.provider === 'local_pointcloud'">
+          <div class="kv"><span class="k">点云坐标系</span><span class="v">{{ pcCrsText(t) }}</span></div>
+          <div class="kv"><span class="k">采样分辨率</span><span class="v">{{ pcResolutionText(t) }}</span></div>
+        </template>
+      </template>
+
       <!-- 栅格(影像/DEM) -->
       <template v-else>
         <div class="kv"><span class="k">级别</span><span class="v">{{ fmtLevels(t) }}</span></div>
@@ -140,7 +173,8 @@ async function openOutputDir() {
         <div class="kv"><span class="k">瓦片</span><span class="v">{{ t.downloaded }}/{{ t.total }}<span v-if="t.failed"> (失败{{ t.failed }})</span></span></div>
         <div class="kv" v-if="t.est_bytes"><span class="k">预估下载</span><span class="v">~{{ fmtSize(t.est_bytes) }} <span class="est-note">(仅原始瓦片)</span></span></div>
       </template>
-      <div class="kv"><span class="k">范围</span><span class="v">{{ fmtBbox(t.bbox) }}</span></div>
+      <!-- model3d 的 bbox 是占位 [0,0,0,0],真实范围转换后才有,显示无意义 -->
+      <div class="kv"><span class="k">范围</span><span class="v">{{ isModel3d(t) ? '转换完成后以预览为准' : fmtBbox(t.bbox) }}</span></div>
       <div class="kv path-row" v-if="t.output_path">
         <span class="k">导出目录</span>
         <span class="v path">
@@ -163,8 +197,9 @@ async function openOutputDir() {
       </div>
     </div>
     <div v-else-if="sizeLoading" class="sizes-empty">成果大小统计中…</div>
-    <t-checkbox v-model="showRange" class="toggle">在地图上显示下载范围</t-checkbox>
-    <t-button variant="outline" block size="small" @click="zoom">缩放到范围</t-button>
+    <!-- model3d 没有有效范围(占位 bbox),范围显示与缩放入口一并隐藏 -->
+    <t-checkbox v-if="!isModel3d(t)" v-model="showRange" class="toggle">在地图上显示下载范围</t-checkbox>
+    <t-button v-if="!isModel3d(t)" variant="outline" block size="small" @click="zoom">缩放到范围</t-button>
   </div>
 </template>
 

@@ -31,13 +31,21 @@ test('任务卡片:三维数据 meta 行显示数据类型与源路径末段', (
   assert.ok(taskQueueSource.includes('.filter(Boolean)'), '应过滤空段以容忍尾部分隔符')
 })
 
-test('任务卡片:previewable 白名单覆盖三维切片阶段', () => {
+test('任务卡片:previewable 白名单复用 provider.js 集中常量(不再裸写数组)', () => {
   const start = taskQueueSource.indexOf('function previewable')
   assert.notEqual(start, -1)
   const body = taskQueueSource.slice(start, taskQueueSource.indexOf('function openPreview', start))
-  for (const key of ["'tms'", "'osm'", "'terrain'", "'tile_3d'", "'convert_3d'", "'pc_tile_3d'"]) {
-    assert.ok(body.includes(key), 'previewable 缺少阶段 key: ' + key)
-  }
+  assert.ok(body.includes('PREVIEWABLE_STAGE_KEYS.includes(s.key)'),
+    'previewable 应引用 PREVIEWABLE_STAGE_KEYS,阶段名单只在 provider.js 维护')
+  assert.ok(taskQueueSource.includes("PREVIEWABLE_STAGE_KEYS } from '../utils/provider'"),
+    '缺少 PREVIEWABLE_STAGE_KEYS 引入')
+})
+
+test('任务卡片:「重新下载」对三维数据任务隐藏(本地源没有重新下载语义)', () => {
+  // RedownloadDialog 是影像/建筑语义,对占位 bbox 估算只会报困惑错误;
+  // 三维任务整体重跑走逐阶段「删除并重试」
+  assert.ok(taskQueueSource.includes("includes(t.status) && !isModel3d(t)"),
+    '重新下载按钮未排除 model3d')
 })
 
 test('任务卡片:三维四阶段无增量续传语义,隐藏「续切」只留「删除并重试」', () => {
@@ -61,22 +69,33 @@ test('成果面板:类型筛选与标签文本覆盖 model3d,buildings 的「三
   assert.ok(dataDialogSource.includes('.tag.model3d'), '缺少 .tag.model3d 配色')
 })
 
-test('成果面板:previewable 覆盖三维切片阶段,修复白点对 model3d 任务隐藏', () => {
+test('成果面板:previewable 复用集中常量,修复白点对 model3d 任务隐藏', () => {
   const start = dataDialogSource.indexOf('function previewable')
   assert.notEqual(start, -1)
   const body = dataDialogSource.slice(start, dataDialogSource.indexOf('function openPreview', start))
-  for (const key of ["'convert_3d'", "'pc_tile_3d'"]) {
-    assert.ok(body.includes(key), 'previewable 缺少阶段 key: ' + key)
-  }
+  assert.ok(body.includes('PREVIEWABLE_STAGE_KEYS.includes(s.key)'),
+    'previewable 应引用 PREVIEWABLE_STAGE_KEYS,阶段名单只在 provider.js 维护')
   // 修复针对旧版 RGB 裁剪影像:点云 DEM/DSM 是单波段浮点、OSGB 任务无 tif,按钮只会误导
   assert.ok(dataDialogSource.includes("!['buildings', 'model3d'].includes(taskKindOf(t))"),
     'canRepairNodata 未排除 model3d')
 })
 
-test('预览页:三维任务的瓦片集就绪判定覆盖 convert_3d/pc_tile_3d', () => {
-  for (const key of ["stageDone('tile_3d')", "stageDone('convert_3d')", "stageDone('pc_tile_3d')"]) {
-    assert.ok(previewSource.includes(key), 'ready 判定缺少: ' + key)
-  }
+test('成果面板:model3d 成果行的 export 串映射为中文显示', () => {
+  // model3d 的 export 是 tile_3d/dsm/dem 组合,原始串对用户无意义
+  assert.ok(dataDialogSource.includes('EXPORT_TEXT_M3D'), '缺少 EXPORT_TEXT_M3D 映射')
+  assert.ok(dataDialogSource.includes("tile_3d: '3D Tiles'"), '缺少 tile_3d 中文映射')
+  assert.ok(dataDialogSource.includes("dsm: 'DSM'"), '缺少 dsm 中文映射')
+  assert.ok(dataDialogSource.includes("dem: 'DEM'"), '缺少 dem 中文映射')
+  assert.ok(dataDialogSource.includes('isModel3dProvider'), '缺少 isModel3dProvider 引入')
+  assert.ok(dataDialogSource.includes('{{ fmtExportMeta(t) }}'), 'meta 行未改用 fmtExportMeta')
+})
+
+test('预览页:瓦片集就绪判定复用 provider.js 的 TILESET_STAGE_KEYS', () => {
+  // 哪些阶段产出 3dtiles/ 瓦片集,名单集中在 provider.js,不在预览页裸写
+  assert.ok(previewSource.includes('TILESET_STAGE_KEYS.some(stageDone)'),
+    'ready.buildings 应改为 TILESET_STAGE_KEYS.some(stageDone)')
+  assert.ok(previewSource.includes("TILESET_STAGE_KEYS } from '../utils/provider'"),
+    '缺少 TILESET_STAGE_KEYS 引入')
 })
 
 test('预览页:三维任务从 layers 接口取 tileset url,标签按 provider 区分', () => {

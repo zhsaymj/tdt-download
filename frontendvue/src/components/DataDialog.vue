@@ -18,7 +18,7 @@ import { useDrawStore } from '../stores/draw'
 import { useTaskStore } from '../stores/task'
 import { useOverlayStore, overlayKey } from '../stores/overlay'
 import { fmtSize } from '../utils/format'
-import { taskKindOf, isBuildingProvider } from '../utils/provider'
+import { taskKindOf, isBuildingProvider, isModel3dProvider, PREVIEWABLE_STAGE_KEYS } from '../utils/provider'
 import { mapController } from '../composables/mapController'
 import { api } from '../api'
 import SidePanel from './SidePanel.vue'
@@ -143,11 +143,22 @@ function fmtLevels(t) {
   return continuous && lv.length > 1 ? `${lv[0]}-${lv[lv.length - 1]} 级` : `${lv.join(',')} 级`
 }
 
-/** 该任务是否有可三维预览的成果(瓦片化数据才有意义;含三维数据的 convert_3d/pc_tile_3d) */
+/** 该任务是否有可三维预览的成果(瓦片化数据才有意义)。
+ *  白名单集中在 provider.js 的 PREVIEWABLE_STAGE_KEYS,新增阶段只改那里。 */
 function previewable(t) {
   return (t.stages || []).some(
-    (s) => ['tms', 'osm', 'terrain', 'tile_3d', 'convert_3d', 'pc_tile_3d'].includes(s.key)
+    (s) => PREVIEWABLE_STAGE_KEYS.includes(s.key)
       && ['done', 'skipped'].includes(s.status))
+}
+
+// model3d 任务的 export 串(tile_3d/dsm/dem)映射为中文再显示,原始串对用户无意义。
+// 与 TaskDetail.vue 的 FORMAT_TEXT 保持一致——两处各几行,不抽共享模块。
+const EXPORT_TEXT_M3D = { tile_3d: '3D Tiles', dsm: 'DSM', dem: 'DEM' }
+function fmtExportMeta(t) {
+  const raw = String(t.export || '')
+  if (!isModel3dProvider(t.provider)) return raw || '—'
+  return raw.split(',').map((p) => EXPORT_TEXT_M3D[p.trim()] || p.trim())
+    .filter(Boolean).join(' + ') || '—'
 }
 function openPreview(t) { window.open(`/preview.html?id=${t.id}`, '_blank') }
 
@@ -335,7 +346,7 @@ watch(() => props.visible, (v) => { if (v) taskStore.load().catch(() => {}) })
         </div>
         <div class="dim meta">
           <span v-if="fmtLevels(t)">{{ fmtLevels(t) }}</span>
-          <span>{{ t.export || '—' }}</span>
+          <span>{{ fmtExportMeta(t) }}</span>
           <span>{{ (t.created_at || '').replace('T', ' ').slice(0, 16) }}</span>
         </div>
 

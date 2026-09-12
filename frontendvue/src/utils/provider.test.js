@@ -5,6 +5,8 @@ import {
   BUILDING_PROVIDERS,
   DEM_PROVIDERS,
   MODEL3D_PROVIDERS,
+  PREVIEWABLE_STAGE_KEYS,
+  TILESET_STAGE_KEYS,
   isBuildingProvider,
   isDemProvider,
   isModel3dProvider,
@@ -25,6 +27,17 @@ test('isModel3dProvider 只认两个本地三维数据源', () => {
   assert.ok(!isModel3dProvider('esri_terrain'))
   assert.ok(!isModel3dProvider(undefined))
   assert.ok(!isModel3dProvider(null))
+})
+
+test('PREVIEWABLE_STAGE_KEYS:任一完成即可预览的阶段白名单(集中维护,组件不再各抄一份)', () => {
+  assert.deepEqual(PREVIEWABLE_STAGE_KEYS, ['tms', 'osm', 'terrain', 'tile_3d', 'convert_3d', 'pc_tile_3d'])
+})
+
+test('TILESET_STAGE_KEYS:产出 3dtiles/ 瓦片集的阶段,必然也可预览', () => {
+  assert.deepEqual(TILESET_STAGE_KEYS, ['tile_3d', 'convert_3d', 'pc_tile_3d'])
+  for (const k of TILESET_STAGE_KEYS) {
+    assert.ok(PREVIEWABLE_STAGE_KEYS.includes(k), k + ' 应在可预览白名单内')
+  }
 })
 
 test('既有 buildings/dem/image 分支不受影响', () => {

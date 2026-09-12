@@ -4,7 +4,7 @@ import { DialogPlugin, MessagePlugin } from 'tdesign-vue-next'
 import { useTaskStore, STATUS_TEXT } from '../stores/task'
 import { mapController } from '../composables/mapController'
 import { fmtEta, fmtSize } from '../utils/format'
-import { isBuildingProvider, isModel3dProvider } from '../utils/provider'
+import { isBuildingProvider, isModel3dProvider, PREVIEWABLE_STAGE_KEYS } from '../utils/provider'
 import RedownloadDialog from './RedownloadDialog.vue'
 import AddExportDialog from './AddExportDialog.vue'
 
@@ -121,13 +121,13 @@ function fmtLevels(t) {
   return continuous && lv.length > 1 ? `${lv[0]}-${lv[lv.length - 1]}` : lv.join(',')
 }
 
-// 是否可预览:任一切片阶段(tms/osm/terrain/tile_3d,含三维数据的
-// convert_3d/pc_tile_3d)已完成即可预览(不必整任务完成)。
+// 是否可预览:任一可预览阶段已完成即可预览(不必整任务完成)。
+// 白名单集中在 provider.js 的 PREVIEWABLE_STAGE_KEYS,新增阶段只改那里。
 // 旧任务无 stages 时回退按 export + done 判断。
 function previewable(t) {
   const stages = t.stages || []
   if (stages.length) {
-    return stages.some((s) => ['tms', 'osm', 'terrain', 'tile_3d', 'convert_3d', 'pc_tile_3d'].includes(s.key)
+    return stages.some((s) => PREVIEWABLE_STAGE_KEYS.includes(s.key)
       && (s.status === 'done' || s.status === 'skipped'))
   }
   if (t.status !== 'done') return false
@@ -236,7 +236,9 @@ async function doDelete(id, purge) {
           <t-button v-if="canAddExport(t)"
             size="small" variant="outline" theme="primary"
             @click="openAddExport(t)">补充格式</t-button>
-          <t-button v-if="['done','failed','canceled','paused'].includes(t.status)"
+          <!-- 三维任务输入是本地源,没有"重新下载"语义(RedownloadDialog 是影像/建筑
+               语义,对占位 bbox 估算只会报困惑错误);整体重跑用逐阶段「删除并重试」 -->
+          <t-button v-if="['done','failed','canceled','paused'].includes(t.status) && !isModel3d(t)"
             size="small" variant="outline" @click="openRedownload(t)">重新下载</t-button>
           <t-button size="small" variant="outline" theme="danger" @click="onDelete(t)">删除</t-button>
         </t-space>

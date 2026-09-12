@@ -7,7 +7,7 @@ import {
   Cesium3DTileset, Color, Cartesian3,
 } from 'cesium'
 import { createCesiumMeasure } from './measure3d'
-import { isModel3dProvider } from '../utils/provider'
+import { isModel3dProvider, TILESET_STAGE_KEYS } from '../utils/provider'
 
 // 离线自用:不使用任何 Cesium Ion 在线资源
 Ion.defaultAccessToken = ''
@@ -222,8 +222,9 @@ async function init() {
   const ready = stages.length
     ? {
         tms: stageDone('tms'), osm: stageDone('osm'), terrain: stageDone('terrain'),
-        // 三维建筑的切片阶段是 tile_3d;三维数据(OSGB/点云)是 convert_3d/pc_tile_3d
-        buildings: stageDone('tile_3d') || stageDone('convert_3d') || stageDone('pc_tile_3d'),
+        // 产出 3dtiles/ 瓦片集的阶段:三维建筑 tile_3d;三维数据(OSGB/点云)convert_3d/pc_tile_3d。
+        // 名单集中在 provider.js 的 TILESET_STAGE_KEYS,新增阶段只改那里。
+        buildings: TILESET_STAGE_KEYS.some(stageDone),
       }
     : (() => {
         const f = parseFormats(task.export)
@@ -394,8 +395,11 @@ async function init() {
         layer: null, show: true,
       })
       // 三维数据任务没有有效 bbox(占位 [0,0,0,0],见下方 taskBbox 处理),
-      // 相机改用瓦片集自身包围盒定位(zoomTo 是异步,不阻塞后续初始化)
-      if (isModel3dProvider(task.provider)) viewer.zoomTo(tileset3d)
+      // 相机改用瓦片集自身包围盒定位(zoomTo 是异步,不阻塞后续初始化;
+      // 失败只告警,不让 unhandledrejection 冒出)
+      if (isModel3dProvider(task.provider)) {
+        viewer.zoomTo(tileset3d).catch((e) => console.warn('定位到瓦片集失败', e))
+      }
       // 底面高为 terrain 模式时,建筑高程已烘焙为真实海拔,须开地形才贴合;
       // 若本任务没有地形切片,提示用户成果可能悬空/沉底的原因。
       if (task.base_height_mode === 'terrain') {

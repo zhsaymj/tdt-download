@@ -226,14 +226,14 @@ def _scan_output_size(task: dict) -> dict:
             sz = f.stat().st_size
         except OSError:
             continue
-        stem = f.name
-        if stem == f"{name}_dem.tif":
+        fname = f.name
+        if fname == f"{name}_dem.tif":
             # 三维建筑任务的地面高程 / 点云任务的 DEM,下面单独归类,不计入影像 GeoTIFF
             continue
-        if stem == f"{name}_dsm.tif":
+        if fname == f"{name}_dsm.tif":
             # 点云任务的 DSM,下面单独归类,不计入影像 GeoTIFF
             continue
-        if stem.startswith(f"{name}_dem_z") or stem.startswith(f"{name}_hillshade_z"):
+        if fname.startswith(f"{name}_dem_z") or fname.startswith(f"{name}_hillshade_z"):
             dem_bytes += sz
         else:
             geotiff_bytes += sz
