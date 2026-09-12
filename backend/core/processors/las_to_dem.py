@@ -7,16 +7,18 @@ pipeline 结构(选项以 PDAL 2.x 文档核实的事实为准):
        writers.gdal(output_type=idw,插值成栅格)
 已核实选项:writers.gdal 的 output_type/resolution/nodata/gdaldriver/filename、
 readers.las 的 override_srs、filters.range 的 limits 语法。
-writers.gdal 无独立 srs 选项,输出 SRS 继承自点云——故 CRS 覆盖只写
-readers.las.override_srs,由 reader 沿 pipeline 传播到 writer。
+writers.gdal 虽有自己的 override_srs/default_srs 选项,但官方注明输出 SRS
+会自动继承自输入数据、无需设置——故 CRS 覆盖只写 readers.las.override_srs,
+由 reader 沿 pipeline 传播到 writer(推荐路径)。
 
 两个计划待定项的实现结论(2026-09):
 1. `--nostream 视版本决定`:不加。`pdal pipeline` 会自动判定全部 stage
    是否支持流式(支持则走 stream 省内存),显式 --nostream 只会拖慢
    大数据量场景,无正确性收益。
 2. `可选 filters.fillpings 空洞填充`:PDAL 官方 filter 名录中未核实到
-   filters.fillpings,不臆造 stage;空洞暂时以 nodata 保留,待真实
-   PDAL 环境验证可用填充方案后再加。
+   filters.fillpings,不臆造 stage;空洞暂时以 nodata 保留。后续增强可用
+   writers.gdal 的 window_size 选项(对空格网用周边非空格网做 IDW 兜底
+   插值),待真实 PDAL 环境验证后再加。
 
 进度:pdal pipeline 执行期间不输出进度行,parse_progress 不实现
 (继承基类返回 None);runner_3d 只能按阶段粒度报进度。
