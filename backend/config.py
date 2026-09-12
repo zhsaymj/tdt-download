@@ -83,12 +83,22 @@ class BuildingsConfig:
 
 
 @dataclass
+class ToolsConfig:
+    """外部三维处理器路径配置。留空表示未配置,诊断接口会跳过试跑。"""
+    tiles3d_exe: str = ""        # fanvanzh/3dtiles 可执行文件路径(tools/3dtiles/3dtiles.exe)
+    pdal_exe: str = ""           # pdal CLI 路径
+    py3dtiles_python: str = ""   # 装有 py3dtiles 的 python 解释器(独立 venv,避免污染主环境)
+    dsm2dtm_python: str = ""     # 预留,一期不用
+
+
+@dataclass
 class Config:
     tianditu: TiandituConfig = field(default_factory=TiandituConfig)
     download: DownloadConfig = field(default_factory=DownloadConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     buildings: BuildingsConfig = field(default_factory=BuildingsConfig)
+    tools: ToolsConfig = field(default_factory=ToolsConfig)
 
     def abs_path(self, rel: str) -> Path:
         """把配置里的相对路径解析为基于项目根目录的绝对路径。"""
@@ -151,6 +161,12 @@ buildings:
   # 以下仅 Overture 数据源用到(需境外网络)
   release: ""          # 发布版本,留空自动探测最新版
   proxy: ""            # HTTP 代理,如 "127.0.0.1:7890";境内直连 S3 常超时
+
+tools:
+  # 外部三维处理器路径。留空表示未配置;三维任务提交前可访问 /api/tools/diagnose 自检。
+  tiles3d_exe: ""        # fanvanzh/3dtiles 可执行文件,如 "tools/3dtiles/3dtiles.exe"
+  pdal_exe: ""           # pdal CLI,如 "tools/pdal/bin/pdal.exe"
+  py3dtiles_python: ""   # 装有 py3dtiles 的独立 venv 解释器,如 "tools/py3dtiles-venv/Scripts/python.exe"
 """
 
 
@@ -178,6 +194,7 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         _merge(cfg.output, raw.get("output"))
         _merge(cfg.server, raw.get("server"))
         _merge(cfg.buildings, raw.get("buildings"))
+        _merge(cfg.tools, raw.get("tools"))
 
     # 环境变量可覆盖密钥,便于不落盘
     env_token = os.environ.get("TIANDITU_TOKEN")

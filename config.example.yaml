@@ -44,3 +44,9 @@ buildings:
   release: ""
   # HTTP 代理,如 "127.0.0.1:7890"
   proxy: ""
+
+tools:
+  # 外部三维处理器路径。留空表示未配置;三维任务提交前可访问 /api/tools/diagnose 自检。
+  tiles3d_exe: ""        # 例如 tools/3dtiles/3dtiles.exe
+  pdal_exe: ""           # 例如 tools/pdal/bin/pdal.exe
+  py3dtiles_python: ""   # 例如 tools/py3dtiles-venv/Scripts/python.exe

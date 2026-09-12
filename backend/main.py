@@ -19,6 +19,7 @@ from .api import buildings as buildings_api
 from .api import local as local_api
 from .api import tasks as tasks_api
 from .api import tokens as tokens_api
+from .api import tools as tools_api
 from .api import ws as ws_api
 
 # 只读资源根:开发时为项目根,打包后为 _MEIPASS 解包目录
@@ -62,6 +63,7 @@ app.include_router(tokens_api.router)
 app.include_router(ws_api.router)
 app.include_router(buildings_api.router)
 app.include_router(local_api.router)
+app.include_router(tools_api.router)
 
 
 @app.get("/api/config")
