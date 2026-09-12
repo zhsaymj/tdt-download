@@ -7,6 +7,7 @@ import {
   Cesium3DTileset, Color, Cartesian3,
 } from 'cesium'
 import { createCesiumMeasure } from './measure3d'
+import { isModel3dProvider } from '../utils/provider'
 
 // 离线自用:不使用任何 Cesium Ion 在线资源
 Ion.defaultAccessToken = ''
@@ -221,7 +222,8 @@ async function init() {
   const ready = stages.length
     ? {
         tms: stageDone('tms'), osm: stageDone('osm'), terrain: stageDone('terrain'),
-        buildings: stageDone('tile_3d'),
+        // 三维建筑的切片阶段是 tile_3d;三维数据(OSGB/点云)是 convert_3d/pc_tile_3d
+        buildings: stageDone('tile_3d') || stageDone('convert_3d') || stageDone('pc_tile_3d'),
       }
     : (() => {
         const f = parseFormats(task.export)
@@ -363,20 +365,37 @@ async function init() {
     layer: null, show: false,
   })
 
-  // 三维建筑白模(b3dm 3D Tiles):作为 primitive 加入场景,不是影像图层
+  // 三维瓦片集(b3dm/pnts 3D Tiles):作为 primitive 加入场景,不是影像图层。
+  // 三维数据任务的 tileset.json 位置问后端 layers 接口——多文件点云的主产物在
+  // 3dtiles/001_<文件名>/ 子目录,而 /output 是静态挂载、前端无法自行探目录;
+  // 取不到时回落根路径(OSGB/单文件点云约定)。建筑任务恒在根路径,不查接口。
   if (ready.buildings) {
     try {
-      tileset3d = await Cesium3DTileset.fromUrl(`${base}/3dtiles/tileset.json`, {
+      let tilesetUrl = `${base}/3dtiles/tileset.json`
+      if (isModel3dProvider(task.provider)) {
+        try {
+          const d = await (await fetch(`/api/tasks/${task.id}/layers`)).json()
+          const hit = (d.layers || []).find((L) => L.kind === 'preview3d' && L.url)
+          if (hit) tilesetUrl = hit.url
+        } catch (_) { /* 接口失败时按根路径约定加载 */ }
+      }
+      tileset3d = await Cesium3DTileset.fromUrl(tilesetUrl, {
         // 建筑量大时限制内存占用;maximumScreenSpaceError 越大越省、越粗
         maximumScreenSpaceError: 16,
         skipLevelOfDetail: true,
       })
       viewer.scene.primitives.add(tileset3d)
+      const tiles3dLabel = task.provider === 'local_osgb' ? '倾斜模型 3D Tiles'
+        : task.provider === 'local_pointcloud' ? '点云 3D Tiles'
+        : `三维建筑白模${task.building_count ? `(${task.building_count} 栋)` : ''}`
       layers.value.push({
         key: 'buildings',
-        label: `三维建筑白模${task.building_count ? `(${task.building_count} 栋)` : ''}`,
+        label: tiles3dLabel,
         layer: null, show: true,
       })
+      // 三维数据任务没有有效 bbox(占位 [0,0,0,0],见下方 taskBbox 处理),
+      // 相机改用瓦片集自身包围盒定位(zoomTo 是异步,不阻塞后续初始化)
+      if (isModel3dProvider(task.provider)) viewer.zoomTo(tileset3d)
       // 底面高为 terrain 模式时,建筑高程已烘焙为真实海拔,须开地形才贴合;
       // 若本任务没有地形切片,提示用户成果可能悬空/沉底的原因。
       if (task.base_height_mode === 'terrain') {
@@ -385,12 +404,15 @@ async function init() {
           : '建筑底面按真实海拔烘焙,需加载地形才会贴地。本任务未导出地形切片,可勾选「全国 30 米地形」查看——但它与建筑采样所用的 Esri DEM 非同源,贴合会有偏差;要精确贴合请另建同范围的地形任务。'
       }
     } catch (e) {
-      console.warn('三维建筑加载失败', e)
+      console.warn('三维瓦片集加载失败', e)
     }
   }
 
   // 相机定位到成果范围
   taskBbox = Array.isArray(task.bbox) && task.bbox.length === 4 ? task.bbox : null
+  // 三维数据任务的真实范围 runner 阶段才解析,库里是占位 [0,0,0,0]:
+  // 四值全 0 视为无效(直飞会落到几内亚湾),相机已在瓦片集加载后 zoomTo
+  if (taskBbox && taskBbox.every((v) => v === 0)) taskBbox = null
 
   // 地形任务:同步绘制下载范围边框(贴地形起伏),并加一个可开关的图层行
   if (ready.terrain && taskBbox) {

@@ -91,6 +91,21 @@ def _inspect_raster(path: Path) -> dict:
     return info
 
 
+def _tiles3d_entry(tiles_dir: Path) -> tuple[str, ...] | None:
+    """3dtiles 主 tileset.json 相对成果目录的路径段。
+
+    根下直取(OSGB/单文件点云);没有则取排序后第一个子目录的——多文件点云
+    每个输入文件各占一个子目录,主产物取第一个(与 runner_3d.tiles3d_output
+    的约定一致)。都没有时返回 None(转换可能只跑了一半)。
+    """
+    if (tiles_dir / "tileset.json").is_file():
+        return ("3dtiles", "tileset.json")
+    for p in sorted(tiles_dir.glob("*/tileset.json")):
+        if p.is_file():
+            return ("3dtiles", p.parent.name, "tileset.json")
+    return None
+
+
 def list_layers(task: dict, output_root: Path) -> list[dict]:
     """列出该任务可在地图上叠加(或可打开三维预览)的图层。
 
@@ -227,9 +242,21 @@ def list_layers(task: dict, output_root: Path) -> list[dict]:
             })
 
     # ---- 三维数据:只给预览入口 ----
-    for name, label in (("3dtiles", "三维建筑白模(b3dm)"),
+    # 3dtiles 的标签随数据源区分;url 供预览页定位主 tileset.json(多文件点云
+    # 在子目录,前端无法自行探静态目录,见 PreviewApp)。
+    provider = task.get("provider")
+    tiles3d_label = ("倾斜模型 3D Tiles" if provider == "local_osgb"
+                     else "点云 3D Tiles" if provider == "local_pointcloud"
+                     else "三维建筑白模(b3dm)")
+    for name, label in (("3dtiles", tiles3d_label),
                         ("terrain", "Cesium 地形切片")):
-        if (out_dir / name).is_dir():
-            layers.append({"id": "p3d_" + name, "kind": "preview3d",
-                           "label": label})
+        d = out_dir / name
+        if not d.is_dir():
+            continue
+        item = {"id": "p3d_" + name, "kind": "preview3d", "label": label}
+        if name == "3dtiles":
+            entry = _tiles3d_entry(d)
+            if entry is not None:
+                item["url"] = _url_of(out_dir, output_root, *entry)
+        layers.append(item)
     return layers

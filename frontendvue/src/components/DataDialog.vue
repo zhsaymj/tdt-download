@@ -52,10 +52,11 @@ const KIND_FILTER = [
   { value: 'image', label: '影像' },
   { value: 'dem', label: '地形' },
   { value: 'buildings', label: '三维' },
+  { value: 'model3d', label: '三维数据' },
 ]
 const kindFilter = ref('all')
 
-const KIND_TEXT = { image: '影像', dem: '地形', buildings: '三维' }
+const KIND_TEXT = { image: '影像', dem: '地形', buildings: '三维', model3d: '三维数据' }
 
 /** 有成果的任务:失败任务也可能有部分成果,一并列出 */
 const results = computed(() => {
@@ -142,10 +143,10 @@ function fmtLevels(t) {
   return continuous && lv.length > 1 ? `${lv[0]}-${lv[lv.length - 1]} 级` : `${lv.join(',')} 级`
 }
 
-/** 该任务是否有可三维预览的成果(瓦片化数据才有意义) */
+/** 该任务是否有可三维预览的成果(瓦片化数据才有意义;含三维数据的 convert_3d/pc_tile_3d) */
 function previewable(t) {
   return (t.stages || []).some(
-    (s) => ['tms', 'osm', 'terrain', 'tile_3d'].includes(s.key)
+    (s) => ['tms', 'osm', 'terrain', 'tile_3d', 'convert_3d', 'pc_tile_3d'].includes(s.key)
       && ['done', 'skipped'].includes(s.status))
 }
 function openPreview(t) { window.open(`/preview.html?id=${t.id}`, '_blank') }
@@ -201,8 +202,10 @@ function openAddExport(t) {
 // 修复是原地改元数据 + 写掩膜,放在成果动作里手动触发。
 const repairing = ref({})
 function canRepairNodata(t) {
+  // 修复针对旧版 RGB 裁剪影像:三维建筑无 tif;三维数据的点云 DEM/DSM 是
+  // 单波段浮点、OSGB 任务没有 tif,按钮出现只会误导,一并排除。
   return ['done', 'failed'].includes(t.status)
-    && taskKindOf(t) !== 'buildings'
+    && !['buildings', 'model3d'].includes(taskKindOf(t))
     && !!t.output_path
 }
 function onRepairNodata(t) {
@@ -446,6 +449,7 @@ watch(() => props.visible, (v) => { if (v) taskStore.load().catch(() => {}) })
 }
 .tag.dem { color: #b45309; background: #fef3c7; }
 .tag.buildings { color: #7c3aed; background: #ede9fe; }
+.tag.model3d { color: #0f766e; background: #ccfbf1; }   /* 三维数据:青,呼应任务卡片 */
 .tag.bad { color: #b91c1c; background: #fee2e2; }
 .tag.rt { color: #0369a1; background: #dbeafe; }
 .dim { color: #64748b; font-size: 12px; }

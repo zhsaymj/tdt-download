@@ -200,6 +200,8 @@ def _scan_output_size(task: dict) -> dict:
       osm      OSM 瓦片包(osm/)
       terrain  Cesium 地形切片(terrain/)
       tiles    保留的原始 LERC 瓦片(tiles/)
+      b3dm     3D Tiles 瓦片集(3dtiles/;三维数据任务时是 OSGB 倾斜模型或点云 pnts)
+      pc_dsm   点云 DSM GeoTIFF({name}_dsm.tif;点云 DEM 与建筑地面高程同归 bld_dem)
     返回 {items:[{key,label,bytes}], total_bytes, output_path}。
     下载的原始缓存瓦片是跨任务共享的中间产物,不计入单任务成果大小。
     """
@@ -212,6 +214,9 @@ def _scan_output_size(task: dict) -> dict:
         return {"items": items, "total_bytes": 0, "output_path": out}
 
     name = task.get("name") or ""
+    provider = task.get("provider") or ""
+    # 三维数据任务(OSGB 倾斜模型/点云)的同类成果换用中性标签,避免标成"建筑"
+    is_model3d = provider in ("local_osgb", "local_pointcloud")
 
     # 影像 / 高程每级 GeoTIFF:按文件名前缀归类(排除 dem/hillshade 前缀避免重复计入)
     geotiff_bytes = 0
@@ -223,7 +228,10 @@ def _scan_output_size(task: dict) -> dict:
             continue
         stem = f.name
         if stem == f"{name}_dem.tif":
-            # 三维建筑任务的地面高程,下面单独归类,不计入影像 GeoTIFF
+            # 三维建筑任务的地面高程 / 点云任务的 DEM,下面单独归类,不计入影像 GeoTIFF
+            continue
+        if stem == f"{name}_dsm.tif":
+            # 点云任务的 DSM,下面单独归类,不计入影像 GeoTIFF
             continue
         if stem.startswith(f"{name}_dem_z") or stem.startswith(f"{name}_hillshade_z"):
             dem_bytes += sz
@@ -240,12 +248,17 @@ def _scan_output_size(task: dict) -> dict:
     add("osm", "OSM 瓦片", _dir_size(out_dir / "osm"))
     add("terrain", "Cesium 地形切片", _dir_size(out_dir / "terrain"))
     add("tiles", "原始 LERC 瓦片", _dir_size(out_dir / "tiles"))
-    add("b3dm", "三维建筑 3D Tiles", _dir_size(out_dir / "3dtiles"))
-    # 三维建筑的另两类成果:建筑轮廓矢量与地面高程
+    add("b3dm", "3D Tiles 瓦片集" if is_model3d else "三维建筑 3D Tiles",
+        _dir_size(out_dir / "3dtiles"))
+    # 三维建筑的另两类成果:建筑轮廓矢量与地面高程(点云任务的同名文件是仅地面点的 DEM)
     _vec = out_dir / f"{name}_buildings.geojson"
     add("bld_vector", "建筑轮廓矢量", _vec.stat().st_size if _vec.exists() else 0)
     _bdem = out_dir / f"{name}_dem.tif"
-    add("bld_dem", "地面高程 GeoTIFF", _bdem.stat().st_size if _bdem.exists() else 0)
+    add("bld_dem", "DEM GeoTIFF" if provider == "local_pointcloud" else "地面高程 GeoTIFF",
+        _bdem.stat().st_size if _bdem.exists() else 0)
+    # 点云任务的 DSM(数字表面模型,含地表附着物)
+    _dsm = out_dir / f"{name}_dsm.tif"
+    add("pc_dsm", "DSM GeoTIFF", _dsm.stat().st_size if _dsm.exists() else 0)
 
     total = sum(it["bytes"] for it in items)
     return {"items": items, "total_bytes": total, "output_path": out}
