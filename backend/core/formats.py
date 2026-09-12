@@ -39,9 +39,15 @@ class DataKind:
     TILES_RASTER = "tiles_raster"    # 已切好的栅格瓦片目录(TMS/OSM)
     TILES_3D = "tiles_3d"            # 3D Tiles(b3dm)
     TILES_TERRAIN = "tiles_terrain"  # Cesium quantized-mesh 地形切片
+    # 三维数据处理(本地文件源):输入为 osgb 模型/点云,产出细分的 3D Tiles 类型
+    MESH_OSGB = "mesh_osgb"          # OSGB 倾斜摄影模型(本地目录)
+    POINT_CLOUD = "point_cloud"      # 点云(las/laz 等本地文件)
+    TILES_3D_MODEL = "tiles_3d_model"  # 3D Tiles 模型(由 osgb 转换)
+    TILES_3D_POINT = "tiles_3d_point"  # 3D Tiles 点云(pnts)
 
     ALL = (RASTER_IMAGE, RASTER_DEM, VECTOR_POLYGON, VECTOR_LINE,
-           TILES_RASTER, TILES_3D, TILES_TERRAIN)
+           TILES_RASTER, TILES_3D, TILES_TERRAIN,
+           MESH_OSGB, POINT_CLOUD, TILES_3D_MODEL, TILES_3D_POINT)
 
 
 # ---------- 容器格式(同一份成果的不同写出方式)----------
@@ -77,6 +83,8 @@ _VECTOR = (DataKind.VECTOR_POLYGON, DataKind.VECTOR_LINE)
 # runner_buildings.py),用于区分同类型数据在不同管线里的归属。
 PIPE_RASTER = "raster"
 PIPE_BUILDING = "building"
+# 三维数据处理管线(本地 osgb/点云输入,走 runner_3d)
+PIPE_3D = "3d"
 
 CONTAINERS: dict[str, Container] = {c.key: c for c in (
     # 栅格容器
@@ -232,6 +240,26 @@ STAGES: dict[str, ExportStage] = {s.key: s for s in (
                 DataKind.TILES_3D, outputs=("3dtiles/",), default_on=True,
                 order=40, pipeline=PIPE_BUILDING,
                 note="GPU 批渲染,不受 Cesium Entity 数量限制"),
+    # ---- 三维数据处理管线 ----
+    # dem/tile_3d 的 key 已被栅格/建筑管线占用(ExportStage 单实例、pipeline
+    # 互斥),三维阶段一律另起 key:convert_3d/pc_*(点云前缀)。输入均为本地
+    # 文件,无瓦片缓存、不逐级别产出(needs_tile_cache/needs_levels 取默认 False)。
+    ExportStage("convert_3d", "转换 3D Tiles", (DataKind.MESH_OSGB,),
+                DataKind.TILES_3D_MODEL, outputs=("3dtiles/",),
+                default_on=True, order=10, pipeline=PIPE_3D,
+                note="osgb 倾斜摄影模型原样转为 3D Tiles,配 tileset.json"),
+    ExportStage("pc_dsm", "生成 DSM", (DataKind.POINT_CLOUD,),
+                DataKind.RASTER_DEM, outputs=("{name}_dsm.tif",),
+                default_on=True, order=10, pipeline=PIPE_3D,
+                note="数字表面模型:取首回波/全部点,含地表附着物"),
+    ExportStage("pc_dem", "生成 DEM", (DataKind.POINT_CLOUD,),
+                DataKind.RASTER_DEM, outputs=("{name}_dem.tif",),
+                default_on=True, order=20, pipeline=PIPE_3D,
+                note="数字高程模型:仅地面点,裸地高程"),
+    ExportStage("pc_tile_3d", "切 3D Tiles(pnts)", (DataKind.POINT_CLOUD,),
+                DataKind.TILES_3D_POINT, outputs=("3dtiles/",),
+                default_on=True, order=30, pipeline=PIPE_3D,
+                note="点云切为 pnts 瓦片,浏览器端可漫游"),
 )}
 
 
@@ -248,6 +276,11 @@ _FORMAT_TO_STAGE: dict[str, dict[str, str]] = {
     DataKind.RASTER_IMAGE: {
         "geotiff": "geotiff", "tms": "tms", "osm": "osm",
     },
+    # 三维管线:"tile_3d" 格式名在建筑管线指 b3dm 阶段,在三维管线是另起的
+    # 转换/切片阶段,按 kind 区分不会串;"dsm"/"dem" 为点云专有格式名
+    DataKind.MESH_OSGB: {"tile_3d": "convert_3d"},
+    DataKind.POINT_CLOUD: {"dsm": "pc_dsm", "dem": "pc_dem",
+                           "tile_3d": "pc_tile_3d"},
 }
 
 
@@ -374,10 +407,14 @@ PROVIDER_KIND: dict[str, str] = {
     # 已判定好(见 core/local_raster.guess_kind),分成两个 key 即可复用整套逻辑。
     "local_image": DataKind.RASTER_IMAGE,
     "local_dem": DataKind.RASTER_DEM,
+    # 本地三维数据(osgb 目录/点云文件),同理静态登记即可复用整套推导
+    "local_osgb": DataKind.MESH_OSGB,
+    "local_pointcloud": DataKind.POINT_CLOUD,
 }
 
 #: 本地文件输入源:无瓦片缓存、无下载阶段
-LOCAL_PROVIDERS = frozenset({"local_image", "local_dem"})
+LOCAL_PROVIDERS = frozenset({"local_image", "local_dem",
+                             "local_osgb", "local_pointcloud"})
 
 
 def is_local_source(provider: str) -> bool:
