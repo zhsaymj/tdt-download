@@ -57,8 +57,9 @@ Task 8 集成契约(runner_3d 必读):
 4. 输出目录须为空目录或不存在:非空目录 py3dtiles 会报
    FileExistsError(本适配器刻意不传 --overwrite,防误清数据)。
 5. CRS 落点风险见上文「CRS 行为」:默认参数下产物保持 LAS 原坐标,
-   Cesium 落点大概率错误;若用户反馈落点异常,优先接入 --srs_out 4978
-   与任务 pc_crs 字段(缺 SRS 的 LAS 还需 --srs_in)。
+   Cesium 落点大概率错误。Task 8 必办(计划已回写):把 --srs_out 4978
+   接到任务 pc_crs 字段(缺 SRS 的 LAS 还需 --srs_in,三态语义参照
+   las_to_dem);接线需给 build_cmd 加参数,Task 8 是唯一调用方,零成本。
 """
 from __future__ import annotations
 
@@ -89,7 +90,7 @@ class LasTo3dTiles(BaseProcessor):
         return (getattr(getattr(cfg, "tools", None), "py3dtiles_python", "") or "")
 
     def check_available(self, cfg) -> tuple[bool, str]:
-        """解释器路径存在 + `python -m py3dtiles -h` 可跑(退出码 0)。
+        """解释器路径存在 + `python -m py3dtiles.command_line -h` 可跑(退出码 0)。
 
         退出码非 0 的典型原因是该解释器未安装 py3dtiles 模块
         (Task 1 诊断接口只判"能否启动",本方法额外判模块可用)。
@@ -109,9 +110,9 @@ class LasTo3dTiles(BaseProcessor):
         except OSError as e:
             return False, f"py3dtiles 解释器无法启动({e}),请检查路径与文件完整性"
         except subprocess.TimeoutExpired:
-            return False, "py3dtiles -h 试跑超时(15 秒),解释器或环境可能损坏"
+            return False, "py3dtiles 模块试跑超时(15 秒),解释器或环境可能损坏"
         if proc.returncode != 0:
-            return False, (f"py3dtiles -h 试跑失败(退出码 {proc.returncode}):"
+            return False, (f"py3dtiles 模块试跑失败(退出码 {proc.returncode}):"
                            "该解释器可能未安装 py3dtiles,请确认 "
                            "tools.py3dtiles_python 指向装有 py3dtiles 的独立 venv")
         return True, "py3dtiles 可用"

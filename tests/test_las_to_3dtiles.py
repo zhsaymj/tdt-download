@@ -108,9 +108,13 @@ class CheckAvailableTest(unittest.TestCase):
         p = LasTo3dTiles()
         with mock.patch(
                 "backend.core.processors.las_to_3dtiles.subprocess.run",
-                return_value=sp.CompletedProcess([], 0, stdout=b"", stderr=b"")):
+                return_value=sp.CompletedProcess([], 0, stdout=b"", stderr=b"")) as m:
             ok, _msg = p.check_available(_cfg(sys.executable))
         self.assertTrue(ok)
+        # 护栏:探针命令必须是 py3dtiles.command_line(包内无 __main__.py)
+        m.assert_called_once_with(
+            [sys.executable, "-m", "py3dtiles.command_line", "-h"],
+            capture_output=True, timeout=15, creationflags=mock.ANY)
 
     def test_not_configured(self):
         ok, msg = LasTo3dTiles().check_available(_cfg(""))
