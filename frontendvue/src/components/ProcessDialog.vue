@@ -1,6 +1,6 @@
 <script setup>
 /**
- * 统一的「处理」对话框:下载 / 本地栅格 / 本地矢量三种来源共用一套表单。
+ * 统一的「处理」对话框:下载 / 本地栅格 / 本地矢量 / 本地三维四种来源共用一套表单。
  *
  * 取代原先 1476 行、104 个表单项、4 个 tab 的 ParamsPanel。旧版四个 tab 的表单
  * 高度重叠——「任务名称」写了 4 遍、「导出格式」3 遍、「下载级别」「等高距」各 2 遍,
@@ -250,6 +250,10 @@ async function inspect() {
         const d = await api.localInspectPointCloud(p)
         pcInfo.value = d
         if (d.error) { errText.value = d.error; return }
+        // 换文件后清空旧 CRS 输入:新文件自带 SRS 时必填块隐藏(pcCrsMissing=false),
+        // 残留值会被 buildPayload 静默带上,覆盖文件自带的坐标系
+        form.pcCrsEpsg = ''
+        form.pcCrsLocal = false
         // 默认全选 default_on 的阶段(dsm/dem/tile_3d)
         form.export = stages.value.filter((s) => s.default_on)
           .map((s) => fmtNameOf(s.key))
@@ -691,9 +695,17 @@ async function submit() {
         ? '请先选择 OSGB 目录' : '请先选择点云文件或目录')
       return
     }
-    if (pcCrsMissing.value && !form.pcCrsLocal && !pcEpsgOf()) {
-      MessagePlugin.error('LAS 文件未携带坐标系信息,请填写 EPSG 代码或勾选「按本地坐标」')
-      return
+    if (pcCrsMissing.value && !form.pcCrsLocal) {
+      const epsg = pcEpsgOf()
+      if (!epsg) {
+        MessagePlugin.error('LAS 文件未携带坐标系信息,请填写 EPSG 代码或勾选「按本地坐标」')
+        return
+      }
+      // 后端 _PC_CRS_RE 只收 EPSG:数字,前端当场拦下省一轮请求
+      if (!/^\d+$/.test(epsg)) {
+        MessagePlugin.error('EPSG 代码应为纯数字,如 4547')
+        return
+      }
     }
     // 外部处理器缺失时任务必败,提交前拦下(diagnose 必须先于建任务)
     if (!(await check3dTools())) return
@@ -934,8 +946,8 @@ const title = computed(() => ({
               </t-form-item>
               <t-form-item v-if="isLocal3D && form.d3Type === 'pointcloud'"
                 label="采样分辨率(米)">
-                <t-input-number v-model="form.pcResolution" :min="0" :step="0.5"
-                  theme="column" style="width: 130px" />
+                <t-input-number v-model="form.pcResolution" :min="0" :max="1000"
+                  :step="0.5" theme="column" style="width: 130px" />
                 <InfoTip content="0 = 按点云密度自动估算。DSM/DEM 栅格的像素大小:改大处理更快、改小成果更精细。"
                   max-width="360px" />
               </t-form-item>

@@ -70,6 +70,18 @@ test('选中后自动检查:OSGB 走 inspect_osgb,点云走 inspect_pointcloud �
   assert.match(componentSource, /stages\.value\.filter\(\(s\)\s*=>\s*s\.default_on\)/)
 })
 
+test('点云 inspect 成功后清空旧 CRS 输入,避免残留值覆盖新文件自带坐标系', () => {
+  // 场景:先选无 CRS 的点云 A 并填了 EPSG → 重选带 CRS 的点云 B → 必填块隐藏,
+  // 若不清空,buildPayload 会把旧值静默带上。清空必须发生在 inspect 成功分支里。
+  const start = componentSource.indexOf('api.localInspectPointCloud(')
+  assert.notEqual(start, -1)
+  const end = componentSource.indexOf('// 默认全选', start)
+  assert.notEqual(end, -1)
+  const branch = componentSource.slice(start, end)
+  assert.ok(branch.includes("form.pcCrsEpsg = ''"), 'inspect 成功未清 pcCrsEpsg')
+  assert.ok(branch.includes('form.pcCrsLocal = false'), 'inspect 成功未清 pcCrsLocal')
+})
+
 test('LAS 头无 CRS(srs === null)时必填 EPSG 或按本地坐标', () => {
   assert.ok(componentSource.includes('pcCrsMissing'))
   assert.ok(componentSource.includes('.srs === null'), '缺少 srs === null 判定')
@@ -80,6 +92,9 @@ test('LAS 头无 CRS(srs === null)时必填 EPSG 或按本地坐标', () => {
   assert.ok(componentSource.includes('`EPSG:${'))
   // 提交前拦截
   assert.match(componentSource, /请填写 EPSG 代码或勾选/)
+  // EPSG 代码须纯数字(与后端 _PC_CRS_RE 对齐,前端先拦一轮)
+  assert.ok(componentSource.includes('/^\\d+$/'), '缺少 EPSG 纯数字校验')
+  assert.match(componentSource, /EPSG 代码应为纯数字/)
 })
 
 test('提交三维任务前调 tools/diagnose,所需工具不可用则阻止提交', () => {
@@ -122,9 +137,10 @@ test('导出面板:OSGB 固定只读 3D Tiles;点云 DSM/DEM/3D Tiles 三选带�
   assert.ok(componentSource.includes("tile_3d: '3D Tiles'"))
   assert.ok(componentSource.includes("dsm: 'DSM(数字表面模型)'"))
   assert.ok(componentSource.includes("dem: 'DEM(数字高程模型,仅地面点)'"))
-  // 分辨率放高级设置,默认 0 = 自动
+  // 分辨率放高级设置,默认 0 = 自动;上限与后端 le=1000 对齐
   assert.ok(componentSource.includes('pcResolution'))
   assert.match(componentSource, /0\s*=\s*按点云密度自动估算|0\s*米?\s*=.*自动|自动估算/)
+  assert.ok(componentSource.includes(':max="1000"'), '分辨率输入缺少 :max="1000"')
 })
 
 test('resetFormState 重置三维相关状态', () => {
