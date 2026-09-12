@@ -24,16 +24,17 @@ def _cfg(python: str):
 
 
 class BuildCmdTest(unittest.TestCase):
-    """命令构造:`python -m py3dtiles convert <输入.las> --out <输出目录>`。
+    """命令构造:`python -m py3dtiles.command_line convert <输入> --out <目录>`。
 
-    参数拼写以 py3dtiles 12.1.1 sdist 源码(convert.py _init_parser)为准。
+    参数拼写以 py3dtiles 12.1.1 sdist 源码(convert.py _init_parser)为准;
+    模块路径必须是 py3dtiles.command_line(包内无 __main__.py)。
     """
 
     def test_build_cmd(self):
         p = LasTo3dTiles(python="tools/py3dtiles-venv/Scripts/python.exe")
         cmd = p.build_cmd(input_file="D:/las_sample/a.las", out_dir="out/3dtiles")
         self.assertEqual(cmd, ["tools/py3dtiles-venv/Scripts/python.exe",
-                               "-m", "py3dtiles", "convert",
+                               "-m", "py3dtiles.command_line", "convert",
                                "D:/las_sample/a.las", "--out", "out/3dtiles"])
 
     def test_build_cmd_without_python_raises(self):
@@ -97,7 +98,7 @@ class ExpectedOutputsTest(unittest.TestCase):
 
 
 class CheckAvailableTest(unittest.TestCase):
-    """可用性检查:解释器存在 + `python -m py3dtiles -h` 退出码 0。
+    """可用性检查:解释器存在 + `python -m py3dtiles.command_line -h` 退出码 0。
 
     主 venv 未装 py3dtiles,成功/模块缺失/超时分支 mock subprocess.run;
     路径与启动失败分支用真实文件系统。
@@ -123,7 +124,7 @@ class CheckAvailableTest(unittest.TestCase):
         self.assertIn("不存在", msg)
 
     def test_module_not_installed(self):
-        # 解释器存在但未装 py3dtiles:`-m py3dtiles` 退出码非 0
+        # 解释器存在但未装 py3dtiles:`-m py3dtiles.command_line` 退出码非 0
         p = LasTo3dTiles()
         with mock.patch(
                 "backend.core.processors.las_to_3dtiles.subprocess.run",

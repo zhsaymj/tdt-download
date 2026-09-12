@@ -399,6 +399,7 @@ git commit -m "feat: add PDAL pipeline adapter for las to dem/dsm geotiff"
 - [ ] **Step 1: 失败测试**
 
 命令构造 + 产物检测（tileset.json + 至少一个 .pnts）。py3dtiles 通过 `tools.py3dtiles_python` 解释器调用：`python -m py3dtiles convert ...`（以其实际 CLI 为准，实现时先 `python -m py3dtiles -h` 确认）。
+> 实施订正（Task 7 spec 审查经上游 v12.1.1 源码核实）：包内无 `__main__.py`，正确形式是 `python -m py3dtiles.command_line convert <输入> --out <输出目录>`；另核实到两条必须带入 Task 8 的事实：①不传 `--srs_out 4978` 产物不重投影、Cesium 落点错误（缺 SRS 的 LAS 还需 `--srs_in`）——**Task 8 须把 `--srs_in/--srs_out 4978` 接到任务 pc_crs 字段**（三态语义参照 las_to_dem）；②py3dtiles 无增量续传、非空输出目录报 FileExistsError——**Task 8 重跑 pc_tile_3d 阶段前须清空阶段输出目录**。
 
 - [ ] **Step 2: 确认失败 → Step 3: 实现 → Step 4: 测试通过**
 

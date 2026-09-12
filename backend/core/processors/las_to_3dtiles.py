@@ -9,7 +9,11 @@ CLI 核实结论与确认状态(2026-09):
   venv 与 LAS 样例,未做真实转换验证(计划 Step 5 留待用户;若性能不可
   接受,二期可换 point-tiler/gocesiumtiler,管线不变)。
 - 调用形式(最保守参数集,一期固定):
-      <python> -m py3dtiles convert <输入.las> --out <输出目录>
+      <python> -m py3dtiles.command_line convert <输入.las> --out <输出目录>
+  注意必须是 py3dtiles.command_line:包内无 __main__.py(入口为 console
+  script py3dtiles.command_line:main),`-m py3dtiles` 会报
+  "cannot be directly executed" 退出码 1(2026-09 spec 审查经上游
+  v12.1.1 tag 文件列表 + pyproject.toml 核实)。
   python 为 tools.py3dtiles_python 配置的独立 venv 解释器(避免污染主环境)。
   其余已核实参数(--overwrite/--srs_in/--srs_out/--no-rgb/--extra-fields/
   --color_scale/--jobs/--cache_size/--force-srs-in/--disable-processpool/
@@ -98,7 +102,7 @@ class LasTo3dTiles(BaseProcessor):
             return False, f"py3dtiles 解释器不存在:{python}"
         try:
             proc = subprocess.run(
-                [python, "-m", "py3dtiles", "-h"], capture_output=True,
+                [python, "-m", "py3dtiles.command_line", "-h"], capture_output=True,
                 timeout=15,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
@@ -113,7 +117,7 @@ class LasTo3dTiles(BaseProcessor):
         return True, "py3dtiles 可用"
 
     def build_cmd(self, *, input_file, out_dir) -> list[str]:
-        """构造命令:`python -m py3dtiles convert <输入.las> --out <输出目录>`。
+        """构造命令:`python -m py3dtiles.command_line convert <输入> --out <目录>`。
 
         最保守参数集(一期固定):只传输入文件与输出目录,其余参数
         (SRS/字段/overwrite 等)均不传,理由见模块 docstring。
@@ -123,7 +127,7 @@ class LasTo3dTiles(BaseProcessor):
                 self.name, None,
                 hint="未配置 py3dtiles 解释器路径:请以 "
                      "cfg.tools.py3dtiles_python 构造本适配器")
-        return [self._python, "-m", "py3dtiles", "convert",
+        return [self._python, "-m", "py3dtiles.command_line", "convert",
                 str(input_file), "--out", str(out_dir)]
 
     def parse_progress(self, line: str) -> float | None:
