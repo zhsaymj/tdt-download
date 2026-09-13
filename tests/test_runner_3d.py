@@ -416,6 +416,44 @@ class Runner3dCase(_TempDbCase):
         self.assertTrue((out_dir / "3dtiles" / "tileset.json").exists())
         self.assertEqual(get_task(task_id)["status"], "done")
 
+    # 9b. convert_3d 同样重跑前清空 3dtiles/（fanvanzh 无增量语义），只清本阶段产物
+    def test_convert_3d_clears_output_dir_before_rerun(self):
+        p_osgb, p_dem, p_py = self._patch_processors()
+        osgb_dir = self.tmp / "osgb"
+        (osgb_dir / "Tile_005").mkdir(parents=True)
+        (osgb_dir / "Tile_005" / "Tile_005.osgb").write_bytes(b"x")
+        task_id = create_task(
+            TaskCreate(
+                name="清目录OSGB",
+                provider="local_osgb",
+                bbox=BBOX,
+                source_path=str(osgb_dir),
+                export="tile_3d",
+            ),
+            total=1,
+        )
+        out_dir = Path(get_task(task_id)["output_path"])
+        stale = out_dir / "3dtiles" / "garbage.txt"
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        stale.write_text("old")
+        # 相邻成果(dem/dsm tif 等)不属于本阶段,重跑不得误删
+        stray_tif = out_dir / "清目录OSGB_dsm.tif"
+        stray_tif.write_bytes(b"tif")
+
+        def fake_run(cmd, **kwargs):
+            out = Path(kwargs["out_dir"])
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "tileset.json").write_text("{}")
+            return self._ok_result(out / "tileset.json")
+
+        p_osgb.return_value.run.side_effect = fake_run
+        self._run(task_id)
+
+        self.assertFalse(stale.exists())
+        self.assertTrue((out_dir / "3dtiles" / "tileset.json").exists())
+        self.assertTrue(stray_tif.exists())
+        self.assertEqual(get_task(task_id)["status"], "done")
+
     # 10. 目录多 LAS：逐文件转临时 tif 后 rasterio merge 成一幅成果
     def test_multi_las_directory_dsm_merges_parts(self):
         p_osgb, p_dem, p_py = self._patch_processors()

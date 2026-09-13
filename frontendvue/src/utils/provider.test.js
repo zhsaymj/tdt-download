@@ -4,9 +4,11 @@ import assert from 'node:assert/strict'
 import {
   BUILDING_PROVIDERS,
   DEM_PROVIDERS,
+  FMT_NAME_OF_STAGE,
   MODEL3D_PROVIDERS,
   PREVIEWABLE_STAGE_KEYS,
   TILESET_STAGE_KEYS,
+  fmtNameOf,
   isBuildingProvider,
   isDemProvider,
   isModel3dProvider,
@@ -38,6 +40,24 @@ test('TILESET_STAGE_KEYS:产出 3dtiles/ 瓦片集的阶段,必然也可预览',
   for (const k of TILESET_STAGE_KEYS) {
     assert.ok(PREVIEWABLE_STAGE_KEYS.includes(k), k + ' 应在可预览白名单内')
   }
+})
+
+test('FMT_NAME_OF_STAGE:阶段 key → 格式名,覆盖三维阶段且不动栅格 dem→geotiff', () => {
+  // 与后端 formats.py _FORMAT_TO_STAGE 的格式名对齐;ProcessDialog(提交)与
+  // AddExportDialog(补导)共用这一份,改一处即全改。
+  assert.deepEqual(FMT_NAME_OF_STAGE, {
+    dem: 'geotiff',
+    convert_3d: 'tile_3d',
+    pc_dsm: 'dsm',
+    pc_dem: 'dem',
+    pc_tile_3d: 'tile_3d',
+  })
+  assert.equal(fmtNameOf('dem'), 'geotiff')
+  assert.equal(fmtNameOf('pc_tile_3d'), 'tile_3d')
+  assert.equal(fmtNameOf('convert_3d'), 'tile_3d')
+  // 未登记的阶段 key 原样返回(如 tms/osm 等栅格阶段)
+  assert.equal(fmtNameOf('tms'), 'tms')
+  assert.equal(fmtNameOf('tile_3d'), 'tile_3d')
 })
 
 test('既有 buildings/dem/image 分支不受影响', () => {

@@ -20,6 +20,22 @@ export const PREVIEWABLE_STAGE_KEYS = ['tms', 'osm', 'terrain', 'tile_3d', 'conv
 // PreviewApp 据此决定是否加载 Cesium3DTileset。同样只在这里维护。
 export const TILESET_STAGE_KEYS = ['tile_3d', 'convert_3d', 'pc_tile_3d']
 
+// 阶段 key → 提交/补导用的格式名。DEM 整幅图阶段 key 是历史遗留的 `dem`,格式名是
+// `geotiff`;三维阶段 key 带管线前缀(convert_3d/pc_*),映射到后端 formats.py
+// _FORMAT_TO_STAGE 里的格式名。ProcessDialog(提交)与 AddExportDialog(补导)共用——
+// 早先 AddExportDialog 只抄了 dem→geotiff 一条,三维任务补导时格式名对不上阶段。
+export const FMT_NAME_OF_STAGE = {
+  dem: 'geotiff',
+  convert_3d: 'tile_3d',
+  pc_dsm: 'dsm',
+  pc_dem: 'dem',
+  pc_tile_3d: 'tile_3d',
+}
+
+export function fmtNameOf(stageKey) {
+  return FMT_NAME_OF_STAGE[stageKey] || stageKey
+}
+
 export function isBuildingProvider(provider) {
   return BUILDING_PROVIDERS.includes(String(provider || ''))
 }

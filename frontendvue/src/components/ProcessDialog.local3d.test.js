@@ -7,6 +7,7 @@ import test from 'node:test'
 const componentDir = dirname(fileURLToPath(import.meta.url))
 const frontendRoot = resolve(componentDir, '../..')
 const componentSource = readFileSync(resolve(componentDir, 'ProcessDialog.vue'), 'utf8')
+const addExportSource = readFileSync(resolve(componentDir, 'AddExportDialog.vue'), 'utf8')
 const apiSource = readFileSync(resolve(frontendRoot, 'src/api.js'), 'utf8')
 const taskDefaultsSource = readFileSync(resolve(frontendRoot, 'src/utils/taskDefaults.js'), 'utf8')
 const topBarSource = readFileSync(resolve(componentDir, 'AppTopBar.vue'), 'utf8')
@@ -27,12 +28,18 @@ test('支持 local_3d 来源,来源内用 radio 再选 OSGB / 点云数据类型
   assert.ok(componentSource.includes("local_3d: '处理三维数据'"))
 })
 
-test('阶段 key → 格式名映射覆盖三维阶段,且不动栅格 dem→geotiff', () => {
-  assert.ok(componentSource.includes("dem: 'geotiff'"), '栅格 dem→geotiff 映射被改动')
-  assert.ok(componentSource.includes("convert_3d: 'tile_3d'"))
-  assert.ok(componentSource.includes("pc_dsm: 'dsm'"))
-  assert.ok(componentSource.includes("pc_dem: 'dem'"))
-  assert.ok(componentSource.includes("pc_tile_3d: 'tile_3d'"))
+test('阶段 key → 格式名映射集中到 utils/provider,提交与补导两处共用', () => {
+  // 映射值本身在 provider.test.js 锁定;这里锁引用关系:
+  // 早先 AddExportDialog 只抄了 dem→geotiff 一条本地映射,三维任务补导时对不上阶段,
+  // 故 FMT_NAME_OF_STAGE 集中到 utils/provider,两处不得再各抄一份。
+  assert.ok(componentSource.includes("import { fmtNameOf } from '../utils/provider'"),
+    'ProcessDialog 应使用共享映射')
+  assert.ok(addExportSource.includes("import { fmtNameOf, isModel3dProvider } from '../utils/provider'"),
+    'AddExportDialog 应使用共享映射')
+  assert.ok(!addExportSource.includes("stageKey === 'dem' ? 'geotiff'"),
+    'AddExportDialog 不得保留本地残缺映射')
+  assert.ok(!componentSource.includes('FMT_NAME_OF_STAGE'),
+    'ProcessDialog 不得保留本地映射表')
 })
 
 test('buildPayload 的 local_3d 分支带 source_path 与点云参数', () => {

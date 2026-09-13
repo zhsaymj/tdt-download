@@ -15,6 +15,7 @@ import { useTaskStore } from '../stores/task'
 import { useBasemapStore } from '../stores/basemap'
 import { crsOptions } from '../utils/crs'
 import { fmtNum, fmtSize } from '../utils/format'
+import { fmtNameOf } from '../utils/provider'
 import {
   DEM_CRS_HINT, DEM_LEVELS, IMG_LEVELS,
   defaultContainersForStages, defaultTaskName,
@@ -127,20 +128,6 @@ const crsHint = computed(() => isDem.value
 
 /** 该 provider 可用的阶段(后端驱动) */
 const stages = computed(() => caps.value[activeProvider.value]?.stages || [])
-
-/**
- * 阶段 key → 提交用的格式名。DEM 的整幅高程图阶段 key 是历史遗留的 `dem`,
- * 而 export 字段里的格式名是 `geotiff`;三维阶段的 key 带管线前缀
- * (convert_3d/pc_*),映射到后端 _FORMAT_TO_STAGE 里的格式名。
- */
-const FMT_NAME_OF_STAGE = {
-  dem: 'geotiff',
-  convert_3d: 'tile_3d',
-  pc_dsm: 'dsm',
-  pc_dem: 'dem',
-  pc_tile_3d: 'tile_3d',
-}
-function fmtNameOf(stageKey) { return FMT_NAME_OF_STAGE[stageKey] || stageKey }
 
 /** 格式勾选项:label 用更贴合语境的中文,后端 label 兜底 */
 const FMT_LABELS = {

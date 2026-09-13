@@ -125,6 +125,11 @@ def _stage_convert_3d(ctx) -> list[str]:
     # 进度分母:递归 .osgb 总数(每个节点约产出一个 b3dm,是可得的最接近代理)
     estimated_total = sum(1 for _ in src.rglob("*.osgb"))
     out_dir = ctx.out_dir / "3dtiles"
+    # 该阶段无增量语义(fanvanzh 整目录一次转换,对非空输出目录的行为未验证),
+    # 重跑前无条件清本阶段产物目录——与 _stage_pc_tile_3d 对齐;只清 3dtiles/,
+    # 不误伤 dem/dsm tif(本阶段也不产生它们)。
+    shutil.rmtree(out_dir, ignore_errors=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
     ctx.tracker.start(key, total=estimated_total,
                       message=f"转换 OSGB(约 {estimated_total} 个节点)")
 

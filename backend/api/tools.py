@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 from fastapi import APIRouter, Request
 
@@ -27,6 +29,16 @@ _TOOLS = [
     ("py3dtiles", "py3dtiles_python"),
 ]
 
+#: 适配层 check_available 支持 PATH 裸命令名(shutil.which)的工具字段。
+#: 诊断口径必须与适配层一致:config 里填 "pdal" 时 las_to_dem 能跑,
+#: 这里就不能误报"路径不存在"。另两个工具的适配层只认文件路径,同样不回落。
+_PATH_FALLBACK_ATTRS = {"pdal_exe"}
+
+#: py3dtiles 配置的是独立 venv 的解释器,只验解释器能跑不代表模块已装;
+#: 探针命令与退出码约定和适配层 las_to_3dtiles.check_available 保持一致。
+_PY3DTILES_ATTR = "py3dtiles_python"
+_PY3DTILES_PROBE = ["-m", "py3dtiles.command_line", "-h"]
+
 # Windows 下避免试跑时弹出控制台黑窗
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
@@ -40,18 +52,18 @@ def _first_line(text: str) -> str:
     return ""
 
 
-def _try_run(argv: list[str]) -> tuple[bool, str, str]:
-    """启动一次进程,返回 (是否在超时内正常退出, 合并输出, 错误描述)。"""
+def _try_run(argv: list[str]) -> tuple[bool, str, str, int | None]:
+    """启动一次进程,返回 (是否在超时内正常退出, 合并输出, 错误描述, 退出码)。"""
     try:
         proc = subprocess.run(
             argv, capture_output=True, text=True, errors="replace",
             timeout=_PROBE_TIMEOUT, creationflags=_NO_WINDOW)
     except subprocess.TimeoutExpired:
-        return False, "", f"试跑超时({_PROBE_TIMEOUT}s 未退出)"
+        return False, "", f"试跑超时({_PROBE_TIMEOUT}s 未退出)", None
     except OSError as e:
-        return False, "", f"无法启动:{e}"
+        return False, "", f"无法启动:{e}", None
     out = (proc.stdout or "") + (proc.stderr or "")
-    return True, out, ""
+    return True, out, "", proc.returncode
 
 
 def _diagnose_one(attr: str) -> dict:
@@ -63,17 +75,26 @@ def _diagnose_one(attr: str) -> dict:
         return item
 
     p = settings.abs_path(raw)
+    if not p.is_file() and attr in _PATH_FALLBACK_ATTRS:
+        # 允许只填命令名(如 "pdal"),从 PATH 解析;命中后以解析出的绝对路径
+        # 继续后续检查,诊断结果的 path 即实际命中的可执行文件
+        found = shutil.which(raw)
+        if found:
+            p = Path(found)
     item["path"] = str(p)
     if not p.is_file():
         item["error"] = "路径不存在或不是文件"
         return item
     item["exists"] = True
 
+    if attr == _PY3DTILES_ATTR:
+        return _diagnose_py3dtiles(item, p)
+
     # 有的工具不认 --version(打印用法或静默忽略),无输出时再试 -h。
     # runnable 定义为"能启动并在超时内退出":fanvanzh/3dtiles 这类工具
     # 打用法信息时退出码非 0,不能按退出码判断。
     for args in (["--version"], ["-h"]):
-        exited, out, err = _try_run([str(p), *args])
+        exited, out, err, _code = _try_run([str(p), *args])
         if not exited:
             item["error"] = err
             return item
@@ -85,6 +106,26 @@ def _diagnose_one(attr: str) -> dict:
     # 两次都无输出:进程能跑但没有任何打印,仍算可启动,只是拿不到版本
     item["runnable"] = True
     item["error"] = "可启动但 --version/-h 均无输出,无法确认版本"
+    return item
+
+
+def _diagnose_py3dtiles(item: dict, python: Path) -> dict:
+    """py3dtiles 特判:除解释器可启动外,还必须确认该 venv 里装了 py3dtiles 模块。
+
+    探针 `python -m py3dtiles.command_line -h` 与退出码约定同适配层
+    (tests/test_las_to_3dtiles.py 锁定):退出码 0 才算可用,非 0 的典型
+    原因就是解释器在但模块没装。
+    """
+    exited, out, err, code = _try_run([str(python), *_PY3DTILES_PROBE])
+    if not exited:
+        item["error"] = err
+        return item
+    if code != 0:
+        item["error"] = ("解释器可用但未安装 py3dtiles"
+                         "(应在该 venv 中执行 pip install py3dtiles)")
+        return item
+    item["runnable"] = True
+    item["version"] = _first_line(out)
     return item
 
 

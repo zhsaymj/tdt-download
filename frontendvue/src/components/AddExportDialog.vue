@@ -10,7 +10,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { useTaskStore } from '../stores/task'
-import { isModel3dProvider } from '../utils/provider'
+import { fmtNameOf, isModel3dProvider } from '../utils/provider'
 import { api } from '../api'
 import InfoTip from './InfoTip.vue'
 
@@ -43,11 +43,6 @@ const existing = computed(() => {
   const s = String(props.task?.export || '').toLowerCase()
   return s.replace(/\+/g, ',').split(',').map((x) => x.trim()).filter(Boolean)
 })
-
-/** 阶段 key → 格式名(DEM 的整幅图阶段 key 是 dem,格式名是 geotiff) */
-function fmtNameOf(stageKey) {
-  return stageKey === 'dem' ? 'geotiff' : stageKey
-}
 
 // 三维任务的输入是本地源,没有瓦片缓存/重新下载的概念,提示语换一套说法
 const tipContent = computed(() => (isModel3dProvider(props.task?.provider)
