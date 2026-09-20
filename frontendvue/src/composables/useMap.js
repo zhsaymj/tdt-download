@@ -337,6 +337,11 @@ export function createMapController(target, hooks = {}) {
 
   // ---- 加载 geojson(WGS84)为下载范围 ----
   function loadGeojson(geojson) {
+    // 调用方漏拆包装体(如 { geojson, prjText })时,OpenLayers 只会抛
+    // "Unsupported GeoJSON type: undefined"——那句话看不出问题出在哪,这里先挡住
+    if (!geojson || typeof geojson.type !== 'string') {
+      throw new Error('矢量数据格式不正确:缺少 type,可能不是有效的 GeoJSON')
+    }
     const features = geojsonFmt.readFeatures(geojson, {
       dataProjection: 'EPSG:4326', featureProjection: 'EPSG:3857',
     })

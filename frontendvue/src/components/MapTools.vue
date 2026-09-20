@@ -12,7 +12,7 @@ import { mapController } from '../composables/mapController'
 import { useDrawStore } from '../stores/draw'
 import { loadAreaIndex, fetchAreaBoundary } from '../api'
 import {
-  parseVectorFiles, looksLikeLonLat, reprojectGeojson, geojsonToKml, downloadText,
+  parseVectorFiles, resolveVectorImport, reprojectGeojson, geojsonToKml, downloadText,
 } from '../utils/vector'
 import { formatTimestamp } from '../utils/taskDefaults'
 import SrsModal from './SrsModal.vue'
@@ -85,13 +85,16 @@ async function onFiles(e) {
   const files = Array.from(e.target.files || [])
   if (!files.length) return
   try {
-    const geo = await parseVectorFiles(files)
-    if (!geo) { MessagePlugin.error('未能从文件中解析出图形'); return }
-    if (looksLikeLonLat(geo)) {
-      c()?.loadGeojson(geo)
+    // parseVectorFiles 返回 { geojson, prjText } 包装体,必须经 resolveVectorImport
+    // 取出内层 geojson——直接把包装体交给地图,OpenLayers 读不到 type 会抛
+    // "Unsupported GeoJSON type: undefined"
+    const picked = resolveVectorImport(await parseVectorFiles(files))
+    if (!picked) { MessagePlugin.error('未能从文件中解析出图形'); return }
+    if (!picked.needSrs) {
+      c()?.loadGeojson(picked.geojson)
     } else {
-      // 不像经纬度:多半是投影坐标,让用户指定源坐标系后再转
-      pendingGeojson.value = geo
+      // 不像经纬度且 .prj 不可信:多半是投影坐标,让用户指定源坐标系后再转
+      pendingGeojson.value = picked.geojson
       srsVisible.value = true
     }
   } catch (err) {
@@ -170,7 +173,7 @@ const rangeText = computed(() => {
     </template>
 
     <input ref="fileInput" type="file" multiple class="hidden"
-      accept=".shp,.dbf,.prj,.shx,.cpg,.geojson,.json,.kml" @change="onFiles" />
+      accept=".shp,.dbf,.prj,.shx,.cpg,.geojson,.json,.kml,.zip" @change="onFiles" />
     <SrsModal v-model:visible="srsVisible" @confirm="onSrsConfirm" />
   </div>
 </template>
