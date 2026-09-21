@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { DialogPlugin, MessagePlugin } from 'tdesign-vue-next'
 import { useTaskStore, STATUS_TEXT } from '../stores/task'
+import { useOverlayStore } from '../stores/overlay'
 import { mapController } from '../composables/mapController'
 import { fmtEta, fmtSize } from '../utils/format'
 import { isBuildingProvider, isModel3dProvider, PREVIEWABLE_STAGE_KEYS } from '../utils/provider'
@@ -9,6 +10,7 @@ import RedownloadDialog from './RedownloadDialog.vue'
 import AddExportDialog from './AddExportDialog.vue'
 
 const taskStore = useTaskStore()
+const overlayStore = useOverlayStore()
 
 // 重新下载弹窗
 const redownloadVisible = ref(false)
@@ -163,6 +165,10 @@ function onDelete(t) {
 async function doDelete(id, purge) {
   try {
     await taskStore.remove(id, purge)
+    // 必须清掉该任务的叠加图层：成果记录没了之后，图层留在地图上就再也
+    // 无法从任何界面移除（「数据与成果」面板里已经没有这个任务了）。
+    // 这是与 DataDialog.doDelete 同样的处理，早先只在那里做了。
+    overlayStore.removeByTask(id)
     if (mapController.value && taskStore.activeId == null) mapController.value.clearPreview()
     MessagePlugin.success('已删除')
   } catch (e) { MessagePlugin.error(e?.message || '删除失败') }

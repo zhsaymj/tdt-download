@@ -16,7 +16,7 @@ import { computed, ref, watch } from 'vue'
 import { DialogPlugin, MessagePlugin } from 'tdesign-vue-next'
 import { useDrawStore } from '../stores/draw'
 import { useTaskStore } from '../stores/task'
-import { useOverlayStore, overlayKey } from '../stores/overlay'
+import { useOverlayStore, taskOverlayKey } from '../stores/overlay'
 import { fmtSize } from '../utils/format'
 import { taskKindOf, isBuildingProvider, isModel3dProvider, PREVIEWABLE_STAGE_KEYS } from '../utils/provider'
 import { mapController } from '../composables/mapController'
@@ -115,14 +115,14 @@ function overlayable(L) { return L.kind !== 'preview3d' }
 function overlayDisabled(L) {
   return L.kind === 'raster_only_bbox' && !L.bounds_wgs84
 }
-function layerOn(t, L) { return overlayStore.has(overlayKey(t.id, L.id)) }
+function layerOn(t, L) { return overlayStore.has(taskOverlayKey(t.id, L.id)) }
 function toggleLayer(t, L, on) {
   if (on) {
-    if (!overlayStore.add(t.id, t.name, L)) {
+    if (!overlayStore.add({ taskId: t.id, taskName: t.name }, L)) {
       MessagePlugin.warning('该图层无法叠加显示')
     }
   } else {
-    overlayStore.remove(overlayKey(t.id, L.id))
+    overlayStore.remove(taskOverlayKey(t.id, L.id))
   }
 }
 

@@ -162,7 +162,9 @@ function build(desc, z) {
 }
 
 /**
- * 叠加一个图层。key 需全局唯一(通常是 `${taskId}:${layer.id}`)。
+ * 叠加一个图层。key 需全局唯一——来源有两种,key 前缀区分:
+ * `task:<任务id>:<图层id>` 与 `svc:<服务id>`(见 stores/overlay.js 的两个
+ * 构造函数)。两条来源的图层在这里一视同仁,只有 desc 的字段来源不同。
  *
  * zIndex 不在这里定,由 applyOrder 按 store 里的数组顺序统一重排。早先用
  * `OVERLAY_Z + added.size` 会给出重复值:加 A、B 后移除 A 再加 C,B 与 C 都是 11,

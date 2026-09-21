@@ -14,8 +14,15 @@ import {
 } from '../composables/overlays'
 import { useTaskStore } from './task'
 
-/** key 约定:任务 id + 图层 id,跨任务唯一 */
-export function overlayKey(taskId, layerId) { return `${taskId}:${layerId}` }
+/**
+ * 叠加图层的 key。来源有两种,前缀不同,值域天然不重叠。
+ *
+ * **拆成两个函数而不是复用同一个换语义**:服务图层没有 taskId,若共用一个函数
+ * 靠调用方传不同含义的第一个参数,`_fallbackBbox` 里 `it.taskId` 的判断会失效
+ * ——服务图层会去查一个不存在的任务。
+ */
+export function taskOverlayKey(taskId, layerId) { return `task:${taskId}:${layerId}` }
+export function serviceOverlayKey(serviceId) { return `svc:${serviceId}` }
 
 export const useOverlayStore = defineStore('overlay', {
   state: () => ({
@@ -37,26 +44,41 @@ export const useOverlayStore = defineStore('overlay', {
      * 叠加一份成果图层。返回是否成功(不可叠加的 kind 会失败,由调用方提示)。
      * 首个图层自动定位;已有图层时不动视野——叠第二个图层的目的就是同视野对比,
      * 把视野拽走反而妨碍。
+     *
+     * src 是来源标识:`{ taskId, taskName }` 或 `{ serviceId, serviceName }`。
+     * 两种来源的图层在后续所有操作里一视同仁(透明度/层级/定位都由通用实现
+     * 提供),只有"范围从哪来"这一点不同。
      */
-    add(taskId, taskName, desc) {
+    add(src, desc) {
       const map = mapController.value?.map
       if (!map) return false
-      const key = overlayKey(taskId, desc.id)
+      const key = src.serviceId
+        ? serviceOverlayKey(src.serviceId)
+        : taskOverlayKey(src.taskId, desc.id)
       if (this.has(key)) return true
       if (!addOverlay(map, key, desc)) return false
       const first = !this.items.length
       this.items = [...this.items, {
-        key, taskId, taskName, desc, visible: true, opacity: 1,
+        key,
+        taskId: src.taskId || '',
+        serviceId: src.serviceId || '',
+        taskName: src.taskName || src.serviceName || '',
+        desc, visible: true, opacity: 1,
       }]
       this._sync()
       if (first) this.zoomTo(key)
       return true
     },
 
-    /** 图层自身没有范围时的兜底:用所属任务的 bbox(任务必有范围) */
+    /**
+     * 图层自身没有范围时的兜底:用所属任务的 bbox(任务必有范围)。
+     *
+     * **服务图层没有兜底**——服务侧的 desc 必须自带 bounds_wgs84(由后端
+     * overlay_desc 保证),取不到就是取不到,不去猜。
+     */
     _fallbackBbox(key) {
       const it = this.items.find((x) => x.key === key)
-      if (!it) return null
+      if (!it || !it.taskId) return null
       const t = useTaskStore().byId(it.taskId)
       const b = t?.bbox
       return Array.isArray(b) && b.length === 4 ? b : null
@@ -75,6 +97,20 @@ export const useOverlayStore = defineStore('overlay', {
         removeOverlay(mapController.value?.map, it.key)
       }
       this.items = this.items.filter((it) => it.taskId !== taskId)
+      this._sync()
+    },
+
+    /**
+     * 服务被移除时清掉它的图层。
+     *
+     * 不清的话会留下"看着正常、实际已无数据源"的幽灵图层——已加载的瓦片
+     * 仍在显示,未加载的静默失败,用户很难想到成因是服务已经没了。
+     */
+    removeByService(serviceId) {
+      for (const it of this.items.filter((x) => x.serviceId === serviceId)) {
+        removeOverlay(mapController.value?.map, it.key)
+      }
+      this.items = this.items.filter((it) => it.serviceId !== serviceId)
       this._sync()
     },
 
