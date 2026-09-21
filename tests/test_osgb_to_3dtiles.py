@@ -3,6 +3,7 @@
 全部用临时目录构造假目录树 + ``sys.executable`` 模拟可执行文件,
 不依赖真实 3dtiles.exe 与 OSGB 样例数据。
 """
+import os
 import sys
 import tempfile
 import unittest
@@ -40,6 +41,28 @@ class BuildCmdTest(unittest.TestCase):
         self.assertIn("D:/osgb_sample", cmd)
         self.assertIn("-o", cmd)
         self.assertIn("out/3dtiles", cmd)
+        # 默认走顶层 LOD 金字塔(上游默认开启),不带 --no-pyramid
+        self.assertNotIn("--no-pyramid", cmd)
+
+    def test_build_cmd_no_pyramid_flag(self):
+        """no_pyramid=True 追加 --no-pyramid,回退为平铺各 Tile 子树。"""
+        p = OsgbTo3dTiles(exe="tools/3dtiles/3dtiles.exe")
+        cmd = p.build_cmd(input_dir="D:/osgb_sample", out_dir="out/3dtiles",
+                          no_pyramid=True)
+        self.assertEqual(cmd[-1], "--no-pyramid")
+        self.assertIn("-f", cmd)
+        self.assertIn("osgb", cmd)
+
+    def test_build_cmd_normalizes_exe_separators(self):
+        """配置里的正斜杠路径要转成本机分隔符。
+
+        Windows 上 CreateProcess 不认 "tools/3dtiles/3dtile.exe":
+        Path.exists 为真但 subprocess 抛 WinError 2(系统找不到指定的文件)。
+        """
+        p = OsgbTo3dTiles(exe="tools/3dtiles/3dtile.exe")
+        cmd = p.build_cmd(input_dir="D:/in", out_dir="out")
+        self.assertEqual(cmd[0], os.path.normpath("tools/3dtiles/3dtile.exe"))
+        self.assertNotIn("/", cmd[0])
 
 
 class ParseProgressTest(unittest.TestCase):

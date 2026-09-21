@@ -108,6 +108,21 @@ def dsm_output(task: dict) -> Path:
 
 # ---------- 各阶段 ----------
 
+#: convert_3d 容忍的失败节点占比上限。超过则判阶段失败,否则只记 warning:
+#: 源数据缺页(个别 osgb 文件不存在)属常见情形,不该让整个成果不可用。
+_CONVERT_3D_BAD_RATIO = 0.01
+
+#: 上游 3dtiles 打印的「顶层 LOD 金字塔回退」标志 → osgb.rs::try_build_pyramid
+#: 各 return None 分支的日志(见 tools_src/3dtiles/src/osgb.rs)。
+_PYRAMID_FALLBACK_MARKS = (
+    "cannot parse grid",         # Tile 目录名不匹配 Tile_+x_+y
+    "returned null",             # build_top_pyramid 返回空
+    "bad response json",         # C++ 侧返回体解析失败
+    "unresolved tile placeholder",
+    "failed:",                   # resp.ok=false
+)
+
+
 def _stage_convert_3d(ctx) -> list[str]:
     """OSGB 目录 → 3D Tiles(b3dm),整目录一次转换(fanvanzh 不支持增量)。"""
     task = ctx.task
@@ -138,6 +153,7 @@ def _stage_convert_3d(ctx) -> list[str]:
     # 前几行样本,不无限攒列表。
     bad_count = 0
     bad_samples: list[str] = []
+    out_lines: list[str] = []
 
     def _scan(line: str):
         nonlocal bad_count
@@ -173,22 +189,52 @@ def _stage_convert_3d(ctx) -> list[str]:
     poll = threading.Thread(target=_poll, daemon=True,
                             name=f"convert3d-poll-{task['id'][:8]}")
     poll.start()
+
+    def _collect_lines(line: str) -> None:
+        """记录上游全部输出,供"金字塔是否真的生成"判定(见下)。"""
+        out_lines.append(line)
+        _scan(line)
+
     try:
         proc.run(proc.build_cmd(input_dir=src, out_dir=out_dir),
                  out_dir=out_dir, cancel_event=ctx.cancel_event,
                  on_progress=_on_progress,
-                 on_stdout_line=_scan, on_stderr_line=_scan)
+                 on_stdout_line=_collect_lines,
+                 on_stderr_line=_collect_lines)
     finally:
         poll_stop.set()
         poll.join(timeout=2)
 
-    if bad_count:
-        raise RuntimeError(
-            f"convert_3d 部分瓦片转换失败(命中 {bad_count} 行错误日志),"
-            f"如:{bad_samples[0][:120]}")
     tileset = out_dir / "tileset.json"
     if not tileset.is_file():
         raise RuntimeError(f"产物缺失:{tileset.name}")
+
+    # 顶层 LOD 金字塔对根 tileset 精细度影响很大,一旦静默回退成平铺,
+    # 成果"能打开但不好看",用户无从判断问题出在哪。此处只做可观测性:
+    # 回退时给出中文提示,不改变成功/失败判定。
+    # 注意上游日志经 spdlog 输出,带 "[时间] [级别] " 前缀,只能按子串匹配。
+    for line in out_lines:
+        if "pyramid:" not in line:
+            continue
+        if any(mark in line for mark in _PYRAMID_FALLBACK_MARKS):
+            reason = line.split("pyramid:", 1)[1].strip()
+            ctx.tracker.update(
+                key, message="3D Tiles 已生成,但顶层 LOD 金字塔回退为平铺"
+                             f"(根节点精细度下降):{reason[:160]}")
+            break
+
+    # 少量节点失败多半是源数据本身缺页(实测有 osgb 文件在源目录不存在),
+    # 此时整目录成果仍完整可用。按占比判定:超过阈值才判失败,否则只在阶段
+    # 消息里留 warning——否则一个缺失文件就让整个成果无法预览
+    # (前端预览 gate 是 stageDone)。
+    if bad_count:
+        ratio = bad_count / estimated_total if estimated_total else 1.0
+        note = (f"{bad_count} 个节点转换失败(占 {ratio:.2%}),"
+                f"如:{bad_samples[0][:120]}")
+        if ratio > _CONVERT_3D_BAD_RATIO:
+            raise RuntimeError(f"convert_3d {note}")
+        logger.warning("任务[%s] convert_3d %s", task["name"], note)
+        ctx.tracker.update(key, message=f"成果已生成,但 {note}")
     return [str(out_dir)]
 
 

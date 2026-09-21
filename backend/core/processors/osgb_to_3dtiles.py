@@ -32,11 +32,23 @@ Task 8 集成契约(runner_3d 必读,2026-09 审查经上游 master 源码核实
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
 
 from .base import BaseProcessor, ProcessorError
+
+def _norm_exe(raw: str) -> str:
+    """把可执行文件路径转成本机分隔符。
+
+    Windows 上 CreateProcess 不认正斜杠:配置里写
+    "tools/3dtiles/3dtile.exe" 时 Path.exists 为真、subprocess 却抛
+    WinError 2(「系统找不到指定的文件」)。统一规范化后再使用。
+    非 Windows 平台 normpath 是空操作,不会误改 POSIX 路径。
+    """
+    return os.path.normpath(raw) if raw else ""
+
 
 # "converting 3/10"、"process 1/4" 等 x/y 形式
 _RE_RATIO = re.compile(r"(\d+)\s*/\s*(\d+)")
@@ -54,9 +66,8 @@ class OsgbTo3dTiles(BaseProcessor):
         self._exe = str(exe) if exe else ""
 
     def _resolve_exe(self, cfg) -> str:
-        if self._exe:
-            return self._exe
-        return (getattr(getattr(cfg, "tools", None), "tiles3d_exe", "") or "")
+        return _norm_exe(self._exe or (
+            getattr(getattr(cfg, "tools", None), "tiles3d_exe", "") or ""))
 
     def check_available(self, cfg) -> tuple[bool, str]:
         """路径存在 + `-h` 可跑(fanvanzh 基于 clap,支持 -h/--help)。"""
@@ -79,15 +90,23 @@ class OsgbTo3dTiles(BaseProcessor):
             return False, f"3dtiles -h 试跑失败(退出码 {proc.returncode})"
         return True, "3dtiles 可用"
 
-    def build_cmd(self, *, input_dir, out_dir) -> list[str]:
-        """构造命令:`3dtiles -f osgb -i <输入目录> -o <输出目录>`。"""
+    def build_cmd(self, *, input_dir, out_dir,
+                  no_pyramid: bool = False) -> list[str]:
+        """构造命令:`3dtiles -f osgb -i <输入目录> -o <输出目录>`。
+
+        no_pyramid=True 追加 `--no-pyramid`,跳过顶层 LOD 金字塔,
+        回退为平铺各 Tile 子树(仅用于排查金字塔相关问题)。
+        """
         if not self._exe:
             raise ProcessorError(
                 self.name, None,
                 hint="未配置 3dtiles 可执行文件路径:请以 "
                      "cfg.tools.tiles3d_exe 构造本适配器")
-        return [self._exe, "-f", "osgb", "-i", str(input_dir),
-                "-o", str(out_dir)]
+        cmd = [_norm_exe(self._exe), "-f", "osgb", "-i", str(input_dir),
+               "-o", str(out_dir)]
+        if no_pyramid:
+            cmd.append("--no-pyramid")
+        return cmd
 
     def parse_progress(self, line: str) -> float | None:
         """从一行输出解析进度(0~1)。

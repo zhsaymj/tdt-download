@@ -334,8 +334,121 @@ class Runner3dCase(_TempDbCase):
         self.assertEqual(final["status"], "failed")
         stages = {s["key"]: s for s in final["stages"]}
         self.assertEqual(stages["convert_3d"]["status"], "failed")
-        self.assertIn("命中 2 行", stages["convert_3d"]["message"])
+        self.assertIn("2 个节点转换失败", stages["convert_3d"]["message"])
         self.assertIn("failed: Tile_005.osgb", stages["convert_3d"]["message"])
+
+    # 6b. convert_3d：失败节点占比低于阈值 → 阶段仍 done，只在消息里留 warning
+    #     （源数据个别 osgb 缺页属常见情形，不该让整个成果无法预览）
+    def test_convert_3d_tolerates_few_failures(self):
+        p_osgb, p_dem, p_py = self._patch_processors()
+        osgb_dir = self.tmp / "osgb"
+        # 200 个节点做分母，单行错误占 0.5% < 1% 阈值
+        for i in range(200):
+            d = osgb_dir / f"Tile_{i:03d}"
+            d.mkdir(parents=True)
+            (d / f"Tile_{i:03d}.osgb").write_bytes(b"x")
+        task_id = create_task(
+            TaskCreate(
+                name="少量失败",
+                provider="local_osgb",
+                bbox=BBOX,
+                source_path=str(osgb_dir),
+                export="tile_3d",
+            ),
+            total=1,
+        )
+
+        def fake_run(cmd, **kwargs):
+            kwargs["on_stderr_line"](
+                "Error reading file Tile_066_L25_00031100.osgb: file not found")
+            out = Path(kwargs["out_dir"])
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "tileset.json").write_text("{}")
+            return self._ok_result(out / "tileset.json")
+
+        p_osgb.return_value.run.side_effect = fake_run
+        self._run(task_id)
+
+        final = get_task(task_id)
+        stages = {s["key"]: s for s in final["stages"]}
+        self.assertEqual(stages["convert_3d"]["status"], "done")
+        self.assertIn("成果已生成", stages["convert_3d"]["message"])
+        self.assertIn("1 个节点转换失败", stages["convert_3d"]["message"])
+
+    # 6c. convert_3d：上游 LOD 金字塔静默回退成平铺时，阶段仍 done，
+    #     但要在消息里说明「根节点精细度下降」，否则成果能打开但显示粗糙，
+    #     用户无从判断是数据问题还是转换问题。
+    def test_convert_3d_flags_pyramid_fallback(self):
+        p_osgb, p_dem, p_py = self._patch_processors()
+        osgb_dir = self.tmp / "osgb"
+        (osgb_dir / "Tile_005").mkdir(parents=True)
+        (osgb_dir / "Tile_005" / "Tile_005.osgb").write_bytes(b"x")
+        task_id = create_task(
+            TaskCreate(
+                name="金字塔回退",
+                provider="local_osgb",
+                bbox=BBOX,
+                source_path=str(osgb_dir),
+                export="tile_3d",
+            ),
+            total=1,
+        )
+
+        def fake_run(cmd, **kwargs):
+            # 真实日志带 spdlog 前缀，形如
+            # `[2026-09-21 14:49:41.123] [warning] pyramid: cannot parse
+            #  grid from Tile_+065_+052, fallback`；不含 failed/error 关键词，
+            # 故只影响金字塔提示，不触发阶段失败判定。
+            kwargs["on_stderr_line"](
+                "[2026-09-21 14:49:41.123] [warning] pyramid: "
+                "cannot parse grid from Tile_+065_+052, fallback")
+            out = Path(kwargs["out_dir"])
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "tileset.json").write_text("{}")
+            return self._ok_result(out / "tileset.json")
+
+        p_osgb.return_value.run.side_effect = fake_run
+        self._run(task_id)
+
+        final = get_task(task_id)
+        stages = {s["key"]: s for s in final["stages"]}
+        self.assertEqual(stages["convert_3d"]["status"], "done")
+        self.assertIn("LOD 金字塔回退为平铺", stages["convert_3d"]["message"])
+        self.assertIn("cannot parse grid", stages["convert_3d"]["message"])
+
+    # 6d. convert_3d：金字塔正常生成时不得出现回退提示（避免误报）
+    def test_convert_3d_does_not_flag_pyramid_when_ok(self):
+        p_osgb, p_dem, p_py = self._patch_processors()
+        osgb_dir = self.tmp / "osgb"
+        (osgb_dir / "Tile_005").mkdir(parents=True)
+        (osgb_dir / "Tile_005" / "Tile_005.osgb").write_bytes(b"x")
+        task_id = create_task(
+            TaskCreate(
+                name="金字塔正常",
+                provider="local_osgb",
+                bbox=BBOX,
+                source_path=str(osgb_dir),
+                export="tile_3d",
+            ),
+            total=1,
+        )
+
+        def fake_run(cmd, **kwargs):
+            kwargs["on_stdout_line"](
+                "[2026-09-21 14:49:41.123] [info] pyramid node r: "
+                "tiles=384 geoms=420 simplified=420 kept=0 tex=8")
+            out = Path(kwargs["out_dir"])
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "tileset.json").write_text("{}")
+            return self._ok_result(out / "tileset.json")
+
+        p_osgb.return_value.run.side_effect = fake_run
+        self._run(task_id)
+
+        final = get_task(task_id)
+        stages = {s["key"]: s for s in final["stages"]}
+        self.assertEqual(stages["convert_3d"]["status"], "done")
+        self.assertNotIn("回退", stages["convert_3d"].get("message") or "")
 
     def _run_tile3d_with_crs(self, crs: str):
         """跑一个 export=tile_3d 的单文件点云任务，返回 LasTo3dTiles 类 mock。"""
