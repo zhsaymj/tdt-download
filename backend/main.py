@@ -17,6 +17,7 @@ from .models import reset_stale_running
 from .paths import resource_root
 from .api import buildings as buildings_api
 from .api import local as local_api
+from .api import services as services_api
 from .api import tasks as tasks_api
 from .api import tokens as tokens_api
 from .api import tools as tools_api
@@ -64,6 +65,7 @@ app.include_router(ws_api.router)
 app.include_router(buildings_api.router)
 app.include_router(local_api.router)
 app.include_router(tools_api.router)
+app.include_router(services_api.router)
 
 
 @app.get("/api/config")
