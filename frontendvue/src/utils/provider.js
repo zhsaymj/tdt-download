@@ -56,3 +56,19 @@ export function taskKindOf(task) {
   if (isDemProvider(p)) return 'dem'
   return 'image'
 }
+
+// ---- 本地数据服务的分类(与后端 core/service_scan.py 的 KIND_* 一致) ----
+// 集中在此而非各组件里硬编码:本项目已有过三次"名单抄多份、漏改一处"的教训
+// (见本文件头部说明)。
+export const SERVICE_KINDS = ['model', 'imagery', 'vector', 'terrain']
+
+export const SERVICE_KIND_LABELS = {
+  model: '模型',
+  imagery: '影像',
+  vector: '矢量',
+  terrain: '地形',
+}
+
+export function serviceKindLabel(kind) {
+  return SERVICE_KIND_LABELS[String(kind || '')] || String(kind || '')
+}
