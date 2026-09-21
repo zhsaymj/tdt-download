@@ -112,5 +112,8 @@ test('预览页:三维任务从 layers 接口取 tileset url,标签按 provider 
 test('预览页:全零占位 bbox 视为无效,三维任务改用 zoomTo 瓦片集定位', () => {
   // 三维任务的真实范围 runner 阶段才解析,库里是占位 [0,0,0,0],直飞会落到几内亚湾
   assert.ok(previewSource.includes('taskBbox.every((v) => v === 0)'), '缺少全零 bbox 守卫')
-  assert.ok(previewSource.includes('viewer.zoomTo(tileset3d)'), '缺少 zoomTo 瓦片集定位')
+  // 瓦片集改为 Map 管理（key -> Cesium3DTileset）：多个瓦片集并存时单变量
+  // 只能控制最后一个，先加载的关不掉、也无法释放
+  assert.ok(previewSource.includes("viewer.zoomTo(tilesets.get('buildings'))"),
+    '缺少 zoomTo 瓦片集定位')
 })
