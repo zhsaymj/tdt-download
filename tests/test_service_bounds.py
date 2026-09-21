@@ -218,6 +218,43 @@ class MetadataBoundsTest(unittest.TestCase):
                 json.dumps({"root": {}}), encoding="utf-8")
             self.assertIsNone(bounds_from_tileset(p / "tileset.json"))
 
+    def test_tileset_box_respects_root_transform(self):
+        """box 是 root.transform 下的**局部坐标**，不是地心 ECEF。
+
+        本工具产出的 tileset.json 的 root 恰好带 transform（box 中心是几百米
+        的局部偏移量）。不做变换会得到纬度 90° 这种明显错误的结果——不报错、
+        只是范围全错。这条用真实结构（取自 output/Data）锁定语义。
+        """
+        from backend.core.service_bounds import bounds_from_tileset
+        # 怀化数据的真实 root.transform（列主序）+ 局部 box
+        tileset = {
+            "root": {
+                "transform": [
+                    -0.9409040369995121, -0.3386732837972619, 0.0, 0.0,
+                    0.15820892548669424, -0.43953693368059255, 0.884181666755768, 0.0,
+                    -0.2994487085535123, 0.8319300996914595, 0.4671432116310714, 0.0,
+                    -1911321.4903699476, 5310044.1999126095, 2961721.604622624, 1.0,
+                ],
+                "boundingVolume": {"box": [
+                    1565.2472290039063, 1217.261962890625, 151.89434051513672,
+                    272.84951171875, 0.0, 0.0,
+                    0.0, 222.07246093749995, 0.0,
+                    0.0, 0.0, 27.195162963867183,
+                ]},
+            }
+        }
+        with TemporaryDirectory() as d:
+            p = Path(d)
+            (p / "tileset.json").write_text(json.dumps(tileset), encoding="utf-8")
+            got = bounds_from_tileset(p / "tileset.json")
+        self.assertIsNotNone(got)
+        # 怀化在湖南：经度 ~109.8、纬度 ~27.86
+        self.assertAlmostEqual(got[0], 109.80919, places=4)
+        self.assertAlmostEqual(got[1], 27.85799, places=4)
+        # 四至有效（不是零高度矩形，也不是纬度 90 那种明显错值）
+        self.assertLess(got[1], got[3])
+        self.assertLess(abs(got[3]), 80.0)
+
 
 if __name__ == "__main__":
     unittest.main()

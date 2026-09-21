@@ -327,7 +327,21 @@ def bounds_from_tileset(tileset_json: Path) -> list[float] | None:
                 for sign, axis in ((sx, axes[0]), (sy, axes[1]), (sz, axes[2])):
                     for i in range(3):
                         pt[i] += sign * axis[i]
-                corners.append(tuple(pt))
+                corners.append(pt)
+
+    # **box 的坐标是 root.transform 下的局部坐标，不是地心 ECEF**。
+    # 3D Tiles 规范：transform 是 4×4 列主序矩阵，作用在 box 的顶点上。
+    # 本工具产出的 tileset.json 的 root 恰好带 transform（中心是几百米的
+    # 局部偏移量），不走这一步会算出纬度 90° 这种明显错误的结果。
+    m = (d.get("root") or {}).get("transform")
+    if isinstance(m, list) and len(m) == 16:
+        try:
+            mat = [float(v) for v in m]
+        except (TypeError, ValueError):
+            mat = None
+        if mat is not None:
+            corners = [_apply_mat4(mat, p) for p in corners]
+
     try:
         from pyproj import Transformer
         tr = Transformer.from_crs("EPSG:4978", "EPSG:4326", always_xy=True)
@@ -340,6 +354,19 @@ def bounds_from_tileset(tileset_json: Path) -> list[float] | None:
         logger.debug("3D Tiles box 转 4326 失败 %s:%s", tileset_json, e)
         return None
     return [min(lons), min(lats), max(lons), max(lats)]
+
+
+def _apply_mat4(m: list[float], p: list[float]) -> list[float]:
+    """4×4 列主序矩阵乘一个点（3D Tiles 的 transform 语义）。
+
+    列主序：m[0..3] 是第一列，依此类推。点按 (x, y, z, 1) 右乘。
+    """
+    x, y, z = p
+    return [
+        m[0] * x + m[4] * y + m[8] * z + m[12],
+        m[1] * x + m[5] * y + m[9] * z + m[13],
+        m[2] * x + m[6] * y + m[10] * z + m[14],
+    ]
 
 
 def bounds_for_vector(path: Path) -> list[float] | None:
