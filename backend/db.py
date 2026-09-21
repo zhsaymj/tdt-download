@@ -86,6 +86,27 @@ CREATE TABLE IF NOT EXISTS tokens (
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 );
+
+-- 本地数据服务:把本地目录发布成带稳定地址的数据服务。
+-- 与 tasks 表的区别:服务指向**目录**,任务产出**成果**;任务记录删了成果就打不开,
+-- 而服务长期有效,其他服务可以拿它的地址当地图数据源用。
+CREATE TABLE IF NOT EXISTS services (
+    id            TEXT PRIMARY KEY,            -- 8 位十六进制短 id,用作 URL 段
+    name          TEXT NOT NULL,               -- 显示名(可改)
+    kind          TEXT NOT NULL,               -- model / imagery / vector / terrain
+    root          TEXT NOT NULL,               -- 服务根目录绝对路径(已 resolve)
+    entry         TEXT NOT NULL DEFAULT '',    -- 相对 root 的入口;瓦片/地形为空
+    grid          TEXT NOT NULL DEFAULT '',    -- geodetic / mercator / ''(非瓦片)
+    flip_y        INTEGER NOT NULL DEFAULT 0,  -- 行号是否自南向北(TMS 为 1)
+    minzoom       INTEGER NOT NULL DEFAULT 0,
+    maxzoom       INTEGER NOT NULL DEFAULT 18,
+    bounds_wgs84  TEXT NOT NULL DEFAULT '',    -- JSON 数组 [w,s,e,n],供定位
+    bounds_approx INTEGER NOT NULL DEFAULT 0,  -- 范围是否为估算值
+    tile_ext      TEXT NOT NULL DEFAULT 'png', -- 瓦片扩展名(拼访问地址用)
+    enabled       INTEGER NOT NULL DEFAULT 0,  -- 是否对外提供;**默认关**
+    source        TEXT NOT NULL DEFAULT 'manual',  -- output_scan / manual
+    created_at    TEXT NOT NULL
+);
 """
 
 # 旧库升级:新增列(SQLite 不支持 IF NOT EXISTS 加列,靠 PRAGMA 判断)

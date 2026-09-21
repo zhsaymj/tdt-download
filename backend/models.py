@@ -440,3 +440,24 @@ def _synth_stages(d: dict) -> list[dict]:
 def update_stages(task_id: str, stages: list[dict]) -> None:
     """把阶段进度数组落库(整体覆盖写)。"""
     update_task(task_id, stages=json.dumps(stages))
+
+
+def _service_row_to_dict(row) -> dict:
+    """services 表行 -> dict。
+
+    三个布尔列(SQLite 存 0/1)转成真正的 bool,一个 JSON 列转成数组——
+    前端拿到就能直接用,不必各自记得在哪儿转换。
+    """
+    d = dict(row)
+    raw = d.get("bounds_wgs84") or ""
+    if raw:
+        try:
+            d["bounds_wgs84"] = json.loads(raw)
+        except ValueError:
+            d["bounds_wgs84"] = None
+    else:
+        d["bounds_wgs84"] = None
+    d["flip_y"] = bool(d.get("flip_y"))
+    d["bounds_approx"] = bool(d.get("bounds_approx"))
+    d["enabled"] = bool(d.get("enabled"))
+    return d
