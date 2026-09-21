@@ -21,12 +21,18 @@ import TaskDetail from './components/TaskDetail.vue'
 import TokenManager from './components/TokenManager.vue'
 import LogDrawer from './components/LogDrawer.vue'
 import AboutDialog from './components/AboutDialog.vue'
+import ServicePanel from './components/ServicePanel.vue'
+import { useServiceStore } from './stores/service'
 
 const tokenMgrVisible = ref(false)
 const logVisible = ref(false)
 const aboutVisible = ref(false)
 const dataVisible = ref(false)
 const taskVisible = ref(false)
+const serviceVisible = ref(false)
+
+// 顶栏「服务」角标要有值，首屏拉一次
+const serviceStore = useServiceStore()
 
 // 处理面板:四种数据来源(下载/本地栅格/本地矢量/本地三维)共用它,由 source 区分。
 // 统一一个面板而非各来源一套,是为了让"选格式"这件事只有一份实现——
@@ -66,10 +72,14 @@ const PANEL_R = 440          // 与 DataDialog / TaskDialog 的 width 一致
  */
 const padStyle = computed(() => ({
   '--pad-left': (processVisible.value ? PANEL_L : 0) + 'px',
-  '--pad-right': ((dataVisible.value || taskVisible.value) ? PANEL_R : 0) + 'px',
+  '--pad-right': ((dataVisible.value || taskVisible.value
+    || serviceVisible.value) ? PANEL_R : 0) + 'px',
 }))
 
-onMounted(() => registerProj4Defs())
+onMounted(() => {
+  registerProj4Defs()
+  serviceStore.fetchAll()
+})
 </script>
 
 <template>
@@ -81,6 +91,7 @@ onMounted(() => registerProj4Defs())
       @new-3d="openProcess({ kind: 'local_3d' })"
       @open-data="openData"
       @open-tasks="openTasks"
+      @open-services="serviceVisible = true"
       @open-tokens="tokenMgrVisible = true"
       @open-logs="logVisible = true"
       @open-about="aboutVisible = true"
@@ -106,6 +117,9 @@ onMounted(() => registerProj4Defs())
     </main>
 
     <AppStatusBar @open-tasks="openTasks" />
+
+    <!-- 服务面板是右侧抽屉，与「数据」面板同侧；关闭后刷新顶栏角标 -->
+    <ServicePanel v-if="serviceVisible" @close="serviceVisible = false" />
 
     <TokenManager v-model:visible="tokenMgrVisible" />
     <LogDrawer v-model:visible="logVisible" />
