@@ -39,3 +39,14 @@ test('分类标签复用集中常量', () => {
   assert.ok(src.includes('serviceKindLabel'), '未复用 provider.js 的标签映射')
   assert.ok(src.includes('KIND_TAG_STYLE'), '未复用 store 的标签配色')
 })
+
+test('容器复用 SidePanel，与「数据」「任务」面板一致', () => {
+  // 三个右侧面板必须同款：SidePanel 是 absolute 相对地图容器定位，
+  // 高度只占地图区。若换成 position:fixed 的自定义容器，面板会顶到浏览器
+  // 顶部、盖住顶栏，与另两个面板视觉不一致。
+  assert.ok(src.includes("from './SidePanel.vue'"), '未复用 SidePanel')
+  assert.ok(src.includes('<SidePanel'), '模板未用 SidePanel 包裹')
+  assert.ok(!/position:\s*fixed/.test(src),
+    '不应再出现 position:fixed 的自定义面板容器')
+  assert.ok(src.includes('440px'), '宽度应与 DataDialog/TaskDialog 一致（440px）')
+})

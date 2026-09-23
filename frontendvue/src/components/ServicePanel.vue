@@ -1,17 +1,23 @@
 <script setup>
 /**
- * 服务管理面板（右侧抽屉）。
+ * 服务管理面板（右侧侧边面板）。
  *
  * 分工：把本地目录"发布"成带稳定地址的数据服务，供预览页、主界面图层列表
  * 以及其他本机服务使用。与「数据与成果」面板的区别是：那边是**任务**的成果，
  * 这边是**目录**的服务——任务记录删了成果就打不开，而服务指向目录，长期有效。
+ *
+ * 容器用 SidePanel（与「数据与成果」「任务」一致）：它落在 .map-main 内、
+ * absolute 定位，高度只占地图区、不会盖住顶栏，也没有遮罩——用户可以边看
+ * 服务列表边在地图上核对图层。
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { useServiceStore, KIND_TAG_STYLE } from '../stores/service'
 import { SERVICE_KINDS, serviceKindLabel } from '../utils/provider'
+import SidePanel from './SidePanel.vue'
 
-const emit = defineEmits(['close'])
+const props = defineProps({ visible: { type: Boolean, default: false } })
+const emit = defineEmits(['update:visible'])
 
 const store = useServiceStore()
 const filterKind = ref('all')
@@ -164,21 +170,23 @@ async function commitRename(svc) {
   }
 }
 
-onMounted(async () => {
+/** 打开面板时刷新并要求探活一次——目录可能在这期间被移走或恢复 */
+async function refresh() {
   await store.fetchAll()
   await Promise.all([store.fetchHealth(), store.fetchCandidates()])
-})
+}
+
+// SidePanel 内部用 v-show，组件常驻，故用 watch 而不是 onMounted：
+// 每次打开都要重新探活，否则源目录被删后卡片仍显示"正常"
+watch(() => props.visible, (v) => { if (v) refresh() }, { immediate: true })
 </script>
 
 <template>
-  <div class="svc-panel">
-    <div class="hd">
-      <span class="title">服务</span>
-      <button class="x" @click="emit('close')">×</button>
-    </div>
-
-    <!-- 添加 -->
-    <div class="add-row">
+  <SidePanel :visible="visible" title="服务" side="right" width="440px"
+    @update:visible="emit('update:visible', $event)">
+    <div class="svc">
+      <!-- 添加 -->
+      <div class="add-row">
       <input v-model="scanPath" class="inp" placeholder="本地目录绝对路径" />
       <button class="btn" @click="browseAndScan">浏览…</button>
       <button class="btn primary" :disabled="scanning" @click="doScan">
@@ -264,23 +272,13 @@ onMounted(async () => {
         <div v-if="!candidates.length" class="empty">没有未注册的成果</div>
       </template>
     </div>
-  </div>
+    </div>
+  </SidePanel>
 </template>
 
 <style scoped>
-.svc-panel {
-  position: fixed; top: 0; right: 0; bottom: 0; width: 380px; z-index: 60;
-  display: flex; flex-direction: column; gap: 6px;
-  background: #fff; border-left: 1px solid #dbe3ec;
-  box-shadow: -4px 0 18px rgba(15, 23, 42, .12);
-  padding: 10px 12px; overflow-y: auto; font-size: 13px;
-}
-.hd { display: flex; align-items: center; justify-content: space-between; }
-.title { font-weight: 700; color: #0369a1; }
-.x {
-  border: 0; background: transparent; cursor: pointer;
-  font-size: 18px; color: #64748b; line-height: 1;
-}
+/* 容器与内边距交给 SidePanel，这里只管内容排布 */
+.svc { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
 .add-row { display: flex; gap: 5px; }
 .inp {
   flex: 1 1 auto; min-width: 0; border: 1px solid #dbe3ec; border-radius: 5px;

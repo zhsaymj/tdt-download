@@ -114,12 +114,12 @@ onMounted(() => {
       <DataDialog v-model:visible="dataVisible" @process="openProcess"
         @convert-cog="onConvertCog" />
       <TaskDialog v-model:visible="taskVisible" />
+      <!-- 服务面板与「数据」「任务」同侧同款（SidePanel）：都靠 absolute 相对
+           地图容器定位，高度只占地图区、不盖顶栏 -->
+      <ServicePanel v-model:visible="serviceVisible" />
     </main>
 
     <AppStatusBar @open-tasks="openTasks" />
-
-    <!-- 服务面板是右侧抽屉，与「数据」面板同侧；关闭后刷新顶栏角标 -->
-    <ServicePanel v-if="serviceVisible" @close="serviceVisible = false" />
 
     <TokenManager v-model:visible="tokenMgrVisible" />
     <LogDrawer v-model:visible="logVisible" />
