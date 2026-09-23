@@ -54,9 +54,21 @@ function onConvertCog(path) {
   openProcess({ kind: 'local_raster', path, preferCog: true })
 }
 
-// 右侧两个面板互斥:它们停靠同一边,同时开只会互相盖住
-function openData() { taskVisible.value = false; dataVisible.value = true }
-function openTasks() { dataVisible.value = false; taskVisible.value = true }
+/**
+ * 右侧三个面板互斥:它们停靠同一边(width 都是 440px),同时开只会互相盖住。
+ *
+ * 打开其一就先关掉另外两个。集中在这里而不是各入口各写一遍——
+ * 服务面板加进来时就是因为入口写成了内联赋值,漏了互斥。
+ */
+function showRightPanel(which) {
+  dataVisible.value = which === 'data'
+  taskVisible.value = which === 'tasks'
+  serviceVisible.value = which === 'services'
+}
+
+const openData = () => showRightPanel('data')
+const openTasks = () => showRightPanel('tasks')
+const openServices = () => showRightPanel('services')
 
 function onTaskCreated() {
   openTasks()
@@ -91,7 +103,7 @@ onMounted(() => {
       @new-3d="openProcess({ kind: 'local_3d' })"
       @open-data="openData"
       @open-tasks="openTasks"
-      @open-services="serviceVisible = true"
+      @open-services="openServices"
       @open-tokens="tokenMgrVisible = true"
       @open-logs="logVisible = true"
       @open-about="aboutVisible = true"
