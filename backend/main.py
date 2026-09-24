@@ -10,7 +10,6 @@ from fastapi.staticfiles import StaticFiles
 from .config import settings
 from .core.logs import logger as app_logger, recent_logs, set_notifier as set_log_notifier
 from .core.queue import task_queue
-from .core.runner import run_task
 from .core.token_pool import token_pool
 from .db import init_db
 from .models import reset_stale_running
@@ -36,7 +35,7 @@ BASEMAP_DIR = RES_DIR / "exmple-data" / "NaturalEarthII"
 async def lifespan(app: FastAPI):
     init_db()
     reset_stale_running()
-    task_queue.set_runner(run_task)
+    # 主进程只做调度:任务由 worker 子进程执行,不再注册本地 runner
     task_queue.start()
     # tk 使用池:池空时把 config.yaml 的密钥作为初始种子导入;注入 WS 广播回调
     token_pool.seed_from_config(settings.tianditu.token)
@@ -49,12 +48,18 @@ async def lifespan(app: FastAPI):
     token_pool.set_notifier(_token_notify)
     # 运行日志实时推送给前端(经队列 WS 广播)
     set_log_notifier(_token_notify)
-    app_logger.info("服务已启动,监听 %s:%s", settings.server.host, settings.server.port)
+    app_logger.info("服务已启动,监听 %s:%s(worker=%s)",
+                    settings.server.host, settings.server.port,
+                    settings.worker.num_workers)
     try:
         yield
     finally:
         # 退出前把未落库的计数写回
         token_pool.flush()
+        # 收工:通知 worker 退出,超时强杀。
+        # 必须 await —— shutdown 内部 join 每个 worker(最坏 timeout×N 秒),
+        # 同步调用会阻塞事件循环,期间服务完全不响应、Ctrl-C 收尾也被拖着。
+        await task_queue.shutdown()
 
 
 app = FastAPI(title="天地图下载处理工具", lifespan=lifespan)

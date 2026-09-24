@@ -50,3 +50,9 @@ tools:
   tiles3d_exe: ""        # 例如 tools/3dtiles/3dtiles.exe
   pdal_exe: ""           # 例如 tools/pdal/bin/pdal.exe
   py3dtiles_python: ""   # 例如 tools/py3dtiles-venv/Scripts/python.exe
+
+# worker 进程池:能同时执行的任务数。
+# 单个任务内部已有瓦片级并发,默认 1 已能跑满磁盘/网络;
+# 调大可并行跑多个任务,代价是内存(每个常驻 worker 约 60MB)与磁盘 I/O 竞争。
+worker:
+  num_workers: 1

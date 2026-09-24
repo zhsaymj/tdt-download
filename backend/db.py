@@ -164,4 +164,7 @@ def get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
+    # 多进程(主进程 + N 个 worker)并发写时,WAL 允许并发读写但写之间仍互斥;
+    # 不设超时会直接抛 "database is locked",设了则排队等待。
+    conn.execute("PRAGMA busy_timeout=5000;")
     return conn

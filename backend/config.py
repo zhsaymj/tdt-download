@@ -92,6 +92,17 @@ class ToolsConfig:
 
 
 @dataclass
+class WorkerConfig:
+    """worker 进程池配置。
+
+    num_workers 是能**同时执行**的任务数。单个任务内部已有瓦片级并发,
+    故默认 1 已能跑满磁盘/网络;调大可并行跑多个任务,代价是内存占用
+    与磁盘 I/O 竞争(每个常驻 worker 约 60MB)。
+    """
+    num_workers: int = 1
+
+
+@dataclass
 class Config:
     tianditu: TiandituConfig = field(default_factory=TiandituConfig)
     download: DownloadConfig = field(default_factory=DownloadConfig)
@@ -99,6 +110,7 @@ class Config:
     server: ServerConfig = field(default_factory=ServerConfig)
     buildings: BuildingsConfig = field(default_factory=BuildingsConfig)
     tools: ToolsConfig = field(default_factory=ToolsConfig)
+    worker: WorkerConfig = field(default_factory=WorkerConfig)
 
     def abs_path(self, rel: str) -> Path:
         """把配置里的相对路径解析为基于项目根目录的绝对路径。"""
@@ -195,6 +207,7 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         _merge(cfg.server, raw.get("server"))
         _merge(cfg.buildings, raw.get("buildings"))
         _merge(cfg.tools, raw.get("tools"))
+        _merge(cfg.worker, raw.get("worker"))
 
     # 环境变量可覆盖密钥,便于不落盘
     env_token = os.environ.get("TIANDITU_TOKEN")
@@ -203,6 +216,15 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
     env_basemap = os.environ.get("TIANDITU_BASEMAP_TOKEN")
     if env_basemap:
         cfg.tianditu.basemap_token = env_basemap
+    # worker 数也可用环境变量覆盖(非密钥,但同样省得改配置文件);
+    # 非法值静默忽略而非抛错:配置系统整体是"缺失/写坏则回落默认值"的语义,
+    # 为一个可选调优项在启动路径上抛异常得不偿失。
+    env_workers = os.environ.get("NUM_WORKERS")
+    if env_workers:
+        try:
+            cfg.worker.num_workers = max(1, int(env_workers))
+        except ValueError:
+            pass
 
     return cfg
 
