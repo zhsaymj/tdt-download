@@ -2,10 +2,14 @@
 
 瓦片按 {cache_dir}/{provider.key}/{z}/{col}_{row}.{ext} 缓存;
 已存在且非空的文件直接跳过,实现断点续传。
+
+缓存写入必须是原子的(临时文件 + os.replace),原因见 `_one` 内注释:
+缓存路径与任务无关,多 worker 下多个任务会写同一路径。
 """
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from typing import Callable
 
@@ -113,12 +117,38 @@ class TileDownloader:
                                 # 请求本身是成功的(该处确实无数据),故不计失败。
                                 if self.provider.is_empty_tile(data):
                                     return True
-                                path.write_bytes(data)
+                                # 原子写:缓存路径只由 provider+z+col+row 决定,
+                                # 与任务无关 —— 多 worker 下两个范围重叠的任务
+                                # (相邻范围、重跑失败任务、同区先影像后注记)
+                                # 会写同一路径。直接 write_bytes 是非原子的,
+                                # 另一进程的命中判定 `exists() && size>0` 会在
+                                # 写到一半时为真,于是残缺瓦片被当成有效缓存
+                                # 带进拼接(产出错像素/nodata),且此后永远命中
+                                # 跳过分支、不会自愈。
+                                # 先写同目录临时文件,再 os.replace 原子改名:
+                                # 同卷上 Windows/POSIX 都保证 replace 是原子的,
+                                # 观察者看到的要么是无文件、要么是完整文件。
+                                # 临时文件名带 pid,避免多进程互相覆盖。
+                                tmp = path.with_name(
+                                    f"{path.name}.{os.getpid()}.tmp"
+                                )
+                                try:
+                                    tmp.write_bytes(data)
+                                    os.replace(tmp, path)
+                                except OSError:
+                                    # 改名失败(Windows 上被其它进程句柄挡住等)
+                                    # 时清理临时文件,不留垃圾;按一次失败处理,
+                                    # 交给外层重试。
+                                    tmp.unlink(missing_ok=True)
+                                    raise
                                 return True
                         # 非 200 或空响应,进入重试
             except asyncio.CancelledError:
                 raise  # 暂停/取消时被取消,直接向上抛出
-            except (aiohttp.ClientError, asyncio.TimeoutError):
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+                # OSError 也重试:落盘/改名失败多为瞬时(磁盘忙、目标被占用),
+                # 直接让任务失败代价过大 —— 整个下载任务会因为一张瓦片的
+                # 瞬时文件锁而中止。重试次数受 max_retries 约束,不会无限重试。
                 pass
 
             if attempt < self.max_retries:
