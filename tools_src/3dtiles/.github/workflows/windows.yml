@@ -1,0 +1,18 @@
+name: Windows
+
+on:
+  push:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  build-and-test:
+    uses: ./.github/workflows/build.yml
+    with:
+      os: windows-latest
+      platform: windows-x86_64
+      package: false

@@ -1,0 +1,11 @@
+/target/
+/vcpkg_installed/
+/.vscode/compile_commands.json
+/compile_commands.json
+/.cache/
+/build/
+/.idea/
+.DS_Store
+
+data
+output

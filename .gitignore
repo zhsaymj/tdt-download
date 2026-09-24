@@ -36,3 +36,15 @@ exmple-data/
 # 需求输入素材(截图、测试数据、密钥清单)。
 # 其中「当前其他项目存在的tk」含 10 个真实天地图密钥,绝不可进公开仓库。
 docs/input/
+
+# 三维工具(3dtiles 转换器)
+# tools/ 编译好的 exe 与 60+ 个配套 DLL(106 MB),体积大且可重建,不进库。
+# tools_src/3dtiles 只入库我们改过的源码(src/ tests/ build.rs 等),
+# 构建产物与第三方大文件排除——入库它们会让仓库从 5 MB 膨胀到 1.3 GB,
+# 且二进制进 git 后永久留在历史里无法真正删除。
+tools/
+tools_src/3dtiles/target/
+tools_src/3dtiles/vcpkg_installed/
+tools_src/3dtiles/thirdparty/
+tools_src/3dtiles/geoids/
+tools_src/3dtiles/build_log.txt
