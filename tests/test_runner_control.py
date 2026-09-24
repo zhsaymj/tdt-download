@@ -33,6 +33,22 @@ class TestNoQueueDependency(unittest.TestCase):
                 f"{name} 仍在直接读 task_queue 单例,子进程中读不到主进程状态",
             )
 
+    def test_runners_have_no_task_queue_reference(self):
+        """模块级检查:三个 runner 的全局命名空间里不应有 task_queue。
+
+        比文本 grep 可靠 —— 改个属性名(如 task_queue._control.get)绕过文本
+        匹配也拦得住,且不会被注释/文档字符串里的同名字样误伤。
+        """
+        import backend.core.runner as r2d
+        import backend.core.runner_3d as r3d
+        import backend.core.runner_buildings as rb
+        for mod in (r2d, r3d, rb):
+            self.assertIsNone(
+                getattr(mod, "task_queue", None),
+                f"{mod.__name__} 的全局命名空间里仍有 task_queue,"
+                f"子进程中它是另一份副本,主进程的控制状态读不到",
+            )
+
 
 class TestHandleStopReason(unittest.TestCase):
     """_handle_stop 必须区分「暂停」与「取消」。

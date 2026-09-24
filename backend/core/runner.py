@@ -1,10 +1,11 @@
 """任务执行:阶段化管线(下载 → 合并 → 各切片格式),逐阶段上报进度。
 
-被 TaskQueue(或隔离 worker 进程)调用:async run_task(task_id, emit,
-should_stop)。
-emit(msg: dict) 把进度同步广播给 WebSocket 订阅者。
-should_stop() -> bool 由调用方注入:进程隔离后队列单例在子进程里是另一份副本,
-读不到主进程的控制标志,故不走全局单例而用注入的闭包。
+被 worker 进程(进程隔离后)或 TaskQueue(过渡期,见 queue.py 的临时兼容)调用:
+    async run_task(task_id, emit, should_stop)。
+emit(msg: dict) 把进度上报给 worker(再经队列回传主进程广播)。
+should_stop() -> "pause" | "cancel" | None:协作式停止检查,由调用方注入。
+返回真值即停止;"cancel" 表示取消,其余真值(含 bool-only 闭包)按暂停处理。
+不读 task_queue 单例:子进程里它是另一份副本,读不到主进程的控制状态。
 
 阶段模型(见 models.build_stage_defs 与 core.formats 注册表):
   影像:download → geotiff → tms → osm
