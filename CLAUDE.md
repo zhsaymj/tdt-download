@@ -43,9 +43,15 @@ python -m venv .venv
 任务生命周期串联在 `backend/core/` 下，理解这条链路是理解全项目的关键:
 
 1. **提交**(`api/tasks.py` → `models.create_task`):校验密钥/级别/范围 → `tiling.estimate_total_tiles` 预估瓦片数 → 按任务名 `reserve_output_dir` 锁定唯一输出目录 → 写库 → `task_queue.enqueue`。
-2. **排队**(`core/queue.py`):进程内单 worker 顺序消费任务队列，`TaskQueue` 是全局单例；任务内部再做瓦片级并发。暂停/取消通过 `_control` dict 协作式控制（`request_pause`/`request_cancel`/`control_of`）。
-3. **执行**(`core/runner.py::run_task`):逐级 `range_for_bbox` 计算瓦片区间 → `downloader.download_range` 并发下载 → `mosaic_to_geotiff` 拼接最大级别为 GeoTIFF → 可选 `clip_to_geometry` 裁剪、`reproject_geotiff` 重投影 → 可选 `export_tms` 导出 TMS 瓦片包。进度通过 `emit` 回调经队列广播给 WebSocket，限流 0.5s 落库一次。
-4. **进度推送**(`api/ws.py`):前端连 `/ws/progress`，订阅队列广播，收 `progress`/`task` 消息。
+2. **排队**(`core/queue.py` → `core/scheduler.py`):**任务在独立子进程中执行**，主进程只做调度。`queue.py` 现在只是兼容 shim，`task_queue` 是 `Scheduler` 单例；`Scheduler` 管 N 个常驻 worker 子进程（`worker.num_workers`，默认 1），无空闲 worker 时任务进 `_pending` 等待。暂停/取消走**每 worker 独立的信号队列**，精确投给跑该任务的 worker。
+3. **执行**(`core/worker.py::worker_main` → `core/runner.py::run_task`):worker 收到 `run` 消息 → `_resolve_runner` 按 provider 分发（`local_osgb`/`local_pointcloud` 走 `runner_3d`）→ 逐级 `range_for_bbox` 计算瓦片区间 → `downloader.download_range` 并发下载 → `mosaic_to_geotiff` 拼接最大级别为 GeoTIFF → 可选 `clip_to_geometry` 裁剪、`reproject_geotiff` 重投影 → 可选 `export_tms` 导出 TMS 瓦片包。进度通过 `emit` 回调投 `event_queue` 回传主进程广播，限流 0.5s 落库一次。
+4. **进度推送**(`api/ws.py`):前端连 `/ws/progress`，订阅 `Scheduler` 广播，收 `progress`/`task` 消息。
+
+> **为什么分进程**（勿轻易改回同进程）:GDAL 的 `build_overviews`/`reproject`/`clip` 会长时间持有 GIL（实测单次最长 9.5s），同进程内会饿死事件循环，导致任务运行期间**所有** HTTP 请求与 WebSocket 一起挂起。
+>
+> 两条硬约束:① 每个 worker 有 **control/signal 两条队列**，共用一个会让两个消费线程互相抢消息；② 信号必须由**独立线程**接收，任务线程阻塞在 `run_until_complete` 上时收不到。
+>
+> 相关测试:`tests/test_scheduler.py`、`tests/test_worker_dispatch.py`（含暂停生效的回归护栏）。
 
 ### 天地图瓦片坐标方案（易错点）
 

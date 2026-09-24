@@ -48,8 +48,8 @@ class ProcessorError(Exception):
 class ProcessorCancelled(Exception):
     """cancel_event 置位导致进程被终止(任务暂停/取消)。
 
-    约定:Task 8 的 runner_3d 捕获本异常后,按队列控制标志
-    (queue.control_of → "pause"/"cancel")转换为 runner_buildings._Stopped
+    约定:runner_3d 捕获本异常后,按注入的 should_stop() 返回的
+    控制原因("pause"/"cancel")转换为 runner_buildings._Stopped
     语义,由顶层落库为 paused/canceled。本层不直接区分暂停与取消。
     """
 
