@@ -6,16 +6,30 @@ signal_queues  收 pause/cancel(信号线程读)。
 两条分开是必须的:若共用一个队列,两个消费线程会互相抢走消息。
 """
 import asyncio
+import queue as queue_mod
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from backend.core.messages import ControlMessage
 from backend.core.scheduler import Scheduler
+
+
+class _FakeEventQueue:
+    """按序吐出预设消息,空了就抛 queue.Empty(替代 mp.Queue 做单测)。"""
+
+    def __init__(self, msgs):
+        self._msgs = list(msgs)
+
+    def get(self, block=True, timeout=None):
+        if self._msgs:
+            return self._msgs.pop(0)
+        raise queue_mod.Empty
 
 
 class TestSchedulerMessages(unittest.TestCase):
@@ -107,10 +121,186 @@ class TestSchedulerLifecycle(unittest.TestCase):
         s._control_queues = [MagicMock(), MagicMock()]
         s._signal_queues = [MagicMock(), MagicMock()]
 
-        s.shutdown()
+        asyncio.run(s.shutdown())
 
-        for q in s._control_queues:
+        for q in s._control_queues:      # 收尾后列表已清空,用原引用断言
             q.put.assert_called_with(ControlMessage.shutdown())
+
+    def test_shutdown_clears_pending_and_task_worker(self):
+        """关闭后不得残留「看起来还在排队」的假象,也不得再接受入队。"""
+        s = Scheduler(num_workers=1)
+        s._workers = [MagicMock()]
+        s._control_queues = [MagicMock()]
+        s._signal_queues = [MagicMock()]
+        s._idle = [0]
+        s._pending = ["t9"]
+        s._task_worker = {"t8": 0}
+
+        asyncio.run(s.shutdown())
+
+        self.assertEqual(s._pending, [])
+        self.assertEqual(s._task_worker, {})
+        # 关闭后入队应被明确拒绝(记日志),而不是进黑洞后静默不动
+        s._control_queues = [MagicMock()]
+        asyncio.run(s.enqueue("t10"))
+        s._control_queues[0].put.assert_not_called()
+
+    def test_shutdown_does_not_block_event_loop(self):
+        """收尾期间事件循环必须仍能跑别的协程。
+
+        Task 7 会把 shutdown 挂进 FastAPI lifespan:单个 worker 最多 join
+        timeout 秒(多 worker 就是 ×N),若同步收尾就会**阻塞事件循环**数十秒,
+        期间服务完全不响应、Ctrl-C 也拖着。
+        """
+        s = Scheduler(num_workers=1)
+        proc = MagicMock()
+        proc.is_alive.return_value = False
+        proc.join.side_effect = lambda timeout=None: time.sleep(0.4)
+        s._workers = [proc]
+        s._control_queues = [MagicMock()]
+        s._signal_queues = [MagicMock()]
+
+        async def scenario():
+            ticks = []
+
+            async def ticker():
+                while True:
+                    ticks.append(1)
+                    await asyncio.sleep(0.02)
+
+            t = asyncio.create_task(ticker())
+            await s.shutdown(timeout=0.4)
+            t.cancel()
+            return len(ticks)
+
+        ticks = asyncio.run(scenario())
+        self.assertGreater(
+            ticks, 3,
+            f"收尾期间事件循环几乎没转动(tick={ticks}):说明 join 阻塞了"
+            "事件循环,应放到 asyncio.to_thread 里执行。",
+        )
+
+    def test_start_is_idempotent(self):
+        """重复 start 不得再起 worker:否则 _idle 下标与实际进程错位,派发投错。"""
+        s = Scheduler(num_workers=2)
+        with patch("backend.core.scheduler.mp.Process") as proc_cls, \
+             patch("backend.core.scheduler.asyncio.create_task"):
+            s.start()
+            s.start()
+        self.assertEqual(proc_cls.call_count, 2, "第二次 start 不应再起进程")
+
+
+class TestSchedulerRobustness(unittest.TestCase):
+    """静默假死类缺陷的回归保护(评审 C1/C2/I1/I3)。"""
+
+    def _make(self, n=1):
+        s = Scheduler(num_workers=n)
+        s._workers = [MagicMock() for _ in range(n)]
+        s._control_queues = [MagicMock() for _ in range(n)]
+        s._signal_queues = [MagicMock() for _ in range(n)]
+        s._idle = list(range(n))
+        return s
+
+    def test_clear_control_does_not_drop_worker_slot(self):
+        """clear_control 后,任务的 finished 仍能把槽位还给调度器。
+
+        回归保护:api/tasks.py:760/828/867/977/1034 都是
+        clear_control → enqueue 的紧邻组合。若 clear_control 抹掉 _task_worker,
+        迟到的 finished 就找不到 owner(_handle_event 里 pop 得 None),槽位
+        永久丢失 → num_workers=1 时后续任务全部静默堆在 _pending。
+        """
+        s = self._make(1)
+        asyncio.run(s.enqueue("t1"))
+        self.assertEqual(s._idle, [])
+
+        s.clear_control("t1")            # 不应影响调度状态
+        asyncio.run(s._handle_event({"kind": "finished", "task_id": "t1"}))
+
+        self.assertEqual(s._idle, [0], "结束后槽位应归还")
+        s._control_queues[0].put.reset_mock()
+        asyncio.run(s.enqueue("t2"))
+        self.assertTrue(s._control_queues[0].put.called, "t2 应被正常派发")
+
+    def test_dead_worker_slot_is_reclaimed(self):
+        """worker 崩溃后槽位应回收,任务被交回调用方落库 failed(而非永久假死)。"""
+        s = self._make(1)
+        s._workers[0].is_alive.return_value = False
+        s._workers[0].exitcode = 1
+        asyncio.run(s.enqueue("t1"))
+        self.assertEqual(s._idle, [])
+
+        orphans = s._reap_dead_workers()
+
+        self.assertEqual(s._idle, [0], "死 worker 的槽位应回收")
+        self.assertNotIn("t1", s._task_worker)
+        self.assertEqual([tid for tid, _ in orphans], ["t1"],
+                         "崩溃 worker 上的任务应交回落库 failed")
+
+    def test_live_worker_is_not_reaped(self):
+        """活着(或从未启动)的 worker 不得被误判为崩溃。"""
+        s = self._make(1)
+        s._workers[0].is_alive.return_value = True
+        s._workers[0].exitcode = None
+        asyncio.run(s.enqueue("t1"))
+
+        self.assertEqual(s._reap_dead_workers(), [])
+        self.assertEqual(s._task_worker, {"t1": 0}, "在跑任务不得被误回收")
+
+    def test_orphan_task_lands_failed_and_broadcasts(self):
+        """孤儿任务必须落库 failed 并广播,否则任务永远 running、前端永久转圈。"""
+        s = self._make(1)
+        got = []
+
+        async def cb(msg):
+            got.append(msg)
+
+        s.subscribe(cb)
+        with patch("backend.models.update_task") as upd:
+            asyncio.run(s._fail_orphan("t1", "worker[0] 已退出,任务中断"))
+
+        upd.assert_called_once()
+        self.assertEqual(upd.call_args.kwargs["status"], "failed")
+        self.assertEqual([m["status"] for m in got], ["failed"])
+        self.assertEqual(got[0]["id"], "t1")
+
+    def test_malformed_events_do_not_kill_consumer(self):
+        """畸形事件不得杀死消费协程(否则进度/日志/广播全部静默停止)。"""
+        s = self._make(1)
+        s._event_queue = _FakeEventQueue([
+            {"kind": "finished"},          # 缺 task_id
+            {"kind": "event"},             # 缺 payload
+            {"kind": "log", "level": "INFO", "msg": "存活探针"},
+        ])
+
+        async def run_briefly():
+            task = asyncio.create_task(s._event_consumer())
+            await asyncio.sleep(0.6)
+            alive = not task.done()
+            task.cancel()
+            return alive
+
+        self.assertTrue(asyncio.run(run_briefly()),
+                        "畸形事件把消费协程杀死了:此后所有事件都无人处理")
+
+    def test_reemit_log_ignores_non_int_level(self):
+        """level 名撞上 logging 的非 int 属性时不得抛错(如 BASIC_FORMAT 是 str)。"""
+        from backend.core.scheduler import Scheduler as _S
+
+        s = _S(num_workers=1)
+        s._reemit_log({"level": "BASIC_FORMAT", "msg": "不该抛错"})
+
+    def test_enqueue_dedups_same_task(self):
+        """同一任务不得重复派发:两个 worker 并发执行会共写同一输出目录。"""
+        s = self._make(2)
+        asyncio.run(s.enqueue("t1"))
+        self.assertEqual(s._task_worker, {"t1": 0})
+
+        asyncio.run(s.enqueue("t1"))     # 前端双击
+        asyncio.run(s.enqueue("t1"))
+
+        self.assertEqual(s._pending, [], "重复入队不应堆积")
+        self.assertEqual(s._task_worker, {"t1": 0})
+        s._control_queues[1].put.assert_not_called()
 
 
 class TestEventConsumerDoesNotBlockExit(unittest.TestCase):
