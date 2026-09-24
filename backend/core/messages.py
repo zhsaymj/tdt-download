@@ -52,6 +52,8 @@ class EventMessage:
 def parse_control(msg: dict) -> tuple[str, dict]:
     """解析控制消息,返回 (kind, 剩余字段)。"""
     kind = msg.get("kind")
+    if kind is None:
+        raise ValueError("Missing 'kind' field in control message")
     if kind not in ("run", "pause", "cancel", "shutdown"):
         raise ValueError(f"Unknown control kind: {kind}")
     return kind, {k: v for k, v in msg.items() if k != "kind"}
@@ -60,6 +62,8 @@ def parse_control(msg: dict) -> tuple[str, dict]:
 def parse_event(msg: dict) -> tuple[str, dict]:
     """解析事件消息,返回 (kind, 剩余字段)。"""
     kind = msg.get("kind")
+    if kind is None:
+        raise ValueError("Missing 'kind' field in event message")
     if kind not in ("event", "log", "finished"):
         raise ValueError(f"Unknown event kind: {kind}")
     return kind, {k: v for k, v in msg.items() if k != "kind"}
