@@ -23,10 +23,18 @@ from rasterio.transform import from_origin
 from backend import db as db_module
 from backend.config import settings
 from backend.core.processors.base import ProcessorCancelled
-from backend.core.queue import TaskQueue, task_queue
 from backend.models import TaskCreate, create_task, get_task
 
 BBOX = [116.0, 39.0, 117.0, 40.0]
+
+#: 测试内的控制状态镜像(替代旧 task_queue._control)。
+#:
+#: 改造后控制标志在 **worker 子进程**里(worker.py 的 control_state),主进程的
+#: task_queue 已不再持有它 —— 旧 TaskQueue._control / control_of 随之删除。
+#: 本文件的用例都在主进程里直接跑 runner,故自带一份 dict 扮演 worker 的角色:
+#: 写入处相当于 worker 收到 pause/cancel 信号,should_stop 相当于 worker 交给
+#: runner 的那个读闭包。
+_control: dict[str, str] = {}
 
 
 class _TempDbCase(unittest.TestCase):
@@ -88,13 +96,13 @@ class Runner3dCase(_TempDbCase):
     def _run(self, task_id: str):
         from backend.core.runner_3d import run_task
 
-        # runner 现在要求注入 should_stop 闭包(Task 4)。本用例的控制通路就是
-        # task_queue(测试里 request_pause/request_cancel 写的就是它的 _control),
-        # 故按主进程内执行的方式包一个队列驱动的闭包传进去。返回值带 pause/cancel
-        # 原因,runner 才能把暂停与取消落成不同状态。
+        # runner 要求注入 should_stop 闭包(Task 4)。本用例的控制通路是模块级
+        # _control(测试里写它就相当于 worker 收到 pause/cancel 信号),故按
+        # worker 侧的方式包一个读闭包传进去。返回值带 pause/cancel 原因,
+        # runner 才能把暂停与取消落成不同状态。
         asyncio.run(run_task(
             task_id, lambda m: None,
-            lambda: task_queue.control_of(task_id)))
+            lambda: _control.get(task_id)))
 
     @staticmethod
     def _ok_result(*outputs: Path):
@@ -253,14 +261,14 @@ class Runner3dCase(_TempDbCase):
         )
 
         def fake_pipeline(**kwargs):
-            task_queue.request_pause(task_id)
+            _control[task_id] = "pause"
             raise ProcessorCancelled("pdal")
 
         p_dem.return_value.run_pipeline.side_effect = fake_pipeline
         try:
             self._run(task_id)
         finally:
-            task_queue._control.pop(task_id, None)
+            _control.pop(task_id, None)
 
         self.assertEqual(get_task(task_id)["status"], "paused")
 
@@ -724,8 +732,8 @@ class Runner3dCase(_TempDbCase):
     def _run_with_watcher(self, control: str):
         """watcher 开启下跑一个会阻塞在 cancel_event 上的 dsm 任务。
 
-        fake_pipeline 阻塞等 watcher 把队列控制标志桥接进 cancel_event;
-        另一线程在 pipeline 进入后 request_pause/request_cancel。
+        fake_pipeline 阻塞等 watcher 把控制标志桥接进 cancel_event;
+        另一线程在 pipeline 进入后往 _control 写 pause/cancel。
         """
         p_osgb, p_dem, p_py = self._patch_processors(enable_watcher=True)
         src = _mk_src(self.tmp)
@@ -753,10 +761,7 @@ class Runner3dCase(_TempDbCase):
 
         def _stop():
             if entered.wait(timeout=5.0):
-                if control == "pause":
-                    task_queue.request_pause(task_id)
-                else:
-                    task_queue.request_cancel(task_id)
+                _control[task_id] = control
 
         t = threading.Thread(target=_stop, daemon=True)
         t.start()
@@ -766,7 +771,7 @@ class Runner3dCase(_TempDbCase):
             # 0.5s 轮询,正常 1~2s 内响应;超时说明 watcher 通路断了
             self.assertLess(time.monotonic() - t0, 5.0)
         finally:
-            task_queue._control.pop(task_id, None)
+            _control.pop(task_id, None)
             t.join(timeout=6.0)
         return task_id
 
@@ -786,40 +791,10 @@ class Runner3dCase(_TempDbCase):
         self.assertNotIn(f"runner3d-watch-{task_id[:8]}", alive)
 
 
-class QueueDispatchCase(_TempDbCase):
-    """queue._resolve_runner 按 provider 字符串分发（分发即守卫）。"""
-
-    def test_resolve_runner_dispatches_by_provider(self):
-        tmp = Path(self._tmp.name)
-        sentinel = object()
-        q = TaskQueue()
-        q._runner = sentinel
-        osgb_id = create_task(
-            TaskCreate(
-                name="A",
-                provider="local_osgb",
-                bbox=BBOX,
-                source_path=str(tmp),
-            ),
-            total=0,
-        )
-        # 点云指向单 .las 文件：若不经分发会误入 runner.py 栅格管线
-        pc_id = create_task(
-            TaskCreate(
-                name="B",
-                provider="local_pointcloud",
-                bbox=BBOX,
-                source_path=str(tmp / "x.las"),
-            ),
-            total=0,
-        )
-        with mock.patch("backend.core.runner_3d.run_task") as m3d:
-            self.assertIs(q._resolve_runner(osgb_id), m3d)
-            self.assertIs(q._resolve_runner(pc_id), m3d)
-        with mock.patch(
-            "backend.models.get_task", return_value={"provider": "tianditu_img"}
-        ):
-            self.assertIs(q._resolve_runner("tid"), sentinel)
+# 原 QueueDispatchCase(queue._resolve_runner 按 provider 分发)已删除:
+# TaskQueue 与它的 _resolve_runner 在进程隔离改造中一并移除,分发逻辑迁到
+# worker.py::_resolve_runner,覆盖由 tests/test_worker_dispatch.py 的
+# TestWorkerDispatch 承接(同样是 3D 两个分支 + 非 3D 回落栅格 runner)。
 
 
 if __name__ == "__main__":
