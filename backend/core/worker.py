@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import traceback
 from multiprocessing import Queue
@@ -22,6 +23,8 @@ def worker_main(control_queue: Queue, event_queue: Queue, worker_id: str) -> Non
         event_queue: 发送事件消息的队列
         worker_id: worker 标识符
     """
+    _setup_worker_env(event_queue, worker_id)
+
     # 子进程需要创建新的事件循环
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -30,6 +33,19 @@ def worker_main(control_queue: Queue, event_queue: Queue, worker_id: str) -> Non
         _control_loop(control_queue, event_queue, worker_id, loop)
     finally:
         loop.close()
+
+
+def _setup_worker_env(event_queue: Queue, worker_id: str) -> None:
+    """worker 启动环境:日志改为转发到主进程。
+
+    必须在导入业务模块之前/之初调用:core.logs 导入时会给 tdt logger 挂
+    文件与环形 handler,子进程再挂一份会与主进程争抢同一个日志文件。
+    """
+    from .log_forwarder import install_forwarding
+    from .logs import logger
+
+    install_forwarding(logger, event_queue)
+    logger.info("worker[%s] 已启动,pid=%s", worker_id, os.getpid())
 
 
 def _control_loop(control_queue: Queue, event_queue: Queue,
@@ -70,7 +86,6 @@ def _control_loop(control_queue: Queue, event_queue: Queue,
 
         except Exception as e:
             # 消息解析或处理异常不应崩溃 worker
-            # TODO: Task 3 将添加日志转发
             error_msg = f"Worker error: {e}\n{traceback.format_exc()}"
             event_queue.put(EventMessage.log("error", error_msg, time.time()))
 
@@ -121,7 +136,6 @@ def _run_task(task_id: str, event_queue: Queue,
 
     except Exception as e:
         # 任务执行异常:记录日志,发送失败事件
-        # TODO: Task 3 将添加日志转发
         error_msg = f"Task {task_id} failed: {e}\n{traceback.format_exc()}"
         event_queue.put(EventMessage.log("error", error_msg, time.time()))
         event_queue.put(EventMessage.event({

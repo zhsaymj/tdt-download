@@ -142,5 +142,30 @@ class TestWorkerTaskExecution(unittest.TestCase):
         self.assertEqual(finished_msgs[0]["task_id"], "test-task")
 
 
+class TestWorkerLogging(unittest.TestCase):
+    def test_worker_log_forwarded_to_event_queue(self):
+        """worker 进程内写的日志会出现在 event_queue 里。"""
+        import multiprocessing as mp
+        from backend.core.worker import worker_main
+
+        control_q = mp.Queue()
+        event_q = mp.Queue()
+        control_q.put(ControlMessage.run("nonexistent-task"))
+        control_q.put(ControlMessage.shutdown())
+
+        proc = mp.Process(target=worker_main, args=(control_q, event_q, "w0"))
+        proc.start()
+        proc.join(timeout=15)
+
+        logs = []
+        while not event_q.empty():
+            m = event_q.get_nowait()
+            if m.get("kind") == "log":
+                logs.append(m)
+        self.assertTrue(any("worker" in m["msg"] or "not found" in m["msg"]
+                            for m in logs),
+                        f"应收到 worker 日志,实际:{logs}")
+
+
 if __name__ == "__main__":
     unittest.main()
