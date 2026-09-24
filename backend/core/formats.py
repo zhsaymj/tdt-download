@@ -430,6 +430,13 @@ def kind_of(provider: str) -> str:
     return PROVIDER_KIND.get(provider, DataKind.RASTER_IMAGE)
 
 
+#: 走三维管线(OSGB / 点云)的 provider:没有瓦片行列号,必须走 runner_3d。
+#: 集中定义,避免在 worker / queue 各自硬编码一份而漂移(漂移后果是静默错路由)。
+def is_3d_provider(provider: str) -> bool:
+    """该数据源是否走三维管线(runner_3d)。"""
+    return kind_of(provider) in (DataKind.MESH_OSGB, DataKind.POINT_CLOUD)
+
+
 def default_containers(kind: str) -> dict[str, str]:
     """每个阶段的默认容器(界面初始值与旧行为对齐:栅格默认 GTiff、矢量默认 GeoJSON)。"""
     out = {}

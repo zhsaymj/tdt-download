@@ -104,14 +104,17 @@ def _resolve_runner(task_id: str):
     local_osgb / local_pointcloud 没有瓦片行列号,必须走 runner_3d;不经分发
     会误入栅格管线(点云单文件恰好能通过 runner.py 的本地文件校验,后果更隐蔽)。
     建筑白模由 runner.run_task 内部自行转 runner_buildings,这里不单独分支。
-    规则与主进程 TaskQueue._resolve_runner 保持一致。
+    判定规则收敛在 formats.is_3d_provider,避免各处分头硬编码 provider 元组而漂移
+    (漂移后果是静默错路由)。
     """
+    from .formats import is_3d_provider
+
     task = get_task(task_id)
     if not task:
         raise TaskNotFoundError(f"任务不存在:{task_id}")
 
     provider = task.get("provider") or ""
-    if provider in ("local_osgb", "local_pointcloud"):
+    if is_3d_provider(provider):
         from .runner_3d import run_task as run_3d
         return run_3d
     from .runner import run_task as run_2d
