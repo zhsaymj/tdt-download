@@ -101,8 +101,13 @@ class TestWorkerTaskExecution(_LoggerSnapshotMixin, unittest.TestCase):
         # Mock 任务存在
         mock_get_task.return_value = {"id": "test-task", "name": "测试"}
 
-        # Mock run_task 调用 emit
-        async def fake_run(task_id, emit):
+        # Mock run_task 调用 emit。
+        # 参数个数必须与 worker 实际传给 runner 的一致:不匹配时 side_effect 抛
+        # TypeError,被 _run_task 的 except Exception 吞成「任务失败」事件——测试
+        # 照样绿,却根本没走到 emit 转发。Task 5 之前 worker 传 2 个
+        # (task_id, emit),Task 5 起补 should_stop 传 3 个;故 should_stop 给默认值
+        # 兼容两者,真正防漂移的是下面的 failed 事件断言。
+        async def fake_run(task_id, emit, should_stop=None):
             emit({"type": "progress", "id": task_id, "downloaded": 10})
 
         mock_run_task.side_effect = fake_run
@@ -119,6 +124,14 @@ class TestWorkerTaskExecution(_LoggerSnapshotMixin, unittest.TestCase):
         events = []
         while not event_q.empty():
             events.append(event_q.get())
+
+        # 不应出现失败事件:签名漂移导致的 TypeError 会被 except Exception 吞成
+        # 失败,若不在此处拦截,下面的断言会因为「拿到了空的 event_msgs」而失败得
+        # 莫名其妙,甚至(改成 assertGreater 之类宽松断言时)静默通过。
+        failed = [e for e in events
+                  if e["kind"] == "event"
+                  and e["payload"].get("status") == "failed"]
+        self.assertEqual(failed, [], f"任务不应失败:{failed}")
 
         # 应该有一个 event 消息包含我们的进度
         event_msgs = [e for e in events if e["kind"] == "event"]
@@ -137,7 +150,9 @@ class TestWorkerTaskExecution(_LoggerSnapshotMixin, unittest.TestCase):
 
         mock_get_task.return_value = {"id": "test-task", "name": "测试"}
 
-        async def fake_run(task_id, emit):
+        # 参数个数同 test_emit_forwards_to_event_queue:默认值兼容 Task 5 前后的
+        # 2/3 参数两种调用,防漂移靠下面的 failed 事件断言。
+        async def fake_run(task_id, emit, should_stop=None):
             pass  # 空任务
 
         mock_run_task.side_effect = fake_run
@@ -154,6 +169,12 @@ class TestWorkerTaskExecution(_LoggerSnapshotMixin, unittest.TestCase):
         events = []
         while not event_q.empty():
             events.append(event_q.get())
+
+        # 不应出现失败事件(签名不匹配的 TypeError 会被吞成失败,静默通过)
+        failed = [e for e in events
+                  if e["kind"] == "event"
+                  and e["payload"].get("status") == "failed"]
+        self.assertEqual(failed, [], f"任务不应失败:{failed}")
 
         # 应该有 finished 消息
         finished_msgs = [e for e in events if e["kind"] == "finished"]
