@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+import traceback
 from multiprocessing import Queue
 from typing import Callable
 
@@ -69,7 +71,8 @@ def _control_loop(control_queue: Queue, event_queue: Queue,
         except Exception as e:
             # 消息解析或处理异常不应崩溃 worker
             # TODO: Task 3 将添加日志转发
-            event_queue.put(EventMessage.log("error", f"Worker error: {e}", 0.0))
+            error_msg = f"Worker error: {e}\n{traceback.format_exc()}"
+            event_queue.put(EventMessage.log("error", error_msg, time.time()))
 
 
 def _run_task(task_id: str, event_queue: Queue,
@@ -93,7 +96,7 @@ def _run_task(task_id: str, event_queue: Queue,
     if task is None:
         # 不存在的任务:记录日志但不崩溃
         event_queue.put(EventMessage.log(
-            "warning", f"Task {task_id} not found in database", 0.0
+            "warning", f"Task {task_id} not found in database", time.time()
         ))
         event_queue.put(EventMessage.finished(task_id))
         return
@@ -119,9 +122,8 @@ def _run_task(task_id: str, event_queue: Queue,
     except Exception as e:
         # 任务执行异常:记录日志,发送失败事件
         # TODO: Task 3 将添加日志转发
-        event_queue.put(EventMessage.log(
-            "error", f"Task {task_id} failed: {e}", 0.0
-        ))
+        error_msg = f"Task {task_id} failed: {e}\n{traceback.format_exc()}"
+        event_queue.put(EventMessage.log("error", error_msg, time.time()))
         event_queue.put(EventMessage.event({
             "type": "task", "id": task_id,
             "status": "failed", "message": str(e)
