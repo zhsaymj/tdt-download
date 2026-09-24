@@ -39,9 +39,13 @@ class EventMessage:
         return {"kind": "event", "payload": payload}
 
     @staticmethod
-    def log(level: str, msg: str, ts: float) -> dict:
-        """日志转发。"""
-        return {"kind": "log", "level": level, "msg": msg, "ts": ts}
+    def log(level: str, msg: str, ts: float, worker_id: str = "") -> dict:
+        """日志转发。
+
+        worker_id 用于多 worker 时区分日志来源,默认空串以兼容单 worker 场景。
+        """
+        return {"kind": "log", "level": level, "msg": msg, "ts": ts,
+                "worker_id": worker_id}
 
     @staticmethod
     def finished(task_id: str) -> dict:

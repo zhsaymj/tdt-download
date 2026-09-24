@@ -13,18 +13,27 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from backend.core.messages import ControlMessage, EventMessage
 
 
-class TestWorkerBasics(unittest.TestCase):
-    """测试 worker 基本启动与关闭。"""
+class _LoggerSnapshotMixin:
+    """快照并还原全局 logger,供进程内直调 worker_main 的测试类复用。
+
+    进程内直接调 worker_main 会把全局 logger 的 handler 换成指向无人消费队列
+    的转发 handler,不还原会让本进程后续所有日志静默丢失。install_forwarding
+    还会 setLevel(INFO),故级别一并还原。
+    """
 
     def setUp(self):
         from backend.core.logs import logger
         self._saved_handlers = list(logger.handlers)
+        self._saved_level = logger.level
 
     def tearDown(self):
-        # 进程内直接调 worker_main 会把全局 logger 的 handler 换成指向无人消费
-        # 队列的转发 handler,不还原会让本进程后续所有日志静默丢失。
         from backend.core.logs import logger
         logger.handlers[:] = self._saved_handlers
+        logger.setLevel(self._saved_level)
+
+
+class TestWorkerBasics(_LoggerSnapshotMixin, unittest.TestCase):
+    """测试 worker 基本启动与关闭。"""
 
     def test_worker_can_import(self):
         """worker 模块可以导入。"""
@@ -53,17 +62,8 @@ class TestWorkerBasics(unittest.TestCase):
         self.assertTrue(control_q.empty())
 
 
-class TestWorkerTaskExecution(unittest.TestCase):
+class TestWorkerTaskExecution(_LoggerSnapshotMixin, unittest.TestCase):
     """测试 worker 任务执行逻辑。"""
-
-    def setUp(self):
-        from backend.core.logs import logger
-        self._saved_handlers = list(logger.handlers)
-
-    def tearDown(self):
-        # 同 TestWorkerBasics:还原被 worker_main 替换掉的全局 logger handler。
-        from backend.core.logs import logger
-        logger.handlers[:] = self._saved_handlers
 
     def test_nonexistent_task_sends_log_and_finished(self):
         """不存在的任务发送日志和 finished 事件。"""
@@ -175,18 +175,37 @@ class TestWorkerLogging(unittest.TestCase):
         proc = mp.Process(target=worker_main, args=(control_q, event_q, "w0"))
         proc.start()
         proc.join(timeout=15)
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(timeout=2)
+            self.fail("worker 子进程未在 15s 内退出")
 
         logs = []
         while not event_q.empty():
             m = event_q.get_nowait()
             if m.get("kind") == "log":
                 logs.append(m)
+
         # 精确匹配启动日志:不能用宽泛的 "worker" 子串 —— _control_loop 错误分支
         # 投的 traceback 里含路径 ...\backend\core\worker.py,会命中造成假阳性。
         self.assertTrue(
             any(m.get("level") == "INFO" and "已启动" in m["msg"] for m in logs),
             f"应收到 worker 启动日志,实际:{logs}",
         )
+        # 再校验一条业务日志:启动日志由 _setup_worker_env 直发,业务日志走
+        # get_task 分支。两者都断言,才能区分"转发没生效"与"消息没送达"。
+        self.assertTrue(
+            any("not found" in m["msg"] for m in logs),
+            f"应收到任务不存在日志,实际:{logs}",
+        )
+        # worker_id 透传:多 worker 时据此区分日志来源。
+        self.assertTrue(
+            all(m.get("worker_id") == "w0" for m in logs if m.get("msg")),
+            f"所有日志都应带 worker_id=w0,实际:{logs}",
+        )
+
+        control_q.close()
+        event_q.close()
 
 
 if __name__ == "__main__":

@@ -27,12 +27,25 @@ class TestMessages(unittest.TestCase):
         })
 
     def test_event_log_encode(self):
+        """省略 worker_id 时回落空串,兼容单 worker 场景。"""
         msg = EventMessage.log("INFO", "test message", 1234567890.0)
         self.assertEqual(msg, {
             "kind": "log",
             "level": "INFO",
             "msg": "test message",
-            "ts": 1234567890.0
+            "ts": 1234567890.0,
+            "worker_id": ""
+        })
+
+    def test_event_log_encode_with_worker_id(self):
+        """显式传 worker_id 时进入消息,供多 worker 区分日志来源。"""
+        msg = EventMessage.log("ERROR", "boom", 1.0, worker_id="w2")
+        self.assertEqual(msg, {
+            "kind": "log",
+            "level": "ERROR",
+            "msg": "boom",
+            "ts": 1.0,
+            "worker_id": "w2"
         })
 
     def test_event_finished_encode(self):

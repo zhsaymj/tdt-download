@@ -40,11 +40,17 @@ def _setup_worker_env(event_queue: Queue, worker_id: str) -> None:
 
     必须在导入业务模块之前/之初调用:core.logs 导入时会给 tdt logger 挂
     文件与环形 handler,子进程再挂一份会与主进程争抢同一个日志文件。
+
+    为何是这个顺序(先 import logger 再 install):logs._setup() 由 _tdt_ready
+    守卫,只在 logs 模块首次导入时执行。若反过来先 install,后续任一业务模块
+    首次 ``from .logs import logger`` 会触发 _setup() 把 RotatingFileHandler
+    重新挂上,转发静默失效且无任何报错。install_forwarding 内部现已自行 import
+    .logs 兜底,此处仍显式按序书写以免后人重排。
     """
     from .log_forwarder import install_forwarding
     from .logs import logger
 
-    install_forwarding(logger, event_queue)
+    install_forwarding(logger, event_queue, worker_id)
     logger.info("worker[%s] 已启动,pid=%s", worker_id, os.getpid())
 
 
@@ -74,7 +80,7 @@ def _control_loop(control_queue: Queue, event_queue: Queue,
                 task_id = fields["task_id"]
                 # 清除之前的控制状态(如果是恢复运行)
                 control_state.pop(task_id, None)
-                _run_task(task_id, event_queue, control_state, loop)
+                _run_task(task_id, event_queue, control_state, loop, worker_id)
 
             elif kind == "pause":
                 task_id = fields["task_id"]
@@ -86,13 +92,16 @@ def _control_loop(control_queue: Queue, event_queue: Queue,
 
         except Exception as e:
             # 消息解析或处理异常不应崩溃 worker
+            # 直发队列(不经 QueueLogHandler),故需显式带上 worker_id
             error_msg = f"Worker error: {e}\n{traceback.format_exc()}"
-            event_queue.put(EventMessage.log("error", error_msg, time.time()))
+            event_queue.put(EventMessage.log("error", error_msg, time.time(),
+                                             worker_id))
 
 
 def _run_task(task_id: str, event_queue: Queue,
               control_state: dict[str, str],
-              loop: asyncio.AbstractEventLoop) -> None:
+              loop: asyncio.AbstractEventLoop,
+              worker_id: str = "") -> None:
     """执行单个任务。
 
     Args:
@@ -100,6 +109,7 @@ def _run_task(task_id: str, event_queue: Queue,
         event_queue: 事件队列
         control_state: 控制状态镜像
         loop: 事件循环
+        worker_id: worker 标识符(直发日志时带上,便于多 worker 区分来源)
 
     注意：当前 control_state 与 should_stop 闭包已创建但未实际使用。
     现有 runner.py 直接调用 task_queue.control_of() 访问主进程单例。
@@ -109,9 +119,10 @@ def _run_task(task_id: str, event_queue: Queue,
     # 查询任务
     task = get_task(task_id)
     if task is None:
-        # 不存在的任务:记录日志但不崩溃
+        # 不存在的任务:记录日志但不崩溃(直发队列,显式带 worker_id)
         event_queue.put(EventMessage.log(
-            "warning", f"Task {task_id} not found in database", time.time()
+            "warning", f"Task {task_id} not found in database", time.time(),
+            worker_id,
         ))
         event_queue.put(EventMessage.finished(task_id))
         return
@@ -135,9 +146,10 @@ def _run_task(task_id: str, event_queue: Queue,
         loop.run_until_complete(run_task(task_id, emit))
 
     except Exception as e:
-        # 任务执行异常:记录日志,发送失败事件
+        # 任务执行异常:记录日志,发送失败事件(直发队列,显式带 worker_id)
         error_msg = f"Task {task_id} failed: {e}\n{traceback.format_exc()}"
-        event_queue.put(EventMessage.log("error", error_msg, time.time()))
+        event_queue.put(EventMessage.log("error", error_msg, time.time(),
+                                         worker_id))
         event_queue.put(EventMessage.event({
             "type": "task", "id": task_id,
             "status": "failed", "message": str(e)
