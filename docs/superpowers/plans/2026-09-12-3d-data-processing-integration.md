@@ -37,7 +37,7 @@
 - Modify: `config.example.yaml`
 - Test: `tests/test_tools_config.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 # tests/test_tools_config.py
@@ -52,7 +52,7 @@ class ToolsConfigTest(unittest.TestCase):
         self.assertEqual(cfg.tools.py3dtiles_python, "")
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 ```powershell
 .venv\Scripts\python.exe -m unittest tests.test_tools_config -v
@@ -60,7 +60,7 @@ class ToolsConfigTest(unittest.TestCase):
 
 Expected: FAIL（`load_config` 无 `tools` 属性 / 签名不符）
 
-- [ ] **Step 3: 在 backend/config.py 新增 ToolsConfig**
+- [x] **Step 3: 在 backend/config.py 新增 ToolsConfig**
 
 ```python
 @dataclass
@@ -73,7 +73,7 @@ class ToolsConfig:
 
 > 字段名不用 `3dtiles_exe` 是因为 Python 标识符不能数字开头。yaml 键与字段同名（`tools.tiles3d_exe` 等）。在 `Config` dataclass 加 `tools: ToolsConfig = field(default_factory=ToolsConfig)`，`_CONFIG_TEMPLATE` 补 `tools:` 段注释示例。
 
-- [ ] **Step 4: config.example.yaml 同步**
+- [x] **Step 4: config.example.yaml 同步**
 
 ```yaml
 tools:
@@ -82,11 +82,11 @@ tools:
   py3dtiles_python: ""   # 例如 tools/py3dtiles-venv/Scripts/python.exe
 ```
 
-- [ ] **Step 5: 新增诊断接口 `GET /api/tools/diagnose`**
+- [x] **Step 5: 新增诊断接口 `GET /api/tools/diagnose`**
 
 在 `backend/api/` 新路由（可挂到 `api/local.py` 或新建 `api/tools.py`）：逐项检查配置路径存在性 + `--version`/`-h` 试跑（超时 5s），返回 `{name: {configured, path, exists, runnable, version, error}}`。前端提交三维任务前调用。
 
-- [ ] **Step 6: 测试通过 + 诊断接口手工验证**
+- [x] **Step 6: 测试通过 + 诊断接口手工验证**
 
 ```powershell
 .venv\Scripts\python.exe -m unittest tests.test_tools_config -v
@@ -94,7 +94,7 @@ tools:
 # 浏览器/curl 访问 http://127.0.0.1:8000/api/tools/diagnose
 ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```powershell
 git add backend/config.py config.example.yaml backend/api/ tests/test_tools_config.py
@@ -109,7 +109,7 @@ git commit -m "feat: add tools config and diagnose endpoint for external 3D proc
 - Modify: `backend/core/formats.py`
 - Test: `tests/test_formats_3d.py`
 
-- [ ] **Step 1: 失败测试**
+- [x] **Step 1: 失败测试**
 
 ```python
 # tests/test_formats_3d.py
@@ -141,13 +141,13 @@ class Formats3DTest(unittest.TestCase):
         self.assertEqual(STAGES["tile_3d"].pipeline, "building")
 ```
 
-- [ ] **Step 2: 确认失败**
+- [x] **Step 2: 确认失败**
 
 ```powershell
 .venv\Scripts\python.exe -m unittest tests.test_formats_3d -v
 ```
 
-- [ ] **Step 3: formats.py 修改**
+- [x] **Step 3: formats.py 修改**
 
 - `DataKind` 新增：`MESH_OSGB = "mesh_osgb"`、`POINT_CLOUD = "point_cloud"`、`TILES_3D_MODEL = "tiles_3d_model"`、`TILES_3D_POINT = "tiles_3d_point"`。
 - 新增管线常量 `PIPE_3D = "3d"`。
@@ -160,13 +160,13 @@ class Formats3DTest(unittest.TestCase):
 - `PROVIDER_KIND` 新增：`"local_osgb": DataKind.MESH_OSGB`、`"local_pointcloud": DataKind.POINT_CLOUD`；`LOCAL_PROVIDERS` 追加二者。
 - `plan_stages()` 确认对新 provider 按 export 集合过滤即可，无需特判。
 
-- [ ] **Step 4: 测试通过**
+- [x] **Step 4: 测试通过**
 
 ```powershell
 .venv\Scripts\python.exe -m unittest tests.test_formats_3d tests.test_format_defaults -v
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add backend/core/formats.py tests/test_formats_3d.py
@@ -184,36 +184,36 @@ git commit -m "feat: register 3D data kinds, stages and local providers in forma
 - Modify: `backend/models.py`
 - Test: `tests/test_models_3d.py`
 
-- [ ] **Step 1: 失败测试**
+- [x] **Step 1: 失败测试**
 
 ```python
 # tests/test_models_3d.py
 # 验证 TaskCreate 接受 pc_crs/pc_resolution，create_task 落库后 _row_to_dict 可读回
 ```
 
-- [ ] **Step 2: 确认失败**
+- [x] **Step 2: 确认失败**
 
 ```powershell
 .venv\Scripts\python.exe -m unittest tests.test_models_3d -v
 ```
 
-- [ ] **Step 3: db.py 加迁移**
+- [x] **Step 3: db.py 加迁移**
 
 `_SCHEMA` 的 CREATE TABLE 与 `_MIGRATIONS` dict 同步加：
 - `pc_crs TEXT NOT NULL DEFAULT ''`（空=自动读 LAS 头；`local`=按本地坐标；否则为 EPSG 码）
 - `pc_resolution REAL NOT NULL DEFAULT 0`（0=自动）
 
-- [ ] **Step 4: models.py**
+- [x] **Step 4: models.py**
 
 `TaskCreate` 加同名可选字段；`create_task`/`update_task`/`_row_to_dict` 同步读写。`create_task` 中对 `local_osgb`/`local_pointcloud` provider 跳过 `estimate_total_tiles` 与级别校验（参考现有 local_image/local_dem 的处理分支，照抄其跳过逻辑）。
 
-- [ ] **Step 5: 测试通过（含旧库迁移用例：临时建一个无新列的 db，走 migrate 后列存在）**
+- [x] **Step 5: 测试通过（含旧库迁移用例：临时建一个无新列的 db，走 migrate 后列存在）**
 
 ```powershell
 .venv\Scripts\python.exe -m unittest tests.test_models_3d -v
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```powershell
 git add backend/db.py backend/models.py tests/test_models_3d.py
@@ -229,7 +229,7 @@ git commit -m "feat: add point-cloud task fields (pc_crs, pc_resolution) with db
 - Create: `backend/core/processors/base.py`
 - Test: `tests/test_processors_base.py`
 
-- [ ] **Step 1: 失败测试**
+- [x] **Step 1: 失败测试**
 
 ```python
 # tests/test_processors_base.py
@@ -238,13 +238,13 @@ git commit -m "feat: add point-cloud task fields (pc_crs, pc_resolution) with db
 # stdout 行回调能驱动进度解析。
 ```
 
-- [ ] **Step 2: 确认失败**
+- [x] **Step 2: 确认失败**
 
 ```powershell
 .venv\Scripts\python.exe -m unittest tests.test_processors_base -v
 ```
 
-- [ ] **Step 3: base.py 实现**
+- [x] **Step 3: base.py 实现**
 
 ```python
 class ProcessorError(Exception):
@@ -268,13 +268,13 @@ def run_cli(cmd, *, cwd=None, cancel_event=None, on_stdout_line=None,
 
 另定义 `BaseProcessor` 抽象：`name`、`check_available(cfg) -> (bool, msg)`、`build_cmd(...)`、`parse_progress(line) -> float|None`、`expected_outputs(out_dir) -> list[Path]`、`run(...)`。
 
-- [ ] **Step 4: 测试通过（用一个会打印进度的 python -c 假命令做替身）**
+- [x] **Step 4: 测试通过（用一个会打印进度的 python -c 假命令做替身）**
 
 ```powershell
 .venv\Scripts\python.exe -m unittest tests.test_processors_base -v
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add backend/core/processors tests/test_processors_base.py
@@ -289,7 +289,7 @@ git commit -m "feat: add processor adapter base with cancel-aware cli runner"
 - Create: `backend/core/processors/osgb_to_3dtiles.py`
 - Test: `tests/test_osgb_to_3dtiles.py`
 
-- [ ] **Step 1: 失败测试**
+- [x] **Step 1: 失败测试**
 
 命令构造与产物检测纯函数可测（不真跑 exe）：
 
@@ -305,29 +305,31 @@ def test_expected_outputs_requires_tileset():
     # 产物必须含 3dtiles/tileset.json 且至少一个 .b3dm，否则判失败
 ```
 
-> 注意：fanvanzh/3dtiles 实际参数为 `-i <osgb目录> -o <输出目录>`（以其 README 为准，实现时先 `-h` 确认再定稿命令构造）。metadata.xml 坐标处理：若输入目录含 `metadata.xml` 必须一并传入/保留在同目录（fanvanzh 会自动读取），adapter 的 `preflight()` 检查 metadata.xml 缺失时给中文警告（坐标可能按本地方处理）。
+> 注意：fanvanzh/3dtiles 实际参数为 `-i <osgb目录> -o <输出目录>`（以其 README 为准，实现时先 `-h` 确认再定稿命令构造）。metadata.xml 坐标处理：若输入目录含 `metadata.xml` 必须一并传入/保留在同目录（fanvanzh 会自动读取），adapter 的 `preflight()` 检查 metadata.xml 缺失时给中文警告（坐标可能按本地方处理）。实测（2026-09-13）命令定稿：`3dtile.exe -f osgb -i <输入目录> -o <输出目录>`；stdout 仅 INFO/ERROR 行无百分比，进度按产物 b3dm 计数兜底；整体 exit 0 时仍可能含单节点 `read node files ... fail` ERROR 行，由 runner_3d 扫描判失败。
 
-- [ ] **Step 2: 确认失败**
+- [x] **Step 2: 确认失败**
 
 ```powershell
 .venv\Scripts\python.exe -m unittest tests.test_osgb_to_3dtiles -v
 ```
 
-- [ ] **Step 3: 实现 adapter**
+- [x] **Step 3: 实现 adapter**
 
 `check_available`：路径存在 + `-h` 可跑。`parse_progress`：fanvanzh 输出 `converting x/y` 类行（实现时以真实输出正则为准，解析不到就按文件计数兜底：扫描 out_dir 下 b3dm 数量 / 预估总数）。`expected_outputs`：`{out}/tileset.json` 存在且非空、至少 1 个 `.b3dm`。
 
-- [ ] **Step 4: 测试通过**
+- [x] **Step 4: 测试通过**
 
 ```powershell
 .venv\Scripts\python.exe -m unittest tests.test_osgb_to_3dtiles -v
 ```
 
-- [ ] **Step 5: 真实样例手工验证（技术验证顺序第 1 步）**
+- [x] **Step 5: 真实样例手工验证（技术验证顺序第 1 步）**
 
 准备小型 OSGB 样例目录 → 配置 `tools.tiles3d_exe` → 手动调 adapter 跑出 `tileset.json` → 启动后端，在 PreviewApp 用现有 `Cesium3DTileset.fromUrl` 加载（可临时把产物拷到某个已完成建筑任务的 output 下验证，或等 Task 8 管线完成后走正式路径）。验证点：坐标不飘、高程正确、纹理不丢、加载流畅。
 
-- [ ] **Step 6: Commit**
+结果（2026-09-13）：通过。真实样例 Y:\怀化不动产项目\OSGB 子集走正式管线全链路验证，坐标（EPSG:4546 → ECEF，落点怀化）、纹理、加载均正常；详见 Task 12 Step 3 记录。
+
+- [x] **Step 6: Commit**
 
 ```powershell
 git add backend/core/processors/osgb_to_3dtiles.py tests/test_osgb_to_3dtiles.py
@@ -342,7 +344,7 @@ git commit -m "feat: add fanvanzh/3dtiles adapter for osgb to 3d tiles"
 - Create: `backend/core/processors/las_to_dem.py`
 - Test: `tests/test_las_to_dem.py`
 
-- [ ] **Step 1: 失败测试**
+- [x] **Step 1: 失败测试**
 
 ```python
 def test_build_pipeline_dsm():
@@ -355,13 +357,13 @@ def test_build_pipeline_dsm():
     assert d["pipeline"][-1]["type"] == "writers.gdal"
 ```
 
-- [ ] **Step 2: 确认失败**
+- [x] **Step 2: 确认失败**
 
 ```powershell
 .venv\Scripts\python.exe -m unittest tests.test_las_to_dem -v
 ```
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 - pipeline 生成：DSM = `readers.las` → `writers.gdal`（`output_type: max`, `resolution`, `nodata`, 可选 `filters.fillpings`/空洞填充）；DEM = `readers.las` → `filters.smrf`（地面分类）→ `filters.range`（Classification[2:2]）→ `writers.gdal`（`output_type: idw` 或 `mean`）。
   > 实施订正（Task 6 审查核实）：PDAL 无 `filters.fillpings`，不臆造；空洞填充后续可用 `writers.gdal` 的 `window_size`。
@@ -371,7 +373,7 @@ def test_build_pipeline_dsm():
 - `preflight`：`pdal info --summary` 读 LAS 头，返回点数/bbox/SRS 供提交前校验接口复用。
 - 产物检测：输出 tif 存在、非空、可被 rasterio 打开（环境已有 rasterio/GDAL）。
 
-- [ ] **Step 4: 测试通过**
+- [x] **Step 4: 测试通过**
 
 ```powershell
 .venv\Scripts\python.exe -m unittest tests.test_las_to_dem -v
@@ -381,7 +383,7 @@ def test_build_pipeline_dsm():
 
 小型 LAS/LAZ → 输出 DSM/DEM GeoTIFF → 走现有「本地 DEM 导入」流程（local_dem provider）验证 terrain/contour 阶段可用、坐标落点正确。
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```powershell
 git add backend/core/processors/las_to_dem.py tests/test_las_to_dem.py
@@ -396,12 +398,12 @@ git commit -m "feat: add PDAL pipeline adapter for las to dem/dsm geotiff"
 - Create: `backend/core/processors/las_to_3dtiles.py`
 - Test: `tests/test_las_to_3dtiles.py`
 
-- [ ] **Step 1: 失败测试**
+- [x] **Step 1: 失败测试**
 
 命令构造 + 产物检测（tileset.json + 至少一个 .pnts）。py3dtiles 通过 `tools.py3dtiles_python` 解释器调用：`python -m py3dtiles convert ...`（以其实际 CLI 为准，实现时先 `python -m py3dtiles -h` 确认）。
 > 实施订正（Task 7 spec 审查经上游 v12.1.1 源码核实）：包内无 `__main__.py`，正确形式是 `python -m py3dtiles.command_line convert <输入> --out <输出目录>`；另核实到两条必须带入 Task 8 的事实：①不传 `--srs_out 4978` 产物不重投影、Cesium 落点错误（缺 SRS 的 LAS 还需 `--srs_in`）——**Task 8 须把 `--srs_in/--srs_out 4978` 接到任务 pc_crs 字段**（三态语义参照 las_to_dem）；②py3dtiles 无增量续传、非空输出目录报 FileExistsError——**Task 8 重跑 pc_tile_3d 阶段前须清空阶段输出目录**。
 
-- [ ] **Step 2: 确认失败 → Step 3: 实现 → Step 4: 测试通过**
+- [x] **Step 2: 确认失败 → Step 3: 实现 → Step 4: 测试通过**
 
 进度解析：py3dtiles 按文件/点数打印，解析不到就按输出目录 pnts 计数兜底。颜色/分类字段保留为固定默认（一期不暴露参数）。
 
@@ -409,7 +411,7 @@ git commit -m "feat: add PDAL pipeline adapter for las to dem/dsm geotiff"
 
 同一点云分别转 3D Tiles，记录输出体积、加载速度、坐标落点、颜色/分类保留情况；若 py3dtiles 性能不可接受，登记 issue 备查 point-tiler/gocesiumtiler（二期替换 adapter 即可，管线不变）。
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```powershell
 git add backend/core/processors/las_to_3dtiles.py tests/test_las_to_3dtiles.py
@@ -425,17 +427,17 @@ git commit -m "feat: add py3dtiles adapter for las to 3d tiles"
 - Modify: `backend/core/queue.py`（按 provider 分发到 runner_3d，参考 runner_buildings 的接入方式）
 - Test: `tests/test_runner_3d.py`
 
-- [ ] **Step 1: 失败测试**
+- [x] **Step 1: 失败测试**
 
 mock 三个 processor，验证：local_osgb 任务只跑 convert_3d 阶段；local_pointcloud 按 export 集合跑 pc_dem/pc_dsm/pc_tile_3d；`_Stopped` 时落 paused；产物缺失时阶段 fail 且任务 failed。
 
-- [ ] **Step 2: 确认失败**
+- [x] **Step 2: 确认失败**
 
 ```powershell
 .venv\Scripts\python.exe -m unittest tests.test_runner_3d -v
 ```
 
-- [ ] **Step 3: 实现（仿 runner_buildings.py）**
+- [x] **Step 3: 实现（仿 runner_buildings.py）**
 
 - 成果命名函数集中：`tiles3d_output(task)` → `output/{name}/3dtiles/tileset.json`；`dem_output(task)` → `{name}_dem.tif`；`dsm_output(task)` → `{name}_dsm.tif`。
 - 每阶段：`stage.start` → preflight（工具可用性/输入存在性，失败给中文错误）→ adapter.run（cancel_event 接队列 `control_of`）→ 产物检测 → `stage.finish`。
@@ -443,13 +445,13 @@ mock 三个 processor，验证：local_osgb 任务只跑 convert_3d 阶段；loc
 - 输入为目录的点云：runner 负责枚举 `*.las/*.laz` 列表，逐文件处理（多文件 DEM 时先各自栅格化再 rasterio merge，或 merge 到同一 writers.gdal——实现时以 PDAL 多输入支持为准）。
 - queue.py 分发：`provider in ("local_osgb", "local_pointcloud")` → `runner_3d.run_task`。
 
-- [ ] **Step 4: 测试通过**
+- [x] **Step 4: 测试通过**
 
 ```powershell
 .venv\Scripts\python.exe -m unittest tests.test_runner_3d -v
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add backend/core/runner_3d.py backend/core/queue.py tests/test_runner_3d.py
@@ -603,13 +605,16 @@ cd frontendvue; node --test src/; npm run build
 
 实际命令用 `node --test "src/**/*.test.js"`（Node 24 目录直参误报，见执行注意）。结果：前端 73/73、build 通过。
 
-- [ ] **Step 3: 端到端真实样例（按技术验证顺序）**（阻塞：`tools/` 目录尚不存在，外部工具二进制与 OSGB/LAS 样例数据待提供）
+- [ ] **Step 3: 端到端真实样例（按技术验证顺序）**（OSGB 链路 2026-09-13 已验证；LAS/LAZ 样例与 PDAL/py3dtiles 工具待提供）
 
-1. OSGB 小样例：提交 local_osgb 任务 → tile_3d 阶段完成 → 任务卡片点预览 → Cesium 加载 tileset.json，核对坐标/高程/纹理。
-2. LAS/LAZ 小样例：提交 local_pointcloud（DSM+DEM）→ 产物 `{name}_dsm.tif`/`{name}_dem.tif` 可下载 → 用「本地 DEM 导入」接力验证 terrain/contour。
-3. 同点云：提交 local_pointcloud（3D Tiles）→ Cesium 加载，记录体积/加载速度/颜色分类保留；不达标则登记 point-tiler 备选。
-4. 长任务：验证进度推进、暂停、取消、失败重跑（删除任务不清缓存语义沿用）、服务重启后 paused 任务可恢复。
-5. 错误路径：未配置工具路径、OSGB 缺 metadata.xml、LAS 缺 CRS、磁盘空间不足（可 mock）——均给出明确中文错误。
+1. [x] OSGB（2026-09-13，样例 Y:\怀化不动产项目\OSGB，Smart3D 标准结构，metadata.xml SRS=EPSG:4546）：
+   - 子集（2 Tile 拷至 `data\test_osgb_sample`）：API 建 local_osgb 任务（**export 必须传 "tile_3d"**，默认 "geotiff" 对 MESH_OSGB 映射为空阶段）→ convert_3d 100%（118 节点）→ 产物根/子 tileset.json + 52 b3dm → layers 接口 preview3d url → tileset.json HTTP 200（ECEF 落点怀化）→ Cesium 预览页 Playwright 实测渲染 PASS（截图 `data\preview_subset.png`）。
+   - 全量（384 Tile / 16.1GB / 51537 节点 / 409s）：进度推送、速率、ETA 正常；fanvanzh exit 0 但 13 行 ERROR（源数据缺陷：61/384 Tile 共 13468 个被父节点引用的 osgb 磁盘缺失，ContextCapture 悬空引用，实测 `Tile_+066_+054_L25_00031100.osgb` 不存在）→ runner_3d 错误行扫描按设计判 failed，38069 个 b3dm 产物保留在盘；部分产物经独立 Cesium 页实测可渲染，缺失瓦片 404 优雅降级（截图 `data\preview_partial_cesium.png`）。
+   - 失败语义（少量源节点缺失时是否容忍判成功）已向用户提问，用户暂未决策，维持现状「严格失败」。
+2. [ ] LAS/LAZ 小样例：提交 local_pointcloud（DSM+DEM）→ 产物 `{name}_dsm.tif`/`{name}_dem.tif` 可下载 → 用「本地 DEM 导入」接力验证 terrain/contour。（待样例与 PDAL 工具）
+3. [ ] 同点云：提交 local_pointcloud（3D Tiles）→ Cesium 加载，记录体积/加载速度/颜色分类保留；不达标则登记 point-tiler 备选。（待样例与 py3dtiles 工具）
+4. [x] 长任务：全量 409s 任务实测进度推进与 0.5s 限流落库正常；失败任务产物保留、UI 仅「删除并重试」语义生效；暂停/取消与服务重启 paused 恢复由单测覆盖。
+5. [x] 错误路径：工具未配置（诊断接口实测）、OSGB 缺 metadata.xml、LAS 缺 CRS、磁盘空间不足（mock）均有单测覆盖；源数据节点缺失路径本次实测命中，任务错误信息含首个失败样例。
 
 - [x] **Step 4: 更新 CLAUDE.md 架构要点（三维管线一段：runner_3d + processors + tools 配置约定）**
 
