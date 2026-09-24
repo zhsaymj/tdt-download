@@ -1,7 +1,10 @@
 """任务执行:阶段化管线(下载 → 合并 → 各切片格式),逐阶段上报进度。
 
-被 TaskQueue 调用:async run_task(task_id, emit)。
+被 TaskQueue(或隔离 worker 进程)调用:async run_task(task_id, emit,
+should_stop)。
 emit(msg: dict) 把进度同步广播给 WebSocket 订阅者。
+should_stop() -> bool 由调用方注入:进程隔离后队列单例在子进程里是另一份副本,
+读不到主进程的控制标志,故不走全局单例而用注入的闭包。
 
 阶段模型(见 models.build_stage_defs 与 core.formats 注册表):
   影像:download → geotiff → tms → osm
@@ -38,7 +41,6 @@ from .mosaic import mosaic_to_geotiff
 from .osm import export_osm
 from .postprocess import clip_to_geometry, crop_to_bbox, reproject_geotiff
 from .progress import StageTracker
-from .queue import task_queue
 from .terrain_tiles import export_terrain, level_for_resolution, write_layer_json
 from .token_pool import token_pool
 from .tms import (export_tms, export_tms_from_source, source_tms_level_plan,
@@ -71,7 +73,14 @@ def _safe_unlink(p: Path, retries: int = 5, delay: float = 0.3) -> None:
     logger.warning("临时文件暂时无法删除(将于下次清理):%s", p)
 
 
-async def run_task(task_id: str, emit) -> None:
+async def run_task(task_id: str, emit, should_stop) -> None:
+    """执行任务。
+
+    should_stop():协作式停止检查,由调用方注入(worker 进程传入本地控制镜像;
+    测试可传 lambda: False)。返回**真值**即需停止(所有下游消费点都按真值判断),
+    其中返回 "cancel" 表示取消,其余真值(如 "pause"、True)一律按暂停处理
+    —— 见 _handle_stop 的说明。
+    """
     task = get_task(task_id)
     if not task:
         return
@@ -79,7 +88,7 @@ async def run_task(task_id: str, emit) -> None:
     # 三维建筑白模走独立管线(数据是矢量要素集,无瓦片行列号,不复用下载器/拼接)
     if is_building_provider(task["provider"]):
         from .runner_buildings import run_buildings_task
-        return await run_buildings_task(task_id, emit)
+        return await run_buildings_task(task_id, emit, should_stop)
 
     # 本地文件源:不联网、不需要密钥,数据已在用户磁盘上
     local_src = None
@@ -148,9 +157,6 @@ async def run_task(task_id: str, emit) -> None:
     downloaded = task.get("downloaded", 0)
     failed = task.get("failed", 0)
 
-    def should_stop() -> bool:
-        return task_queue.control_of(task_id) in ("pause", "cancel")
-
     # ---------- 阶段 1:下载原始瓦片 ----------
     # 本地文件源没有 download 阶段(见 models.build_stage_defs);is_done() 对
     # 不存在的阶段返回 False,故要先确认该阶段确实在阶段表里,否则会误入下载分支。
@@ -192,7 +198,8 @@ async def run_task(task_id: str, emit) -> None:
                     break
 
         if stopped:
-            return _handle_stop(task_id, tracker, "download", downloaded, failed, total, emit)
+            return _handle_stop(task_id, tracker, "download", downloaded,
+                                failed, total, emit, should_stop)
 
         update_task(task_id, downloaded=downloaded, failed=failed)
         tracker.finish("download", message=f"{downloaded}/{total}"
@@ -253,7 +260,8 @@ async def run_task(task_id: str, emit) -> None:
                         [Path(p).name for p in (produced or [])])
         except _Stopped:
             logger.info("任务[%s] 阶段[%s] 被暂停/取消", task["name"], label)
-            return _handle_stop(task_id, tracker, key, downloaded, failed, total, emit)
+            return _handle_stop(task_id, tracker, key, downloaded, failed,
+                                total, emit, should_stop)
         except Exception as e:  # 单阶段失败不阻断其他独立阶段
             any_failed = True
             tracker.fail(key, message=str(e)[:200])
@@ -299,9 +307,17 @@ async def run_task(task_id: str, emit) -> None:
               "message": msg, "output_path": str(out_dir), "outputs": outputs})
 
 
-def _handle_stop(task_id, tracker, key, downloaded, failed, total, emit):
-    """暂停/取消:把当前阶段标记为对应状态,落库任务状态后返回。"""
-    ctrl = task_queue.control_of(task_id)
+def _handle_stop(task_id, tracker, key, downloaded, failed, total, emit,
+                 should_stop):
+    """暂停/取消:把当前阶段标记为对应状态,落库任务状态后返回。
+
+    停止原因取自 should_stop() 的**返回值**:返回 "cancel" 才是取消,返回
+    "pause" 或纯 True(bool-only 闭包区分不了两者)一律按暂停落库。不能只看
+    真假——暂停与取消都会让 should_stop() 为真,一律按取消落库会让用户点了
+    「暂停」(接口已回「已暂停」)却看到「已取消」,误以为任务被丢弃。
+    暂停是可恢复的一侧,拿不准时按它落库更安全。
+    """
+    ctrl = "cancel" if should_stop() == "cancel" else "pause"
     if ctrl == "cancel":
         tracker.pause(key, message="已取消")
         update_task(task_id, downloaded=downloaded, failed=failed,

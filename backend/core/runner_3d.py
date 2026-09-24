@@ -50,7 +50,6 @@ from .processors.las_to_3dtiles import LasTo3dTiles
 from .processors.las_to_dem import LasToDem
 from .processors.osgb_to_3dtiles import OsgbTo3dTiles
 from .progress import StageTracker
-from .queue import task_queue
 
 # watcher/poll 等后台线程总开关;测试置 False 后用 ProcessorCancelled
 # 确定性模拟取消,避免线程竞态。
@@ -414,8 +413,14 @@ class _Ctx:
         self.__dict__.update(kw)
 
 
-async def run_task(task_id: str, emit) -> None:
-    """三维数据处理任务主流程。由 queue 按 provider 分发进来。"""
+async def run_task(task_id: str, emit, should_stop) -> None:
+    """三维数据处理任务主流程。由 queue 按 provider 分发进来。
+
+    should_stop():协作式停止检查,由调用方注入(worker 进程传入本地控制镜像;
+    测试可传 lambda: False)。返回真值即需停止,返回 "cancel" 表示取消,
+    其余真值按暂停处理。不再读 task_queue 单例——进程隔离后子进程里的单例
+    是另一份副本,读不到主进程的 pause/cancel。
+    """
     task = get_task(task_id)
     if not task:
         return
@@ -425,9 +430,6 @@ async def run_task(task_id: str, emit) -> None:
 
     tracker = StageTracker(task_id, task.get("stages") or [], emit,
                            task_name=task.get("name") or task_id)
-
-    def should_stop() -> bool:
-        return task_queue.control_of(task_id) in ("pause", "cancel")
 
     # BaseProcessor.run 只认 threading.Event;watcher 线程把队列控制标志
     # 桥接给它(测试关掉 _ENABLE_WATCHER 后用 ProcessorCancelled 模拟)。
@@ -476,7 +478,7 @@ async def run_task(task_id: str, emit) -> None:
             except (_Stopped, InterruptedError, ProcessorCancelled):
                 # ProcessorCancelled 来自适配层对 cancel_event 的响应,语义同 _Stopped
                 logger.info("任务[%s] 阶段[%s] 被暂停/取消", task["name"], label)
-                return _handle_stop(task_id, tracker, key, emit)
+                return _handle_stop(task_id, tracker, key, emit, should_stop)
             except Exception as e:
                 any_failed = True
                 tracker.fail(key, message=str(e)[:200])
@@ -517,8 +519,13 @@ async def run_task(task_id: str, emit) -> None:
             watcher.join(timeout=2)
 
 
-def _handle_stop(task_id, tracker, key, emit):
-    ctrl = task_queue.control_of(task_id)
+def _handle_stop(task_id, tracker, key, emit, should_stop):
+    """暂停/取消:标记当前阶段并落库任务状态。
+
+    should_stop() 返回 "cancel" 才是取消,返回 "pause" 或纯 True 一律按暂停
+    落库(见 runner._handle_stop 的说明:只看真假会把暂停误报成「已取消」)。
+    """
+    ctrl = "cancel" if should_stop() == "cancel" else "pause"
     if ctrl == "cancel":
         tracker.pause(key, message="已取消")
         update_task(task_id, status="canceled", message="已取消")

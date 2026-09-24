@@ -35,7 +35,6 @@ from .dem_tiling import mercator_range_for_bbox
 from .downloader import TileDownloader
 from .logs import logger
 from .progress import StageTracker
-from .queue import task_queue
 from .tileset3d import export_tileset
 
 # 底面高采样用 DEM 的级别选取:建筑定位不需要高精度地形,
@@ -554,8 +553,14 @@ class _Ctx:
         self.__dict__.update(kw)
 
 
-async def run_buildings_task(task_id: str, emit) -> None:
-    """三维建筑白模任务主流程。由 runner.run_task 分派进来。"""
+async def run_buildings_task(task_id: str, emit, should_stop) -> None:
+    """三维建筑白模任务主流程。由 runner.run_task 分派进来。
+
+    should_stop():协作式停止检查,由调用方注入(worker 进程传入本地控制镜像;
+    测试可传 lambda: False)。返回真值即需停止,返回 "cancel" 表示取消,
+    其余真值按暂停处理。不再读 task_queue 单例——进程隔离后子进程里的单例
+    是另一份副本,读不到主进程的 pause/cancel。
+    """
     import asyncio
 
     task = get_task(task_id)
@@ -604,9 +609,6 @@ async def run_buildings_task(task_id: str, emit) -> None:
     tracker = StageTracker(task_id, task.get("stages") or [], emit,
                            task_name=task.get("name") or task_id)
 
-    def should_stop() -> bool:
-        return task_queue.control_of(task_id) in ("pause", "cancel")
-
     ctx = _Ctx(task=task, source=source, out_dir=out_dir,
                bbox=(west, south, east, north), tracker=tracker,
                should_stop=should_stop, stats=None)
@@ -638,7 +640,7 @@ async def run_buildings_task(task_id: str, emit) -> None:
             # InterruptedError 来自数据源内部对取消标志的响应(Overpass 重试间隙、
             # Overture 的 DuckDB interrupt),语义同 _Stopped
             logger.info("任务[%s] 阶段[%s] 被暂停/取消", task["name"], label)
-            return _handle_stop(task_id, tracker, key, emit)
+            return _handle_stop(task_id, tracker, key, emit, should_stop)
         except Exception as e:
             any_failed = True
             tracker.fail(key, message=str(e)[:200])
@@ -673,8 +675,13 @@ async def run_buildings_task(task_id: str, emit) -> None:
                 "有阶段失败" if any_failed else "成功")
 
 
-def _handle_stop(task_id, tracker, key, emit):
-    ctrl = task_queue.control_of(task_id)
+def _handle_stop(task_id, tracker, key, emit, should_stop):
+    """暂停/取消:标记当前阶段并落库任务状态。
+
+    should_stop() 返回 "cancel" 才是取消,返回 "pause" 或纯 True 一律按暂停
+    落库(见 runner._handle_stop 的说明:只看真假会把暂停误报成「已取消」)。
+    """
+    ctrl = "cancel" if should_stop() == "cancel" else "pause"
     if ctrl == "cancel":
         tracker.pause(key, message="已取消")
         update_task(task_id, status="canceled", message="已取消")

@@ -17,12 +17,13 @@ class TaskQueue:
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._subscribers: set[Subscriber] = set()
         self._worker: asyncio.Task | None = None
-        self._runner: Callable[[str, Callable[[dict], None]], Awaitable[None]] | None = None
+        # runner 签名:async runner(task_id, emit, should_stop)
+        self._runner: Callable[..., Awaitable[None]] | None = None
         # 运行中任务的协作控制:task_id -> 'pause' | 'cancel'
         self._control: dict[str, str] = {}
 
     def set_runner(self, runner):
-        """注册任务执行函数:async runner(task_id, emit)。"""
+        """注册任务执行函数:async runner(task_id, emit, should_stop)。"""
         self._runner = runner
 
     def _resolve_runner(self, task_id: str):
@@ -100,7 +101,16 @@ class TaskQueue:
                 def emit(msg: dict, _loop=loop):
                     asyncio.run_coroutine_threadsafe(self._broadcast(msg), _loop)
 
-                await runner(task_id, emit)
+                # 临时兼容(Task 6/7 会随 TaskQueue→Scheduler 替换一并移除):
+                # runner 已改为要求注入 should_stop 闭包(进程隔离后子进程里的
+                # task_queue 是另一份副本,读不到主进程控制标志)。主进程内队列
+                # 就地执行时,把本实例的控制状态包成闭包传进去即可。
+                # 闭包回传 "pause"/"cancel" 原因而不只是 bool,runner 的
+                # _handle_stop 才能把两者落成不同状态(取消→canceled)。
+                def should_stop(_id=task_id):
+                    return self._control.get(_id)
+
+                await runner(task_id, emit, should_stop)
             except Exception as e:  # 单个任务失败不拖垮 worker
                 try:
                     from .logs import logger

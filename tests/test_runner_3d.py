@@ -88,7 +88,13 @@ class Runner3dCase(_TempDbCase):
     def _run(self, task_id: str):
         from backend.core.runner_3d import run_task
 
-        asyncio.run(run_task(task_id, lambda m: None))
+        # runner 现在要求注入 should_stop 闭包(Task 4)。本用例的控制通路就是
+        # task_queue(测试里 request_pause/request_cancel 写的就是它的 _control),
+        # 故按主进程内执行的方式包一个队列驱动的闭包传进去。返回值带 pause/cancel
+        # 原因,runner 才能把暂停与取消落成不同状态。
+        asyncio.run(run_task(
+            task_id, lambda m: None,
+            lambda: task_queue.control_of(task_id)))
 
     @staticmethod
     def _ok_result(*outputs: Path):
