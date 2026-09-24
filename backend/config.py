@@ -96,10 +96,10 @@ class WorkerConfig:
     """worker 进程池配置。
 
     num_workers 是能**同时执行**的任务数。单个任务内部已有瓦片级并发,
-    故默认 1 已能跑满磁盘/网络;调大可并行跑多个任务,代价是内存占用
-    与磁盘 I/O 竞争(每个常驻 worker 约 60MB)。
+    默认 2 可并行跑两个任务;代价是内存(每个常驻 worker 约 60MB)与
+    磁盘 I/O 竞争 —— 大范围任务同时跑会加速磁盘消耗。
     """
-    num_workers: int = 1
+    num_workers: int = 2
 
 
 @dataclass

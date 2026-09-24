@@ -8,7 +8,7 @@ from __future__ import annotations
 from ..config import settings
 from .scheduler import Scheduler
 
-#: 全局调度器单例。worker 数取 config.yaml 的 worker.num_workers(默认 1)。
+#: 全局调度器单例。worker 数取 config.yaml 的 worker.num_workers(默认 2)。
 task_queue = Scheduler(num_workers=settings.worker.num_workers)
 
 __all__ = ["Scheduler", "task_queue"]
