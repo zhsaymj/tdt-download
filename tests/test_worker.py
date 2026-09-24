@@ -16,6 +16,16 @@ from backend.core.messages import ControlMessage, EventMessage
 class TestWorkerBasics(unittest.TestCase):
     """测试 worker 基本启动与关闭。"""
 
+    def setUp(self):
+        from backend.core.logs import logger
+        self._saved_handlers = list(logger.handlers)
+
+    def tearDown(self):
+        # 进程内直接调 worker_main 会把全局 logger 的 handler 换成指向无人消费
+        # 队列的转发 handler,不还原会让本进程后续所有日志静默丢失。
+        from backend.core.logs import logger
+        logger.handlers[:] = self._saved_handlers
+
     def test_worker_can_import(self):
         """worker 模块可以导入。"""
         from backend.core import worker
@@ -45,6 +55,15 @@ class TestWorkerBasics(unittest.TestCase):
 
 class TestWorkerTaskExecution(unittest.TestCase):
     """测试 worker 任务执行逻辑。"""
+
+    def setUp(self):
+        from backend.core.logs import logger
+        self._saved_handlers = list(logger.handlers)
+
+    def tearDown(self):
+        # 同 TestWorkerBasics:还原被 worker_main 替换掉的全局 logger handler。
+        from backend.core.logs import logger
+        logger.handlers[:] = self._saved_handlers
 
     def test_nonexistent_task_sends_log_and_finished(self):
         """不存在的任务发送日志和 finished 事件。"""
@@ -162,9 +181,12 @@ class TestWorkerLogging(unittest.TestCase):
             m = event_q.get_nowait()
             if m.get("kind") == "log":
                 logs.append(m)
-        self.assertTrue(any("worker" in m["msg"] or "not found" in m["msg"]
-                            for m in logs),
-                        f"应收到 worker 日志,实际:{logs}")
+        # 精确匹配启动日志:不能用宽泛的 "worker" 子串 —— _control_loop 错误分支
+        # 投的 traceback 里含路径 ...\backend\core\worker.py,会命中造成假阳性。
+        self.assertTrue(
+            any(m.get("level") == "INFO" and "已启动" in m["msg"] for m in logs),
+            f"应收到 worker 启动日志,实际:{logs}",
+        )
 
 
 if __name__ == "__main__":

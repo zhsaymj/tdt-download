@@ -35,6 +35,9 @@ def install_forwarding(logger: logging.Logger, event_queue: Queue) -> None:
 
     必须在 worker 子进程启动后立即调用,早于任何业务日志产生。
     """
+    # 直接 clear 而不逐个 close():引用计数会立即回收并关闭文件句柄(无泄漏,
+    # 仅 GC 时有一条 ResourceWarning)。不显式 close 是因为调用方(如测试)可能
+    # 需要保存并还原 handler 列表,close 会让还原出来的是已关闭的 handler。
     logger.handlers.clear()
     logger.addHandler(QueueLogHandler(event_queue))
     logger.setLevel(logging.INFO)
