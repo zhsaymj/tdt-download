@@ -218,6 +218,10 @@ def _scan_one_dir(d: Path, rel: str, tree: _Tree) -> list[Candidate]:
     for f in tree.children.get(d, []):
         if f.name != "tileset.json":
             continue
+        if (d.parent.name == "Data" and d.name.startswith("Tile_")
+                and (d.parent.parent / "tileset.json").is_file()
+                and d != tree.root):
+            continue
         b, approx = _meta_bounds(out_dir, tileset=f)
         out.append(Candidate(
             kind=KIND_MODEL, root=str(d.resolve()),

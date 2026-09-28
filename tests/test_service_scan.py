@@ -23,6 +23,18 @@ class ScanDirTest(unittest.TestCase):
             self.assertEqual(got[0].kind, "model")
             self.assertEqual(got[0].entry, "tileset.json")
 
+    def test_ignores_external_tile_tilesets_under_model_root(self):
+        with TemporaryDirectory() as d:
+            root = Path(d) / "3dtiles"
+            _touch(root / "tileset.json", b'{"root":{}}')
+            for name in ("Tile_001", "Tile_002"):
+                _touch(root / "Data" / name / "tileset.json", b'{"root":{}}')
+            got = scan_dir(root)
+            self.assertEqual(len(got), 1)
+            self.assertEqual(Path(got[0].root), root.resolve())
+            tile_only = scan_dir(root / "Data" / "Tile_001")
+            self.assertEqual(len(tile_only), 1)
+
     def test_detects_terrain(self):
         with TemporaryDirectory() as d:
             p = Path(d)
