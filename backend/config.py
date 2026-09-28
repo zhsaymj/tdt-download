@@ -103,6 +103,52 @@ class WorkerConfig:
 
 
 @dataclass
+class GoogleConfig:
+    """Google 影像(非官方瓦片端点)。
+
+    实测直连不通(超时),**必须配代理**。端点忽略 key 参数(带/不带/空 key
+    返回字节完全相同的瓦片),故刻意不设 key 字段,避免"填了 key 才有权限"的误解。
+    """
+    enabled: bool = False
+    # HTTP 代理。可写 "127.0.0.1:6789" 或 "http://127.0.0.1:6789",
+    # 代码会补 scheme(见 providers/base.normalize_proxy)。不支持 socks5。
+    proxy: str = ""
+    # 非官方端点会变更(实测旧 khms 端点 v=1000 已返回 404),故可配置。
+    url_template: str = "https://mt{s}.google.com/vt/lyrs={lyrs}&x={x}&y={y}&z={z}"
+    subdomains: str = "0,1,2,3"
+    # 实测陆地处处可到 z21(含西部城市),z22 仅部分地区有 —— 21 是全球陆地
+    # 可用的临界值。无地区性降级,故不需要按区域探测。
+    max_zoom: int = 21
+
+    def subdomain_list(self) -> list[str]:
+        """归一化子域名配置为列表;未配置时回落默认。"""
+        items = [x.strip() for x in str(self.subdomains or "").split(",")]
+        return [x for x in items if x] or ["0", "1", "2", "3"]
+
+
+@dataclass
+class EsriImageryConfig:
+    """Esri World Imagery。
+
+    与项目现用的 Esri Terrain3D(DEM)是**不同服务**:Terrain3D 直连可用,
+    World Imagery 实测直连不通,必须配代理。
+    """
+    enabled: bool = False
+    proxy: str = ""
+    url_template: str = ("https://services.arcgisonline.com/ArcGIS/rest/services"
+                         "/World_Imagery/MapServer/tile/{z}/{y}/{x}")
+    # 服务级天花板。实测 z19 是亚欧城市的实际上限(z20 仅美国境内有),
+    # 且 z19 载有真实新增细节(高频能量比 z18 上采样高 33~46%),不是插值放大。
+    max_zoom: int = 19
+    # 是否按选区探测该地区的实际最高级别。默认开启:实测西藏/青海/新疆无人区
+    # z18 即无影像(最高 z17),不探测的话用户选 z18 会下到一整片灰色占位图。
+    probe_max_zoom: bool = True
+    # 探测结果按量化 bbox 缓存的有效期(小时)。0 = 不缓存。
+    # 探测是逐级网络请求,用户拖拽选区会连续触发,缓存不是优化而是必需。
+    probe_cache_hours: float = 24.0
+
+
+@dataclass
 class Config:
     tianditu: TiandituConfig = field(default_factory=TiandituConfig)
     download: DownloadConfig = field(default_factory=DownloadConfig)
@@ -111,6 +157,8 @@ class Config:
     buildings: BuildingsConfig = field(default_factory=BuildingsConfig)
     tools: ToolsConfig = field(default_factory=ToolsConfig)
     worker: WorkerConfig = field(default_factory=WorkerConfig)
+    google: GoogleConfig = field(default_factory=GoogleConfig)
+    esri_imagery: EsriImageryConfig = field(default_factory=EsriImageryConfig)
 
     def abs_path(self, rel: str) -> Path:
         """把配置里的相对路径解析为基于项目根目录的绝对路径。"""
@@ -179,6 +227,30 @@ tools:
   tiles3d_exe: ""        # fanvanzh/3dtiles 可执行文件,如 "tools/3dtiles/3dtiles.exe"
   pdal_exe: ""           # pdal CLI,如 "tools/pdal/bin/pdal.exe"
   py3dtiles_python: ""   # 装有 py3dtiles 的独立 venv 解释器,如 "tools/py3dtiles-venv/Scripts/python.exe"
+
+google:
+  # Google 影像(非官方瓦片端点)。实测直连不通,必须配代理。
+  enabled: false
+  # 代理地址。可写 "127.0.0.1:6789" 或带 scheme 的完整 URL,两种都行。
+  # 注意:不支持 socks5(aiohttp 不内置 SOCKS 支持)。
+  proxy: ""
+  # 端点会变更,失效时先改这里。不设 key 字段:该端点忽略 key 参数。
+  url_template: "https://mt{s}.google.com/vt/lyrs={lyrs}&x={x}&y={y}&z={z}"
+  subdomains: "0,1,2,3"
+  max_zoom: 21          # 实测陆地处处可用到 21;22 级仅部分地区有
+
+esri_imagery:
+  # Esri World Imagery。与现用的 Esri Terrain3D(DEM)是不同服务:
+  # Terrain3D 直连可用,World Imagery 实测直连不通,必须配代理。
+  enabled: false
+  proxy: ""
+  url_template: "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+  # 服务级天花板。实测 z19 是亚欧城市上限(z20 仅美国境内有)。
+  max_zoom: 19
+  # 按选区探测该地区实际最高级别。实测西部无人区最高仅 z17,
+  # 关掉后用户选 z18 会下到一整片灰色占位图。
+  probe_max_zoom: true
+  probe_cache_hours: 24
 """
 
 
@@ -208,6 +280,8 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         _merge(cfg.buildings, raw.get("buildings"))
         _merge(cfg.tools, raw.get("tools"))
         _merge(cfg.worker, raw.get("worker"))
+        _merge(cfg.google, raw.get("google"))
+        _merge(cfg.esri_imagery, raw.get("esri_imagery"))
 
     # 环境变量可覆盖密钥,便于不落盘
     env_token = os.environ.get("TIANDITU_TOKEN")
@@ -225,6 +299,14 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
             cfg.worker.num_workers = max(1, int(env_workers))
         except ValueError:
             pass
+    # 代理可用环境变量覆盖(便于临时切换而不改配置文件)。
+    # spawn 下子进程继承环境变量,worker 里重新 load_config 同样读得到。
+    env_gproxy = os.environ.get("GOOGLE_PROXY")
+    if env_gproxy:
+        cfg.google.proxy = env_gproxy
+    env_eproxy = os.environ.get("ESRI_PROXY")
+    if env_eproxy:
+        cfg.esri_imagery.proxy = env_eproxy
 
     return cfg
 
