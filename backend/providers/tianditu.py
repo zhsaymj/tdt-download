@@ -45,16 +45,19 @@ ANNOTATION_OF = {
 class TiandituProvider(TileProvider):
     """天地图 EPSG:4326 瓦片数据源(可切换 img/vec/ter 图层)。"""
 
-    def __init__(self, key: str, token: TokenSource):
+    def __init__(self, key: str, token: TokenSource, matrix_set: str = "c"):
         if key not in LAYERS:
             raise ValueError(f"暂不支持的天地图图层:{key}")
         # token 可为字符串或可调用(动态取密钥);字符串为空时报错,可调用留待运行时解析
         if not callable(token) and not token:
             raise ValueError("天地图密钥(token)为空,请在 config.yaml 或密钥管理中填写。")
+        if matrix_set not in ("c", "w"):
+            raise ValueError(f"未知的 TILEMATRIXSET:{matrix_set}(只支持 c/w)")
         layer_type, layer_name, ext, bands, _cn = LAYERS[key]
         self.key = key
         self.layer_type = layer_type
         self.layer_name = layer_name
+        self.matrix_set = matrix_set
         self.ext = ext
         self.bands = bands
         self._token = token
@@ -66,10 +69,15 @@ class TiandituProvider(TileProvider):
 
     def tile_url(self, col: int, row: int, z: int) -> str:
         sub = next(self._sub)
+        # LAYERS 里存的是 "c" 形式(如 "cia_c")。matrix_set 只换末位后缀:
+        # "cia_c"→"cia_w"。断言后缀,避免哪天 LAYERS 格式变了却静默拼出错 URL
+        # (错 URL 会返回 404,而下载器把 404 当失败重试,表现为慢而非报错)。
+        assert self.layer_type.endswith("_c"), self.layer_type
+        layer_type = self.layer_type[:-1] + self.matrix_set
         return (
-            f"https://{sub}.tianditu.gov.cn/{self.layer_type}/wmts?"
+            f"https://{sub}.tianditu.gov.cn/{layer_type}/wmts?"
             f"SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER={self.layer_name}"
-            f"&STYLE=default&TILEMATRIXSET=c&FORMAT=tiles"
+            f"&STYLE=default&TILEMATRIXSET={self.matrix_set}&FORMAT=tiles"
             f"&TILEMATRIX={z}&TILEROW={row}&TILECOL={col}&tk={self._resolve_token()}"
         )
 
