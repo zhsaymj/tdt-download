@@ -70,6 +70,7 @@ def mosaic_to_geotiff(
     tile_path_fn,
     anno_tile_path_fn=None,
     on_row=None,
+    crs: str = "EPSG:4326",
 ) -> Path:
     """拼接指定级别的瓦片为 GeoTIFF。
 
@@ -77,12 +78,21 @@ def mosaic_to_geotiff(
     anno_tile_path_fn(col, row, z) -> Path:可选,提供时把注记瓦片按 alpha
       合成到对应底图瓦片之上(路网注记烘焙进成果)。
     on_row(done_rows, total_rows): 可选,每写完一"瓦片行"回调一次,用于细粒度进度。
+    crs: 输出坐标系。默认 EPSG:4326(天地图网格);墨卡托数据源
+      (Google/Esri 影像)传 "EPSG:3857",bounds 改从 mosaic_bounds_3857 取。
     """
     bands = provider.bands
     width = tr.cols * TILE_SIZE
     height = tr.rows * TILE_SIZE
 
-    west, south, east, north = tr.mosaic_bounds()
+    # bounds 的来源随网格而变:4326 用 TileRange 自带的方法,3857 需用
+    # 墨卡托四至(单位米)。二者不能混用 —— 混了会写出坐标系与坐标值
+    # 不匹配的 GeoTIFF(QGIS 里表现为图落在南极洲外面)。
+    if crs == "EPSG:3857":
+        from .mercator_tiling import mosaic_bounds_3857
+        west, south, east, north = mosaic_bounds_3857(tr)
+    else:
+        west, south, east, north = tr.mosaic_bounds()
     transform = from_bounds(west, south, east, north, width, height)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -92,7 +102,7 @@ def mosaic_to_geotiff(
         "width": width,
         "count": bands,
         "dtype": "uint8",
-        "crs": "EPSG:4326",
+        "crs": crs,
         "transform": transform,
         "compress": "LZW",
         "tiled": True,
