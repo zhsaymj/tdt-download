@@ -2471,7 +2471,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 - Modify: `backend/core/mercator_tiling.py`
 - Modify: `backend/core/dem_tiling.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `tests/test_mercator_suggest.py`:
 
@@ -2561,12 +2561,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `.venv/Scripts/python.exe -m unittest tests.test_mercator_suggest -v`
 Expected: FAIL — `ImportError: cannot import name 'suggest_mercator_levels'`
 
-- [ ] **Step 3: 在 `mercator_tiling.py` 加共用实现与影像版**
+- [x] **Step 3: 在 `mercator_tiling.py` 加共用实现与影像版**
 
 在 `backend/core/mercator_tiling.py` 末尾追加:
 
@@ -2665,7 +2665,7 @@ def suggest_mercator_levels(
                                    tile_budget, depth)
 ```
 
-- [ ] **Step 4: 把 `suggest_dem_levels` 改为调用共用内核**
+- [x] **Step 4: 把 `suggest_dem_levels` 改为调用共用内核**
 
 在 `backend/core/dem_tiling.py` 里,把 `suggest_dem_levels` 的函数体(从 `from rasterio.warp import transform_bounds` 到 `return {...}` 结束)**整体替换**为一行调用,保留原 docstring:
 
@@ -2694,17 +2694,17 @@ def suggest_dem_levels(
                                    tile_budget, depth)
 ```
 
-- [ ] **Step 5: 运行测试**
+- [x] **Step 5: 运行测试**
 
 Run: `.venv/Scripts/python.exe -m unittest tests.test_mercator_suggest -v`
 Expected: PASS,12 项通过
 
-- [ ] **Step 6: 运行全量测试**
+- [x] **Step 6: 运行全量测试**
 
 Run: `.venv/Scripts/python.exe -m unittest discover tests`
 Expected: 全绿(DEM 建议级别的现有用例应不受影响)
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add backend/core/mercator_tiling.py backend/core/dem_tiling.py tests/test_mercator_suggest.py
@@ -2729,7 +2729,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 - Modify: `backend/providers/esri_imagery.py`
 - Modify: `tests/test_esri_imagery_provider.py`
 
-- [ ] **Step 1: 追加失败测试**
+- [x] **Step 1: 追加失败测试**
 
 在 `tests/test_esri_imagery_provider.py` 末尾(`if __name__` 之前)追加:
 
@@ -2876,12 +2876,12 @@ class TestProbeCache(unittest.TestCase):
         self.assertGreater(len(calls), n1)
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `.venv/Scripts/python.exe -m unittest tests.test_esri_imagery_provider -v`
 Expected: FAIL — `AttributeError: module 'backend.providers.esri_imagery' has no attribute '_fetch_tile_bytes'`
 
-- [ ] **Step 3: 在 `esri_imagery.py` 追加探测实现**
+- [x] **Step 3: 在 `esri_imagery.py` 追加探测实现**
 
 在文件末尾追加:
 
@@ -3005,12 +3005,12 @@ def probe_max_level(bbox: tuple[float, float, float, float],
     return found
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `.venv/Scripts/python.exe -m unittest tests.test_esri_imagery_provider -v`
 Expected: PASS,29 项通过
 
-- [ ] **Step 5: 用真实网络抽验探测结果**
+- [x] **Step 5: 用真实网络抽验探测结果**
 
 创建临时脚本 `scripts/_probe_levels.py`:
 
@@ -3042,7 +3042,7 @@ Expected:上海/北京 19、拉萨 18、阿里/可可西里 17。个别城市可
 
 删除脚本:`rm scripts/_probe_levels.py`
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add backend/providers/esri_imagery.py tests/test_esri_imagery_provider.py
@@ -3070,7 +3070,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 - Create: `tests/test_estimate_mercator.py`
 - Modify: `backend/api/tasks.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `tests/test_estimate_mercator.py`:
 
@@ -3170,12 +3170,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `.venv/Scripts/python.exe -m unittest tests.test_estimate_mercator -v`
 Expected: FAIL — `test_mercator_image_uses_xyz_count` 报值不符(当前 `google_img` 走的是 4326 计数)
 
-- [ ] **Step 3: 改 `backend/api/tasks.py` 的估算分流**
+- [x] **Step 3: 改 `backend/api/tasks.py` 的估算分流**
 
 先在 import 段补充:
 
@@ -3237,7 +3237,7 @@ def _estimate_detail(bbox, levels: list[int], provider: str) -> dict:
             "total_bytes": total_tiles * avg}
 ```
 
-- [ ] **Step 4: 改级别上限与建议级别的分流**
+- [x] **Step 4: 改级别上限与建议级别的分流**
 
 在 `_parse_levels` 附近加一个取上限的辅助函数:
 
@@ -3296,17 +3296,17 @@ def _z_floor_for(provider: str) -> int:
     return await asyncio.to_thread(suggest_levels, bbox, 18, 1)
 ```
 
-- [ ] **Step 5: 运行测试**
+- [x] **Step 5: 运行测试**
 
 Run: `.venv/Scripts/python.exe -m unittest tests.test_estimate_mercator -v`
 Expected: PASS,12 项通过
 
-- [ ] **Step 6: 运行全量测试**
+- [x] **Step 6: 运行全量测试**
 
 Run: `.venv/Scripts/python.exe -m unittest discover tests`
 Expected: 全绿
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add backend/api/tasks.py tests/test_estimate_mercator.py
@@ -3333,7 +3333,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 - Modify: `backend/api/tasks.py`
 - Create: `tests/test_provider_precheck.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `tests/test_provider_precheck.py`:
 
@@ -3433,12 +3433,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `.venv/Scripts/python.exe -m unittest tests.test_provider_precheck -v`
 Expected: FAIL — `ImportError: cannot import name '_precheck_network_provider'`
 
-- [ ] **Step 3: 在 `backend/api/tasks.py` 加预检**
+- [x] **Step 3: 在 `backend/api/tasks.py` 加预检**
 
 在 `_probe_dem_max_level` 附近插入:
 
@@ -3532,7 +3532,7 @@ from ..providers.esri_imagery import (build_esri_imagery_provider,
 from ..providers.google import build_google_provider, is_google_provider
 ```
 
-- [ ] **Step 4: 在 `api_create_task` 接入预检**
+- [x] **Step 4: 在 `api_create_task` 接入预检**
 
 找到 `api_create_task` 中校验参数、创建任务之前的位置,插入:
 
@@ -3544,7 +3544,7 @@ from ..providers.google import build_google_provider, is_google_provider
         raise HTTPException(400, msg)
 ```
 
-- [ ] **Step 5: 在 `backend/api/tools.py` 加代理诊断**
+- [x] **Step 5: 在 `backend/api/tools.py` 加代理诊断**
 
 在文件末尾(诊断路由之前)加:
 
@@ -3588,12 +3588,12 @@ async def _diagnose_network_source(name: str, cfg, provider_key: str) -> dict:
         "Esri World Imagery", settings.esri_imagery, "esri_imagery")
 ```
 
-- [ ] **Step 6: 运行测试**
+- [x] **Step 6: 运行测试**
 
 Run: `.venv/Scripts/python.exe -m unittest tests.test_provider_precheck -v`
 Expected: PASS,6 项通过
 
-- [ ] **Step 7: 手工验证预检(设计清单第 5 条)**
+- [x] **Step 7: 手工验证预检(设计清单第 5 条)**
 
 关掉代理软件,提交一个 `google_img` 任务。
 
@@ -3601,7 +3601,7 @@ Expected:立即收到 400 错误,文案含 `google.proxy` 与"重启服务",**�
 
 重开代理,再提交 → 正常创建。
 
-- [ ] **Step 8: 运行全量测试并提交**
+- [x] **Step 8: 运行全量测试并提交**
 
 Run: `.venv/Scripts/python.exe -m unittest discover tests`
 Expected: 全绿
@@ -3630,7 +3630,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 - Modify: `backend/api/tasks.py`
 - Create: `tests/test_imagery_level_trim.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `tests/test_imagery_level_trim.py`:
 
@@ -3682,12 +3682,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `.venv/Scripts/python.exe -m unittest tests.test_imagery_level_trim -v`
 Expected: FAIL — `ImportError: cannot import name '_trim_levels_for_region'`
 
-- [ ] **Step 3: 加剔除函数与接口**
+- [x] **Step 3: 加剔除函数与接口**
 
 在 `backend/api/tasks.py` 加:
 
@@ -3759,7 +3759,7 @@ async def api_imagery_max_level(west: float, south: float, east: float,
             "service_max": service_max, "probed": True}
 ```
 
-- [ ] **Step 4: 在 `api_create_task` 接入剔除**
+- [x] **Step 4: 在 `api_create_task` 接入剔除**
 
 在预检之后、`create_task` 之前插入:
 
@@ -3789,12 +3789,12 @@ async def api_imagery_max_level(west: float, south: float, east: float,
 
 > 注意:`resp` 是现有 return 的字典变量名,按实际代码调整。若现有 return 是直接构造字典,先赋给 `resp` 再返回。
 
-- [ ] **Step 5: 运行测试**
+- [x] **Step 5: 运行测试**
 
 Run: `.venv/Scripts/python.exe -m unittest tests.test_imagery_level_trim -v`
 Expected: PASS,6 项通过
 
-- [ ] **Step 6: 手工验证(设计清单第 15 条)**
+- [x] **Step 6: 手工验证(设计清单第 15 条)**
 
 Run(服务已启动):
 ```bash
@@ -3805,7 +3805,7 @@ Expected:上海返回 `max_level: 19`,阿里返回 `max_level: 17`。
 
 再对阿里选区提交一个勾了 z18 的 Esri 任务 → 返回体应含 `dropped_levels: [18]`。
 
-- [ ] **Step 7: 运行全量测试并提交**
+- [x] **Step 7: 运行全量测试并提交**
 
 Run: `.venv/Scripts/python.exe -m unittest discover tests`
 Expected: 全绿
@@ -4075,7 +4075,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 - Create: `tests/test_preview_tiles.py`
 - Modify: `backend/main.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `tests/test_preview_tiles.py`:
 
@@ -4184,12 +4184,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `.venv/Scripts/python.exe -m unittest tests.test_preview_tiles -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'backend.api.tiles'`
 
-- [ ] **Step 3: 创建 `backend/api/tiles.py`**
+- [x] **Step 3: 创建 `backend/api/tiles.py`**
 
 ```python
 """底图预览瓦片转发(Google / Esri World Imagery)。
@@ -4329,7 +4329,7 @@ async def api_preview_tile(provider: str, z: int, x: int, y: int):
                     headers={"Cache-Control": "public, max-age=3600"})
 ```
 
-- [ ] **Step 4: 在 `backend/main.py` 挂载与接入生命周期**
+- [x] **Step 4: 在 `backend/main.py` 挂载与接入生命周期**
 
 在 import 段加:
 
@@ -4358,17 +4358,17 @@ app.include_router(tiles_api.router)
         await tiles_api.shutdown()
 ```
 
-- [ ] **Step 5: 运行测试**
+- [x] **Step 5: 运行测试**
 
 Run: `.venv/Scripts/python.exe -m unittest tests.test_preview_tiles -v`
 Expected: PASS,11 项通过
 
-- [ ] **Step 6: 运行全量测试**
+- [x] **Step 6: 运行全量测试**
 
 Run: `.venv/Scripts/python.exe -m unittest discover tests`
 Expected: 全绿
 
-- [ ] **Step 7: 手工验证端点**
+- [x] **Step 7: 手工验证端点**
 
 启动服务后:
 
@@ -4385,7 +4385,7 @@ curl -s -w "%{http_code}\n" -o /dev/null \
 ```
 Expected:`404`
 
-- [ ] **Step 8: 提交**
+- [x] **Step 8: 提交**
 
 ```bash
 git add backend/api/tiles.py backend/main.py tests/test_preview_tiles.py
@@ -4417,7 +4417,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 - Modify: `frontendvue/src/components/TaskDetail.vue`
 - Modify: `frontendvue/src/utils/taskDefaults.test.js`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 在 `frontendvue/src/utils/taskDefaults.test.js` 末尾追加:
 
@@ -4474,14 +4474,14 @@ import {
 
 > 注意:原 import 列表里已有的名字要保留,只是**追加**上面几个。
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cd frontendvue && node --test "src/**/*.test.js"`
 Expected: FAIL — `GOOGLE_LEVELS is not defined`
 
 > 必须用 glob 直参。Node 24 下 `node --test src/` 目录直参会误报(见 CLAUDE.md)。
 
-- [ ] **Step 3: 改 `frontendvue/src/utils/taskDefaults.js`**
+- [x] **Step 3: 改 `frontendvue/src/utils/taskDefaults.js`**
 
 在文件顶部的级别常量附近追加:
 
@@ -4516,7 +4516,7 @@ export function needsRegionProbe(provider) {
 }
 ```
 
-- [ ] **Step 4: 改三个组件的下拉与显示名**
+- [x] **Step 4: 改三个组件的下拉与显示名**
 
 `ProcessDialog.vue` 的 `providerOptions`(约 46 行)追加 5 项:
 
@@ -4540,7 +4540,7 @@ export function needsRegionProbe(provider) {
   esri_imagery: 'Esri World Imagery',
 ```
 
-- [ ] **Step 5: 改 `ProcessDialog.vue` 的级别列表来源**
+- [x] **Step 5: 改 `ProcessDialog.vue` 的级别列表来源**
 
 把(约 158 行):
 
@@ -4557,12 +4557,12 @@ const levelList = computed(() => levelsForProvider(form.provider))
 
 并把该文件的 import 补上 `levelsForProvider`(与 `DEM_LEVELS, IMG_LEVELS` 同处)。
 
-- [ ] **Step 6: 运行前端测试**
+- [x] **Step 6: 运行前端测试**
 
 Run: `cd frontendvue && node --test "src/**/*.test.js"`
 Expected: PASS(含新增 5 项)
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add frontendvue/src/utils/taskDefaults.js frontendvue/src/utils/taskDefaults.test.js frontendvue/src/components/ProcessDialog.vue frontendvue/src/components/RedownloadDialog.vue frontendvue/src/components/TaskDetail.vue
@@ -4585,7 +4585,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 - Modify: `frontendvue/src/api.js`
 - Modify: `frontendvue/src/components/ProcessDialog.vue`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 在 `frontendvue/src/utils/basemap.test.js` 末尾追加:
 
@@ -4633,12 +4633,12 @@ test('basemapTileUrl 对天地图返回 null(不走转发)', () => {
 
 并把该文件的 import 补上 `basemapTileUrl`。
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cd frontendvue && node --test "src/**/*.test.js"`
 Expected: FAIL — `basemapTileUrl is not a function`
 
-- [ ] **Step 3: 改 `frontendvue/src/utils/basemap.js`**
+- [x] **Step 3: 改 `frontendvue/src/utils/basemap.js`**
 
 在 `BASEMAP_OPTIONS` 数组末尾追加 5 项:
 
@@ -4714,7 +4714,7 @@ export function basemapMaxZoom(value) {
 }
 ```
 
-- [ ] **Step 4: 改 `frontendvue/src/composables/useMap.js` 的 `setBasemap`**
+- [x] **Step 4: 改 `frontendvue/src/composables/useMap.js` 的 `setBasemap`**
 
 在 `tiandituLayer` 函数之后加一个 XYZ 图层构造函数:
 
@@ -4767,7 +4767,7 @@ import {
 } from '../utils/basemap.js'
 ```
 
-- [ ] **Step 5: 在 `frontendvue/src/api.js` 加探测接口**
+- [x] **Step 5: 在 `frontendvue/src/api.js` 加探测接口**
 
 在现有 `demMaxLevel`(约 87 行)旁边加:
 
@@ -4776,7 +4776,7 @@ import {
     req(`/api/tasks/imagery_max_level?west=${west}&south=${south}&east=${east}&north=${north}&provider=${provider || 'esri_imagery'}`),
 ```
 
-- [ ] **Step 6: 在 `ProcessDialog.vue` 接入级别禁用**
+- [x] **Step 6: 在 `ProcessDialog.vue` 接入级别禁用**
 
 参照该文件现有的 DEM 探测逻辑(它已用 `demMaxLevel` 做级别禁用),加一份影像版:
 
@@ -4826,17 +4826,17 @@ function levelDisabled(z) {
 
 > 具体标签名与属性按该文件现有的级别勾选写法调整,不要引入新的 UI 库用法。
 
-- [ ] **Step 7: 运行前端测试**
+- [x] **Step 7: 运行前端测试**
 
 Run: `cd frontendvue && node --test "src/**/*.test.js"`
 Expected: PASS(含新增 7 项)
 
-- [ ] **Step 8: 构建前端**
+- [x] **Step 8: 构建前端**
 
 Run: `cd frontendvue && npm run build`
 Expected: 构建成功,产物在 `frontendvue/dist`
 
-- [ ] **Step 9: 提交**
+- [x] **Step 9: 提交**
 
 ```bash
 git add frontendvue/src/utils/basemap.js frontendvue/src/utils/basemap.test.js frontendvue/src/composables/useMap.js frontendvue/src/api.js frontendvue/src/components/ProcessDialog.vue
@@ -4864,7 +4864,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 - Create: `tests/test_clip_3857.py`
 - Modify: `backend/core/postprocess.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `tests/test_clip_3857.py`:
 
@@ -4963,12 +4963,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `.venv/Scripts/python.exe -m unittest tests.test_clip_3857 -v`
 Expected: FAIL — `test_clips_3857_source` 报 `AssertionError: 3857 源未被裁剪`(`clip_to_geometry` 返回了 False)
 
-- [ ] **Step 3: 改 `backend/core/postprocess.py::clip_to_geometry`**
+- [x] **Step 3: 改 `backend/core/postprocess.py::clip_to_geometry`**
 
 把 docstring 第一行改为:
 
@@ -5003,17 +5003,17 @@ Expected: FAIL — `test_clips_3857_source` 报 `AssertionError: 3857 源未被�
 
 > 注意:原代码里 `with rasterio.open(src_path) as src:` 这一行**保留不动**,只是在它之前插入探测与转换。
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `.venv/Scripts/python.exe -m unittest tests.test_clip_3857 -v`
 Expected: PASS,5 项通过
 
-- [ ] **Step 5: 运行全量测试**
+- [x] **Step 5: 运行全量测试**
 
 Run: `.venv/Scripts/python.exe -m unittest discover tests`
 Expected: 全绿(4326 路径行为未变)
 
-- [ ] **Step 6: 手工验证裁剪**
+- [x] **Step 6: 手工验证裁剪**
 
 提交一个 `google_img` 任务:用**多边形**(非矩形)画选区,勾"裁剪到选区",级别 z16,导出 GeoTIFF。
 
@@ -5021,7 +5021,7 @@ Expected:成果在多边形外透明,而非整幅矩形图。
 
 > 若产出仍是完整矩形,说明转换没生效 —— 回看 Step 3。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add backend/core/postprocess.py tests/test_clip_3857.py
@@ -5043,7 +5043,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 **Files:**
 - Modify: `docs/验证记录-google-esri影像.md`
 
-- [ ] **Step 1: 全量测试**
+- [x] **Step 1: 全量测试**
 
 Run: `.venv/Scripts/python.exe -m unittest discover tests`
 Expected: 全绿。**确认 `test_scheduler` 与 `test_worker_dispatch` 是绿的** —— 它们红了说明改动侵入了进程隔离层。
@@ -5051,7 +5051,7 @@ Expected: 全绿。**确认 `test_scheduler` 与 `test_worker_dispatch` 是绿�
 Run: `cd frontendvue && node --test "src/**/*.test.js"`
 Expected: 全绿
 
-- [ ] **Step 2: 预览端到端(设计清单第 4 条)**
+- [x] **Step 2: 预览端到端(设计清单第 4 条)**
 
 启动服务,在界面把底图切到 Google 卫星影像。
 
@@ -5063,7 +5063,7 @@ Expected:瓦片正常加载,可缩放到 z21。
 
 重开代理 → 瓦片恢复。
 
-- [ ] **Step 3: 【关键】进程隔离不回归(设计清单第 8 条)**
+- [x] **Step 3: 【关键】进程隔离不回归(设计清单第 8 条)**
 
 提交一个 Google 大范围任务:范围 0.05°(约 5km),级别 z15~z18(约 2000+ 张瓦片),导出勾 GeoTIFF + TMS。
 
@@ -5079,7 +5079,7 @@ Expected:瓦片正常加载,可缩放到 z21。
 
 > 这是进程隔离改造要保住的核心性质。若预览转发写成同步或超时过长,会从主进程这一侧把它破坏掉。任一项挂起都要停下来查 `_PREVIEW_TIMEOUT` 与 `_PREVIEW_CONCURRENCY`。
 
-- [ ] **Step 4: 预览不与下载抢代理(设计清单第 9 条)**
+- [x] **Step 4: 预览不与下载抢代理(设计清单第 9 条)**
 
 上一条运行中,观察预览瓦片是否**大面积**变占位图。
 
@@ -5087,7 +5087,7 @@ Expected:偶有个别瓦片空白可接受;大面积空白说明代理被下载�
 
 若大面积空白,调整 `_PREVIEW_CONCURRENCY` / `_PREVIEW_TIMEOUT`,并把结论回写设计 §4.7 与 §9 Q3。
 
-- [ ] **Step 5: 规模如实显示且不拦截(设计清单第 10 条)**
+- [x] **Step 5: 规模如实显示且不拦截(设计清单第 10 条)**
 
 选 0.25° 范围(约 27km),勾 z15~z21。
 
@@ -5099,7 +5099,7 @@ Expected:
 
 提交后可立即暂停/删除该任务,不必真的下完。
 
-- [ ] **Step 6: 配置重载语义(设计清单第 11 条)**
+- [x] **Step 6: 配置重载语义(设计清单第 11 条)**
 
 任务运行中修改 `config.yaml` 的 `google.proxy` 为一个错误地址。
 
@@ -5109,7 +5109,7 @@ Expected:**正在跑的任务不受影响**(spawn 下 worker 不重载配置)。
 
 把配置改回正确值并重启。
 
-- [ ] **Step 7: 建议级别(设计清单第 12 条)**
+- [x] **Step 7: 建议级别(设计清单第 12 条)**
 
 Run:
 ```bash
@@ -5118,7 +5118,7 @@ curl -s "http://127.0.0.1:8000/api/tasks/suggest_levels?west=116.0&south=39.5&ea
 ```
 Expected:两者的 `recommended` 都**不含 z0**,`recommended_tiles` 在 8000 以内,且小范围的推荐级别更高。
 
-- [ ] **Step 8: z19 真实细节抽验(设计清单第 15b 条)**
+- [x] **Step 8: z19 真实细节抽验(设计清单第 15b 条)**
 
 对上海选区(121.470~121.482 / 31.225~31.235)提交 `esri_imagery` 任务,级别 z18 与 z19 各一次。
 
@@ -5136,13 +5136,13 @@ for f in sorted(glob.glob('output/*/*_z1[89].tif')):
 ```
 Expected:z19 的梯度不低于 z18(细节更丰富)。
 
-- [ ] **Step 9: 代理瞬态故障频率(设计清单第 17 条)**
+- [x] **Step 9: 代理瞬态故障频率(设计清单第 17 条)**
 
 查看 Step 3 那个任务的日志,统计 `ClientConnectorError` / TLS 重置的出现次数。
 
 Expected:偶发可接受。若失败率明显偏高(如超过瓦片总数的 1%),把 `download.max_retries` 调到 5 并把结论回写设计 §9 Q5。
 
-- [ ] **Step 10: 补完验证记录**
+- [x] **Step 10: 补完验证记录**
 
 在 `docs/验证记录-google-esri影像.md` 追加:
 
@@ -5178,7 +5178,7 @@ Expected:偶发可接受。若失败率明显偏高(如超过瓦片总数的 1%)
 
 若有参数需要调整,同步回写设计文档 §9 的"待实测校准的参数"表。
 
-- [ ] **Step 11: 提交**
+- [x] **Step 11: 提交**
 
 ```bash
 git add docs/验证记录-google-esri影像.md docs/superpowers/specs/2026-09-24-google-esri影像数据源-design.md
