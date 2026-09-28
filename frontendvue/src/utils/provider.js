@@ -38,13 +38,11 @@ export const ANNOTATION_MAX_Z = 18
 /**
  * 该数据源是否支持"叠加路网注记"。
  *
- * 注记是**天地图特有的**同网格透明覆盖层(cia/cva/cta,与底图按类型配对)。
- * Google/Esri 属墨卡托网格,没有对应的注记图层 —— 后端会按网格跳过
- * (见 runner.py 的 annotate 判定),故界面也不该提供入口:
- * 勾了没效果、还会误报"瓦片数翻倍"。
+ * 注记是天地图提供的同网格透明覆盖层(cia/cva/cta,与底图按类型配对)。
+ * Google/Esri **也支持**:它们走 3857,而天地图注记有 3857 版本(cia_w),
+ * 同格可直接对取、零重采样(见 providers/tianditu.py 的 build_annotation_provider)。
  *
- * 实测(2026-09-28):google_img + annotate=true 与不带注记产出完全相同,
- * 未下载任何注记瓦片,估算也不翻倍。
+ * 不支持的只有:DEM(无此概念)与本地文件源(不联网,没有注记可下)。
  */
 /** 本地文件源:不联网,没有注记可下。 */
 export const LOCAL_FILE_PROVIDERS = [
@@ -54,7 +52,6 @@ export const LOCAL_FILE_PROVIDERS = [
 export function canAnnotate(provider) {
   if (isDemProvider(provider)) return false
   if (LOCAL_FILE_PROVIDERS.includes(provider)) return false
-  if (MERCATOR_IMAGE_PROVIDERS.includes(provider)) return false
   return true
 }
 
@@ -121,4 +118,21 @@ export const SERVICE_KIND_LABELS = {
 
 export function serviceKindLabel(kind) {
   return SERVICE_KIND_LABELS[String(kind || '')] || String(kind || '')
+}
+
+/** 所选级别里超出注记上限的部分(为空表示全部可用)。 */
+export function annotationExcessLevels(levels) {
+  return (levels || [])
+    .filter((z) => Number(z) > ANNOTATION_MAX_Z)
+    .sort((a, b) => a - b)
+}
+
+/**
+ * 该级别集合能否叠加注记。
+ *
+ * 全部超限时注记一张都下不了 —— 界面据此置灰勾选框,
+ * 避免出现"勾了但完全没效果"。部分超限仍可用,由界面提示影响哪些级别。
+ */
+export function annotationUsable(levels) {
+  return (levels || []).some((z) => Number(z) <= ANNOTATION_MAX_Z)
 }

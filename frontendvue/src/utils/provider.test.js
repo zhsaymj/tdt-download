@@ -11,6 +11,9 @@ import {
   TILESET_STAGE_KEYS,
   fmtNameOf,
   MERCATOR_IMAGE_PROVIDERS,
+  ANNOTATION_MAX_Z,
+  annotationExcessLevels,
+  annotationUsable,
   canAnnotate,
   isBuildingProvider,
   isDemProvider,
@@ -88,13 +91,29 @@ test('天地图影像源支持叠加注记', () => {
   }
 })
 
-test('Google / Esri 影像源不支持叠加注记', () => {
-  // 注记是天地图特有的同网格覆盖层;墨卡托源没有对应图层,
-  // 后端会按网格跳过。界面必须同步隐藏入口,否则勾了没效果还误报翻倍。
+test('Google / Esri 影像源支持叠加注记', () => {
+  // 天地图注记有 3857 版本(cia_w),与这两个源同格,可直接对取、零重采样。
   for (const k of ['google_img', 'google_hybrid', 'google_road',
                    'google_terrain', 'esri_imagery']) {
-    assert.equal(canAnnotate(k), false, k)
+    assert.equal(canAnnotate(k), true, k)
   }
+})
+
+test('注记最高 18 级', () => {
+  // 实测 z19+ 返回 200+213B 空图;与后端 runner.ANNOTATION_MAX_Z 对应
+  assert.equal(ANNOTATION_MAX_Z, 18)
+})
+
+test('所选级别全高于 18 时注记不可用', () => {
+  assert.equal(annotationUsable([19, 20, 21]), false)
+  assert.equal(annotationUsable([17, 18, 19]), true)
+  assert.equal(annotationUsable([16, 17]), true)
+  assert.equal(annotationUsable([]), false)
+})
+
+test('超限级别列表', () => {
+  assert.deepEqual(annotationExcessLevels([17, 18, 19, 21]), [19, 21])
+  assert.deepEqual(annotationExcessLevels([16, 17]), [])
 })
 
 test('DEM 不支持叠加注记', () => {

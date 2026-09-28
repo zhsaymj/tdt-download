@@ -15,7 +15,10 @@ import { useTaskStore } from '../stores/task'
 import { useBasemapStore } from '../stores/basemap'
 import { crsOptions } from '../utils/crs'
 import { fmtNum, fmtSize } from '../utils/format'
-import { canAnnotate, fmtNameOf } from '../utils/provider'
+import {
+  ANNOTATION_MAX_Z, annotationExcessLevels, annotationUsable, canAnnotate,
+  fmtNameOf,
+} from '../utils/provider'
 import {
   DEM_CRS_HINT, IMG_LEVELS,
   defaultContainersForStages, defaultTaskName,
@@ -433,6 +436,19 @@ const estTotal = computed(() => {
     tiles += r.tiles || 0
     bytes += r.bytes || 0
   }
+  // 注记最高 18 级:全部超限时置灰并说明,部分超限则提示影响哪些级别。
+  // 不让它变成"勾了没效果"。
+  const annotationTip = computed(() => {
+    if (!annotationUsable(form.levels)) {
+      return `所选级别均高于 ${ANNOTATION_MAX_Z} 级,该范围没有注记数据。`
+    }
+    const excess = annotationExcessLevels(form.levels)
+    if (excess.length) {
+      return `注记最高 ${ANNOTATION_MAX_Z} 级,${excess.map((z) => 'z' + z).join('、')} 不会有注记。`
+    }
+    return '同步下载天地图注记图层并烘焙进成果。'
+  })
+
   const mul = form.annotate && canAnnotate(form.provider) ? 2 : 1
   return { tiles: tiles * mul, bytes: bytes * mul }
 })
@@ -933,7 +949,7 @@ const title = computed(() => ({
             <div v-if="estTotal" class="lv-total">
               已选 {{ form.levels.length }} 级，共 {{ fmtNum(estTotal.tiles) }} 张瓦片，
               约 {{ fmtSize(estTotal.bytes) }}
-              <span v-if="form.annotate && canAnnotate(form.provider)" class="dim">（含注记，瓦片数翻倍）</span>
+              <span v-if="form.annotate && canAnnotate(form.provider)" class="dim">（含注记）</span>
             </div>
             </div>
           </t-form-item>
@@ -992,8 +1008,8 @@ const title = computed(() => ({
                   max-width="360px" />
               </t-form-item>
               <t-form-item v-if="isDownload && canAnnotate(form.provider)" label-width="0">
-                <t-checkbox v-model="form.annotate">叠加路网注记</t-checkbox>
-                <InfoTip content="同步下载注记图层并烘焙进成果,瓦片数翻倍。" max-width="320px" />
+                <t-checkbox v-model="form.annotate" :disabled="!annotationUsable(form.levels)">叠加路网注记</t-checkbox>
+                <InfoTip :content="annotationTip" max-width="360px" />
               </t-form-item>
             </t-collapse-panel>
           </t-collapse>
