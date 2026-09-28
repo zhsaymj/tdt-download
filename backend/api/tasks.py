@@ -213,6 +213,44 @@ async def _precheck_network_provider(provider: str) -> tuple[bool, str]:
         f"若代理正常,则可能是端点已变更,请检查对应的 url_template。")
 
 
+def _trim_levels_for_region(levels: list[int],
+                            max_level: int | None) -> tuple[list[int], list[int]]:
+    """按区域实际最高级别剔除超限级别。返回 (保留, 被剔除)。
+
+    **剔除而非拒绝**:用户在西藏选了 z15-z18,z18 无数据时下 z15-z17 是
+    合理的期望,不该整个任务被拒。被剔除的级别要回报给用户(任务详情里
+    记明"已跳过 z18(该区域最高 z17)"),否则就是静默丢功能。
+
+    max_level 为 None(判不了)时保留全部 —— 与 probe_max_level 的返回值
+    语义一致,不把网络问题当成"该范围没影像"。
+    """
+    uniq = sorted(set(int(z) for z in levels))
+    if max_level is None or not uniq:
+        return uniq, []
+    kept = [z for z in uniq if z <= max_level]
+    dropped = [z for z in uniq if z > max_level]
+    if not kept:
+        # 全部超限:保留最低一级,避免产出零级别的空任务
+        kept = [uniq[0]]
+        dropped = uniq[1:]
+    return kept, dropped
+
+
+async def _probe_imagery_max_level(bbox, provider: str) -> int | None:
+    """探测影像数据源在该范围的最高可用级别;None 表示判不了或不适用。
+
+    只有 Esri 需要:实测 Google 陆地处处可到 z21,无地区性降级。
+    """
+    if not is_esri_imagery_provider(provider):
+        return None
+    if not settings.esri_imagery.probe_max_zoom:
+        return None
+    from ..providers.esri_imagery import probe_max_level
+    # 逐级网络请求,必须放线程里(与 _probe_dem_max_level 一致)
+    return await asyncio.to_thread(probe_max_level, bbox,
+                                   settings.esri_imagery)
+
+
 async def _probe_dem_max_level(bbox, provider: str) -> int | None:
     """探测 DEM 数据源在该范围的最高可用级别;None 表示探测失败(网络问题)。"""
     from ..providers.terrain import probe_max_level
@@ -320,6 +358,31 @@ async def api_dem_max_level(west: float, south: float, east: float, north: float
     # max_level 为 null 表示探测失败(网络问题),前端此时不应禁用任何级别
     return {"provider": provider, "max_level": max_level,
             "service_max": service_max}
+
+
+@router.get("/imagery_max_level")
+async def api_imagery_max_level(west: float, south: float, east: float,
+                                north: float, provider: str = "esri_imagery"):
+    """探测影像数据源在该范围的最高可用级别(前端据此禁用超限级别)。
+
+    实测 Esri World Imagery 各区域最高级别不同:城市(含拉萨/乌鲁木齐)可到 z19、
+    喀什/漠河 z18、西藏青海新疆无人区仅 z17(z18 即整片占位图)。不探测的话
+    用户选 z18 在西部会下到一整片灰色。
+
+    Google 不需要探测(陆地处处可到 z21),对它直接返回服务上限,省一次往返。
+    max_level 为 null 表示探测失败(网络/代理问题)或探测已关闭,前端此时
+    **不应禁用**任何级别 —— 与 dem_max_level 的既有约定一致。
+    """
+    if not (is_esri_imagery_provider(provider) or is_google_provider(provider)):
+        raise HTTPException(400, "该数据源不支持影像级别探测")
+    service_max = _z_cap_for(provider)
+    if is_google_provider(provider):
+        return {"provider": provider, "max_level": service_max,
+                "service_max": service_max, "probed": False}
+    max_level = await _probe_imagery_max_level(
+        (west, south, east, north), provider)
+    return {"provider": provider, "max_level": max_level,
+            "service_max": service_max, "probed": True}
 
 
 @router.get("/{task_id}")
@@ -735,6 +798,19 @@ async def api_create_task(data: TaskCreate):
     if level_note:
         data.levels = levels
         logger.info("任务[%s] %s", data.name, level_note)
+
+    # Esri 各区域最高级别不同(西部无人区仅 z17)。超限级别会整片下到占位图,
+    # 故提交时剔除 —— 剔除而非拒绝,并把结果回报给用户。
+    dropped_levels: list[int] = []
+    if is_esri_imagery_provider(data.provider):
+        probed = await _probe_imagery_max_level(
+            (west, south, east, north), data.provider)
+        kept, dropped_levels = _trim_levels_for_region(levels, probed)
+        if dropped_levels:
+            levels = kept
+            data.levels = kept
+            logger.info("任务[%s] 剔除超出该区域能力的级别 %s(区域最高 %s)",
+                        data.name, dropped_levels, probed)
     detail = _estimate_detail((west, south, east, north), levels, data.provider)
     total = detail["total_tiles"]
     if total == 0:
@@ -751,8 +827,17 @@ async def api_create_task(data: TaskCreate):
 
     task_id = create_task(data, total, est_bytes)
     await task_queue.enqueue(task_id)
-    return {"id": task_id, "total": total, "status": "pending",
+    resp = {"id": task_id, "total": total, "status": "pending",
             "levels": levels, "level_note": level_note}
+    if dropped_levels:
+        # 回报给用户,避免"我勾了 z18 却没出成果"的困惑(静默丢功能)
+        resp["dropped_levels"] = dropped_levels
+        resp["level_note"] = (
+            (level_note + ";" if level_note else "")
+            + "该区域 Esri 影像最高仅到 z%s,已跳过 %s"
+            % (max(levels),
+               ", ".join("z%d" % z for z in dropped_levels)))
+    return resp
 
 
 async def _create_local_task(data: TaskCreate):
