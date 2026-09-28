@@ -37,7 +37,8 @@ from .mbtiles import pack_mbtiles
 from .dem import hillshade_from_dem, mosaic_dem_geotiff
 from .dem_tiling import mercator_range_for_bbox, mosaic_bounds_3857
 from .downloader import TileDownloader
-from .formats import (CONTAINERS, GEO_MERCATOR, DataKind, STAGES, grid_of,
+from .formats import (CONTAINERS, GEO_GEODETIC, GEO_MERCATOR, DataKind, STAGES,
+                      grid_of,
                       is_local_source, kind_of, resolve_outputs)
 from .logs import logger
 from .metadata import write_metadata
@@ -92,6 +93,39 @@ def _range_fn_for(provider: str):
 def _crs_for_grid(grid: str) -> str:
     """网格对应的拼接坐标系。"""
     return "EPSG:3857" if grid == GEO_MERCATOR else "EPSG:4326"
+
+
+def _tms_needs_resample(grid: str) -> bool:
+    """TMS 导出是否需要重采样(而非无损直映射)。
+
+    TMS 用的是 gdal2tiles geodetic 网格(EPSG:4326):
+      - geodetic 源(天地图):与之同构,可无损直映射(export_tms)
+      - mercator 源(Google/Esri):网格不同构,必须重采样
+        (export_tms_from_source,以拼接图为源逐瓦片 reproject)
+    走错会把 3857 瓦片当 4326 瓦片摆放,产出整体错位的瓦片包。
+    """
+    return grid == GEO_MERCATOR
+
+
+def _ctx_grid(ctx) -> str:
+    """取导出上下文的网格;缺失时回落 geodetic。
+
+    用 getattr 而非 ctx.grid:`_ExportCtx` 是 **kw 容器,真实上下文都有该字段,
+    但测试替身与旧构造不一定带 —— 而"没有网格"正等价于旧的全局 4326 行为,
+    故回落到 geodetic 既向后兼容又语义正确。
+    """
+    return getattr(ctx, "grid", GEO_GEODETIC)
+
+
+def _mbtiles_scheme_for(grid: str, stage_key: str) -> str:
+    """打包 MBTiles 时的行号约定。
+
+    取决于**瓦片目录本身**的约定,与源网格无关:
+      - tms/ 目录:行号自南向北 => "tms"
+      - osm/ 目录:行号自北向南 => "xyz"
+    grid 参数保留是为了让调用点显式表明"已考虑过网格",避免后人误以为漏了。
+    """
+    return "xyz" if stage_key == "osm" else "tms"
 
 
 def _build_provider_for(task):
@@ -512,7 +546,7 @@ def _stage_geotiff(ctx) -> list[str]:
     levels = ctx.levels
     # 按网格取区间与拼接坐标系:天地图出 4326,Google/Esri 出 3857
     range_fn = _range_fn_for(task["provider"])
-    mosaic_crs = _crs_for_grid(ctx.grid)
+    mosaic_crs = _crs_for_grid(_ctx_grid(ctx))
     trs = {z: range_fn(*ctx.bbox, z) for z in levels}
     total_rows = sum(trs[z].rows for z in levels)
     ctx.tracker.start("geotiff", total=total_rows, message="合并 GeoTIFF")
@@ -640,6 +674,17 @@ def _stage_tms(ctx) -> list[str]:
     if ctx.local_src is not None:
         return _tms_from_source_file(ctx, tms_dir, clip_geom)
 
+    # 墨卡托源(Google/Esri 影像):瓦片是 3857,与 TMS 的 geodetic 网格不同构,
+    # 不能用 export_tms 的无损直映射 —— 那会把 3857 瓦片当 4326 瓦片摆放,
+    # 产出整体错位的瓦片包。必须以拼接图为源逐瓦片重采样。
+    #
+    # 计划用"每级各自为源、不向下补级":用户明确选择"只出已下载级别"
+    # (设计 §1 非目标),故不给墨卡托源补金字塔。
+    if _tms_needs_resample(_ctx_grid(ctx)):
+        plan = [(z, [z])
+                for z in sorted({int(v) for v in levels}, reverse=True)]
+        return _tms_from_downloaded_sources(ctx, tms_dir, clip_geom, plan)
+
     plan = _source_tms_plan_for_task(ctx)
     if _tms_plan_requires_source(plan):
         return _tms_from_downloaded_sources(ctx, tms_dir, clip_geom, plan)
@@ -655,7 +700,8 @@ def _stage_tms(ctx) -> list[str]:
     if stopped:
         raise _Stopped()
     write_tilemapresource(tms_dir, ctx.provider, task["name"], ctx.bbox, levels, ext=tms_ext)
-    return _maybe_mbtiles(ctx, "tms", tms_dir, "tms", tms_ext)
+    return _maybe_mbtiles(ctx, "tms", tms_dir,
+                    _mbtiles_scheme_for(_ctx_grid(ctx), "tms"), tms_ext)
 
 
 def _maybe_mbtiles(ctx, stage_key: str, tiles_dir: Path, scheme: str,
@@ -755,7 +801,8 @@ def _tms_from_planned_sources(ctx, tms_dir: Path, clip_geom,
             raise _Stopped()
     write_tilemapresource(tms_dir, ctx.provider, ctx.task["name"],
                           ctx.bbox, sorted(exported_levels), ext=tms_ext)
-    return _maybe_mbtiles(ctx, "tms", tms_dir, "tms", tms_ext)
+    return _maybe_mbtiles(ctx, "tms", tms_dir,
+                    _mbtiles_scheme_for(_ctx_grid(ctx), "tms"), tms_ext)
 
 
 def _downloaded_raster_source(ctx, source_z: int) -> Path:
@@ -814,7 +861,8 @@ def _tms_from_dem(ctx, tms_dir: Path, clip_geom) -> list[str]:
     write_tilemapresource(tms_dir, ctx.provider, ctx.task["name"],
                           ctx.bbox, tms_levels, ext=tms_ext)
     _safe_unlink(src)
-    return _maybe_mbtiles(ctx, "tms", tms_dir, "tms", tms_ext)
+    return _maybe_mbtiles(ctx, "tms", tms_dir,
+                    _mbtiles_scheme_for(_ctx_grid(ctx), "tms"), tms_ext)
 
 
 def _stage_osm(ctx) -> list[str]:
@@ -868,7 +916,8 @@ def _stage_osm(ctx) -> list[str]:
                                    should_stop=ctx.should_stop)
         if stopped:
             raise _Stopped()
-        return _maybe_mbtiles(ctx, "osm", osm_dir, "xyz", "png")
+        return _maybe_mbtiles(ctx, "osm", osm_dir,
+                    _mbtiles_scheme_for(_ctx_grid(ctx), "osm"), "png")
 
     # DEM 的源不是影像 geotiff,而是渲染出的 4326 可视化图。切完由本分支自己清理:
     # 它可能同时被 tms 阶段用到,故不走下面 reused 的删除逻辑。
@@ -889,7 +938,8 @@ def _stage_osm(ctx) -> list[str]:
         if stopped:
             raise _Stopped()      # 保留可视化源,恢复时复用
         _safe_unlink(src_path)
-        return _maybe_mbtiles(ctx, "osm", osm_dir, "xyz", "png")
+        return _maybe_mbtiles(ctx, "osm", osm_dir,
+                    _mbtiles_scheme_for(_ctx_grid(ctx), "osm"), "png")
 
     reused = False
     if can_reuse_geotiff:
@@ -933,7 +983,8 @@ def _stage_osm(ctx) -> list[str]:
     # 用安全删除:删不掉不影响已切好的成果(阶段仍算成功)。
     if not reused:
         _safe_unlink(osm_src)
-    return _maybe_mbtiles(ctx, "osm", osm_dir, "xyz", "png")
+    return _maybe_mbtiles(ctx, "osm", osm_dir,
+                    _mbtiles_scheme_for(_ctx_grid(ctx), "osm"), "png")
 
 
 # ============ DEM → 可视化 RGB 源(供复用影像切片器)============
