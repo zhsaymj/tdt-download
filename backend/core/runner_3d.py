@@ -208,6 +208,25 @@ def _stage_convert_3d(ctx) -> list[str]:
     if not tileset.is_file():
         raise RuntimeError(f"产物缺失:{tileset.name}")
 
+    try:
+        from .tileset_optimizer import optimize_tileset
+        optimized = optimize_tileset(tileset)
+        if optimized.external_count:
+            logger.info("任务[%s] 3D Tiles 清单优化:外部化 %d 个 Tile 子树,根清单 %d -> %d 字节",
+                        task["name"], optimized.external_count,
+                        optimized.original_bytes, optimized.optimized_bytes)
+            ctx.tracker.update(key, message=(
+                f"已优化 3D Tiles 层级:外部化 {optimized.external_count} 个 Tile 子树"))
+        if optimized.missing_count:
+            logger.warning("任务[%s] 3D Tiles 清单有 %d 个失效内容引用,已从发布树剔除",
+                           task["name"], optimized.missing_count)
+            ctx.tracker.update(key, message=(
+                f"层级已优化,但有 {optimized.missing_count} 个失效瓦片引用已剔除"))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        logger.warning("任务[%s] 3D Tiles 清单优化失败,保留原始成果:%s",
+                       task["name"], exc)
+        ctx.tracker.update(key, message=f"层级优化未完成,已保留原始成果:{exc}")
+
     # 顶层 LOD 金字塔对根 tileset 精细度影响很大,一旦静默回退成平铺,
     # 成果"能打开但不好看",用户无从判断问题出在哪。此处只做可观测性:
     # 回退时给出中文提示,不改变成功/失败判定。

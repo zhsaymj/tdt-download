@@ -9,6 +9,7 @@ side_effect 伪造。watcher 线程默认关闭（_ENABLE_WATCHER=False），暂
 """
 
 import asyncio
+import json
 import tempfile
 import threading
 import time
@@ -163,6 +164,40 @@ class Runner3dCase(_TempDbCase):
         self.assertEqual(stages["convert_3d"]["status"], "done")
         # estimated_total 取输入目录递归 .osgb 总数
         self.assertEqual(stages["convert_3d"]["total"], 3)
+
+    def test_osgb_task_externalizes_tile_subtree(self):
+        p_osgb, _, _ = self._patch_processors()
+        osgb_dir = self.tmp / "osgb_external"
+        tile_input = osgb_dir / "Data" / "Tile_001"
+        tile_input.mkdir(parents=True)
+        (tile_input / "Tile_001.osgb").write_bytes(b"x")
+        task_id = create_task(TaskCreate(
+            name="三维外链", provider="local_osgb", bbox=BBOX,
+            source_path=str(osgb_dir), export="tile_3d"), total=1)
+
+        def fake_run(cmd, **kwargs):
+            out = Path(kwargs["out_dir"])
+            tile = out / "Data" / "Tile_001"
+            tile.mkdir(parents=True)
+            (tile / "Tile_001.b3dm").write_bytes(b"b3dm")
+            node = {"boundingVolume": {"box": [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]},
+                    "geometricError": 1, "refine": "REPLACE",
+                    "content": {"uri": "./Data/Tile_001/Tile_001.b3dm"}}
+            (out / "tileset.json").write_text(json.dumps({
+                "asset": {"version": "1.0"}, "geometricError": 2,
+                "root": {"boundingVolume": node["boundingVolume"],
+                         "geometricError": 2, "refine": "REPLACE",
+                         "children": [node]},
+            }), encoding="utf-8")
+            return self._ok_result(out / "tileset.json")
+
+        p_osgb.return_value.run.side_effect = fake_run
+        self._run(task_id)
+        out = self.tmp / "output" / "三维外链" / "3dtiles"
+        self.assertTrue((out / "Data" / "Tile_001" / "tileset.json").is_file())
+        root = json.loads((out / "tileset.json").read_text(encoding="utf-8"))
+        self.assertEqual(root["root"]["children"][0]["content"]["uri"],
+                         "./Data/Tile_001/tileset.json")
 
     # 2. local_pointcloud 按 export 集合跑 pc_dsm/pc_dem/pc_tile_3d
     def test_pointcloud_runs_stages_by_export_set(self):
