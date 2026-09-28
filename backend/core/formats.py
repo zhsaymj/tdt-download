@@ -385,12 +385,59 @@ def chain_to(kind: str) -> list[ExportStage]:
 # 这张表取代散落在 api/tasks.py、core/runner.py、models.py 的十余处
 # is_dem_provider()/is_building_provider() 分支。新增数据源只在此登记一行。
 
+# ---------- 数据源 → 网格类型 ----------
+# 坐标系不是"数据语义"而是"网格约定",故不新开 DataKind —— 那要改 DataKind.ALL
+# 及所有 (RASTER_IMAGE,) 元组,侵入面大。这里单独一张表,与 PROVIDER_KIND 并列。
+# 术语沿用项目服务层已有的说法(core/service_scan.py、core/service_bounds.py)。
+
+#: 网格类型
+GEO_GEODETIC = "geodetic"   # EPSG:4326 经纬度瓦片(天地图 TileMatrixSet=c)
+GEO_MERCATOR = "mercator"   # EPSG:3857 Web 墨卡托 XYZ
+
+#: provider key -> 网格类型。未登记者回落 geodetic(与旧行为一致:
+#: 旧代码没有网格概念,影像一律按 4326 处理)。
+PROVIDER_GRID: dict[str, str] = {
+    # 天地图:EPSG:4326 经纬度瓦片
+    "tianditu_img": GEO_GEODETIC,
+    "tianditu_vec": GEO_GEODETIC,
+    "tianditu_ter": GEO_GEODETIC,
+    # Google 影像:EPSG:3857 墨卡托 XYZ
+    "google_img": GEO_MERCATOR,
+    "google_hybrid": GEO_MERCATOR,
+    "google_road": GEO_MERCATOR,
+    "google_terrain": GEO_MERCATOR,
+    # Esri World Imagery:同为墨卡托 XYZ,与 Google 网格完全同构
+    # (实测 165 张瓦片 9 窗口互相关,偏移 ≤4m 且不随位置变化)
+    "esri_imagery": GEO_MERCATOR,
+    # 现有 DEM 本来就是墨卡托网格,登记后可统一分流
+    "esri_terrain": GEO_MERCATOR,
+    "aws_terrain": GEO_MERCATOR,
+}
+
+
+def grid_of(provider: str) -> str:
+    """取数据源的网格类型。提交前即可调用,无需构造 provider 实例。"""
+    if provider == "img":          # 兼容早期落库的短 key
+        provider = "tianditu_img"
+    return PROVIDER_GRID.get(provider, GEO_GEODETIC)
+
+
 #: provider key -> DataKind
 PROVIDER_KIND: dict[str, str] = {
     # 天地图影像/底图(EPSG:4326 经纬度瓦片)
     "tianditu_img": DataKind.RASTER_IMAGE,
     "tianditu_vec": DataKind.RASTER_IMAGE,
     "tianditu_ter": DataKind.RASTER_IMAGE,
+    # Google 影像 4 图层与 Esri World Imagery(EPSG:3857 墨卡托 XYZ)。
+    # kind 与天地图同为 RASTER_IMAGE —— 这是有意的:网格差异由 PROVIDER_GRID
+    # 表达,kind 只管"数据是什么"。因此新数据源自动获得 geotiff/tms/osm
+    # 三个阶段,且 worker 的 _resolve_runner 会自然路由到 runner.run_task,
+    # 无需改动进程隔离层。
+    "google_img": DataKind.RASTER_IMAGE,
+    "google_hybrid": DataKind.RASTER_IMAGE,
+    "google_road": DataKind.RASTER_IMAGE,
+    "google_terrain": DataKind.RASTER_IMAGE,
+    "esri_imagery": DataKind.RASTER_IMAGE,
     # 高程(Esri Terrain3D,LERC 编码,EPSG:3857)
     "esri_terrain": DataKind.RASTER_DEM,
     # 早期改用 Esri 前的 key,库里仍有 1 条存量任务(2026-07 实测),
