@@ -10,7 +10,6 @@ XYZ 约定(与示例数据 osm_tiles_tdt_jrg 一致):
 """
 from __future__ import annotations
 
-import math
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -25,13 +24,11 @@ from rasterio.transform import from_bounds
 from rasterio.vrt import WarpedVRT
 from rasterio.windows import from_bounds as window_from_bounds
 
+from .mercator_tiling import (
+    LAT_LIMIT, MERC_MAX, TILE_SIZE, _tile_xyz_range, lonlat_to_xyz,
+    tile_bounds_3857,
+)
 from .tile_clip import prepare_geoms, tile_alpha_mask, tile_relation, _bounds_of
-
-TILE_SIZE = 256
-# Web 墨卡托世界范围半边长(米)
-MERC_MAX = 20037508.342789244
-# Web 墨卡托纬度上限(度)
-LAT_LIMIT = 85.05112878
 
 
 def _has_explicit_alpha_or_mask(ds) -> bool:
@@ -49,39 +46,6 @@ def _warped_vrt_kwargs(ds, crs: str) -> dict:
     if not _has_explicit_alpha_or_mask(ds):
         kwargs.update(src_nodata=ds.nodata, nodata=0)
     return kwargs
-
-
-def lonlat_to_xyz(lon: float, lat: float, z: int) -> tuple[int, int]:
-    """经纬度 → OSM XYZ 瓦片行列 (x, y)。"""
-    lat = max(-LAT_LIMIT, min(LAT_LIMIT, lat))
-    n = 2 ** z
-    x = int((lon + 180.0) / 360.0 * n)
-    lat_rad = math.radians(lat)
-    y = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
-    x = max(0, min(n - 1, x))
-    y = max(0, min(n - 1, y))
-    return x, y
-
-
-def tile_bounds_3857(x: int, y: int, z: int) -> tuple[float, float, float, float]:
-    """XYZ 瓦片在 EPSG:3857 下的地理范围 (minx, miny, maxx, maxy),单位米。"""
-    n = 2 ** z
-    span = 2 * MERC_MAX / n
-    minx = -MERC_MAX + x * span
-    maxx = minx + span
-    maxy = MERC_MAX - y * span
-    miny = maxy - span
-    return minx, miny, maxx, maxy
-
-
-def _tile_xyz_range(bbox, z: int):
-    """给定经纬度 bbox 与级别,返回覆盖的 (x 列表, y 列表)。"""
-    west, south, east, north = bbox
-    x0, y0 = lonlat_to_xyz(west, north, z)   # 左上
-    x1, y1 = lonlat_to_xyz(east, south, z)   # 右下
-    xs = range(min(x0, x1), max(x0, x1) + 1)
-    ys = range(min(y0, y1), max(y0, y1) + 1)
-    return xs, ys
 
 
 def _write_png(path: Path, arr: np.ndarray, transform) -> None:
