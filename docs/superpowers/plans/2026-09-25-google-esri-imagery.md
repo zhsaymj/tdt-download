@@ -1093,7 +1093,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 - Modify: `backend/config.py`
 - Modify: `config.example.yaml`
 
-- [ ] **Step 1: 加两个 dataclass**
+- [x] **Step 1: 加两个 dataclass**
 
 在 `backend/config.py` 的 `WorkerConfig` 之后插入:
 
@@ -1144,7 +1144,7 @@ class EsriImageryConfig:
     probe_cache_hours: float = 24.0
 ```
 
-- [ ] **Step 2: 注册到 `Config` 并加载**
+- [x] **Step 2: 注册到 `Config` 并加载**
 
 在 `Config` 类的字段列表里(`worker` 之后)加:
 
@@ -1172,7 +1172,7 @@ class EsriImageryConfig:
         cfg.esri_imagery.proxy = env_eproxy
 ```
 
-- [ ] **Step 3: 补 `_CONFIG_TEMPLATE`**
+- [x] **Step 3: 补 `_CONFIG_TEMPLATE`**
 
 `_CONFIG_TEMPLATE` 是首次启动自动生成的模板,**必须同步** —— 只改 `config.example.yaml` 会让新用户拿到的 `config.yaml` 缺这两节。在模板字符串末尾(`py3dtiles_python` 那行之后)追加:
 
@@ -1203,11 +1203,11 @@ esri_imagery:
   probe_cache_hours: 24
 ```
 
-- [ ] **Step 4: 同步 `config.example.yaml`**
+- [x] **Step 4: 同步 `config.example.yaml`**
 
 把 Step 3 的同一段 YAML 追加到 `config.example.yaml` 末尾。
 
-- [ ] **Step 5: 验证配置能加载**
+- [x] **Step 5: 验证配置能加载**
 
 Run:
 ```bash
@@ -1230,7 +1230,7 @@ esri.max_zoom = 19
 esri.probe_max_zoom = True
 ```
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add backend/config.py config.example.yaml
@@ -1253,7 +1253,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 - Create: `backend/providers/google.py`
 - Create: `tests/test_google_provider.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `tests/test_google_provider.py`:
 
@@ -1386,12 +1386,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `.venv/Scripts/python.exe -m unittest tests.test_google_provider -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'backend.providers.google'`
 
-- [ ] **Step 3: 创建 `backend/providers/google.py`**
+- [x] **Step 3: 创建 `backend/providers/google.py`**
 
 ```python
 """Google 影像数据源(非官方瓦片端点,EPSG:3857 墨卡托 XYZ)。
@@ -1484,12 +1484,12 @@ def build_google_provider(key: str, cfg) -> GoogleProvider:
     return GoogleProvider(key, cfg)
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `.venv/Scripts/python.exe -m unittest tests.test_google_provider -v`
 Expected: PASS,18 项通过
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add backend/providers/google.py tests/test_google_provider.py
@@ -1524,7 +1524,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 - Create: `backend/providers/esri_imagery.py`
 - Create: `tests/test_esri_imagery_provider.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `tests/test_esri_imagery_provider.py`:
 
@@ -1684,12 +1684,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `.venv/Scripts/python.exe -m unittest tests.test_esri_imagery_provider -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'backend.providers.esri_imagery'`
 
-- [ ] **Step 3: 创建 `backend/providers/esri_imagery.py`(provider 部分)**
+- [x] **Step 3: 创建 `backend/providers/esri_imagery.py`(provider 部分)**
 
 ```python
 """Esri World Imagery 数据源(EPSG:3857 墨卡托 XYZ)。
@@ -1817,12 +1817,12 @@ def build_esri_imagery_provider(cfg) -> EsriImageryProvider:
     return EsriImageryProvider(cfg)
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `.venv/Scripts/python.exe -m unittest tests.test_esri_imagery_provider -v`
 Expected: PASS,20 项通过。**特别确认 `test_real_ocean_tile_not_empty` 是绿的** —— 它红了说明判据用了朴素规则。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add backend/providers/esri_imagery.py tests/test_esri_imagery_provider.py
@@ -1846,7 +1846,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 - Create: `tests/test_formats_grid.py`
 - Modify: `backend/core/formats.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `tests/test_formats_grid.py`:
 
@@ -1920,12 +1920,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `.venv/Scripts/python.exe -m unittest tests.test_formats_grid -v`
 Expected: FAIL — `ImportError: cannot import name 'GEO_GEODETIC' from 'backend.core.formats'`
 
-- [ ] **Step 3: 改 `backend/core/formats.py`**
+- [x] **Step 3: 改 `backend/core/formats.py`**
 
 在 `PROVIDER_KIND` 字典**之前**插入网格表:
 
@@ -1982,17 +1982,17 @@ def grid_of(provider: str) -> str:
     "esri_imagery": DataKind.RASTER_IMAGE,
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `.venv/Scripts/python.exe -m unittest tests.test_formats_grid -v`
 Expected: PASS,11 项通过
 
-- [ ] **Step 5: 运行全量测试**
+- [x] **Step 5: 运行全量测试**
 
 Run: `.venv/Scripts/python.exe -m unittest discover tests`
 Expected: 全绿
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add backend/core/formats.py tests/test_formats_grid.py
@@ -2020,7 +2020,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 - Create: `tests/test_runner_grid.py`
 - Modify: `backend/core/runner.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `tests/test_runner_grid.py`:
 
@@ -2105,12 +2105,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `.venv/Scripts/python.exe -m unittest tests.test_runner_grid -v`
 Expected: FAIL — `ImportError: cannot import name '_crs_for_grid' from 'backend.core.runner'`
 
-- [ ] **Step 3: 在 `backend/core/runner.py` 加三个辅助函数**
+- [x] **Step 3: 在 `backend/core/runner.py` 加三个辅助函数**
 
 先在 import 段补充(在 `from .formats import ...` 那行里加 `GEO_MERCATOR, grid_of`):
 
@@ -2165,7 +2165,7 @@ def _build_provider_for(task):
     return build_provider(key, token_src)
 ```
 
-- [ ] **Step 4: 改 `run_task` 里的 provider 构造**
+- [x] **Step 4: 改 `run_task` 里的 provider 构造**
 
 把现有的这段(约 110-118 行):
 
@@ -2188,7 +2188,7 @@ def _build_provider_for(task):
         provider = _build_provider_for(task)
 ```
 
-- [ ] **Step 5: 改注记的条件**
+- [x] **Step 5: 改注记的条件**
 
 注记只有天地图有。现有条件是 `not is_dem`,对新 provider 会误判为"可以有注记"。把(约 123 行):
 
@@ -2208,7 +2208,7 @@ def _build_provider_for(task):
                 and grid_of(task["provider"]) != GEO_MERCATOR)
 ```
 
-- [ ] **Step 6: 改下载阶段的区间函数**
+- [x] **Step 6: 改下载阶段的区间函数**
 
 把(约 190 行)`range_fn = mercator_range_for_bbox if is_dem else range_for_bbox` 改为:
 
@@ -2217,7 +2217,7 @@ def _build_provider_for(task):
         range_fn = _range_fn_for(task["provider"])
 ```
 
-- [ ] **Step 7: 在 `_ExportCtx` 里带上网格**
+- [x] **Step 7: 在 `_ExportCtx` 里带上网格**
 
 找到 `_ExportCtx` 的 dataclass 定义,加一个字段:
 
@@ -2232,7 +2232,7 @@ def _build_provider_for(task):
         grid=grid_of(task["provider"]),
 ```
 
-- [ ] **Step 8: 改 `_stage_geotiff` 按网格拼接**
+- [x] **Step 8: 改 `_stage_geotiff` 按网格拼接**
 
 把 `_stage_geotiff` 里的(约 470 行):
 
@@ -2264,17 +2264,17 @@ def _build_provider_for(task):
         # 裁剪在主文件坐标系下做;几何是 WGS84,3857 主文件需先转换(见 _clip_geom_of)。
 ```
 
-- [ ] **Step 9: 运行测试**
+- [x] **Step 9: 运行测试**
 
 Run: `.venv/Scripts/python.exe -m unittest tests.test_runner_grid -v`
 Expected: PASS,11 项通过
 
-- [ ] **Step 10: 运行全量测试**
+- [x] **Step 10: 运行全量测试**
 
 Run: `.venv/Scripts/python.exe -m unittest discover tests`
 Expected: 全绿。**特别确认 `test_scheduler` 与 `test_worker_dispatch` 是绿的** —— 它们红了说明改动意外侵入了进程隔离层,停下来看为什么,不要改测试。
 
-- [ ] **Step 11: 提交**
+- [x] **Step 11: 提交**
 
 ```bash
 git add backend/core/runner.py tests/test_runner_grid.py
@@ -2301,7 +2301,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 **Files:**
 - Create: `docs/验证记录-google-esri影像.md`
 
-- [ ] **Step 1: 开启配置**
+- [x] **Step 1: 开启配置**
 
 编辑 `config.yaml`(不是 example),把两个源打开并填代理:
 
@@ -2315,7 +2315,7 @@ esri_imagery:
   proxy: "127.0.0.1:6789"
 ```
 
-- [ ] **Step 2: 启动服务并提交 Google 小范围任务**
+- [x] **Step 2: 启动服务并提交 Google 小范围任务**
 
 Run: `start.bat`(另开终端),浏览器打开 http://127.0.0.1:8000
 
@@ -2323,7 +2323,7 @@ Run: `start.bat`(另开终端),浏览器打开 http://127.0.0.1:8000
 
 Expected:任务正常完成,`downloaded` 与预估瓦片数一致,`failed` 为 0。
 
-- [ ] **Step 3: 验证产出的坐标系与坐标值**
+- [x] **Step 3: 验证产出的坐标系与坐标值**
 
 Run:
 ```bash
@@ -2339,13 +2339,13 @@ for f in sorted(glob.glob('output/*/*_z17.tif')):
 ```
 Expected:`crs = EPSG:3857`,bounds 是米制大数(约 x≈1.295e7、y≈4.86e6),不是经纬度小数。
 
-- [ ] **Step 4: QGIS 对齐抽查**
+- [x] **Step 4: QGIS 对齐抽查**
 
 在 QGIS 打开该 GeoTIFF,叠加一个在线底图(如 OSM XYZ),确认建筑/道路对齐,抽查偏移 ≤4m。
 
 > 若整体错位到非洲/南极附近,说明坐标系与坐标值不匹配 —— 回看 Task 2 的 bounds 分支与 Task 9 的 `mosaic_crs` 传参。
 
-- [ ] **Step 5: 验证 `google_road` 的单波段路径**
+- [x] **Step 5: 验证 `google_road` 的单波段路径**
 
 提交同范围、数据源 `google_road`、级别 z16 的任务。
 
@@ -2362,7 +2362,7 @@ for f in sorted(glob.glob('output/*road*/*_z16.tif')):
 ```
 Expected:能正常打开(波段数为 1 或经调色板展开后为 3,取决于 `_read_tile` 的展开行为),crs 为 EPSG:3857。
 
-- [ ] **Step 6: 【关键】验证占位图不污染缓存(设计清单第 13 条)**
+- [x] **Step 6: 【关键】验证占位图不污染缓存(设计清单第 13 条)**
 
 提交任务:数据源 `esri_imagery`,范围选**南海海域**(114.0~114.1 / 15.0~15.1),级别 z16。
 
@@ -2388,7 +2388,7 @@ print('通过:缓存无占位图')
 ```
 Expected:`其中占位图=0`,打印「通过」。
 
-- [ ] **Step 7: 【关键】验证真实深海瓦片不被误判(设计清单第 14 条)**
+- [x] **Step 7: 【关键】验证真实深海瓦片不被误判(设计清单第 14 条)**
 
 提交任务:数据源 `esri_imagery`,范围选**太平洋**(-140.0~-139.9 / -20.0~-19.9),级别 z16。
 
@@ -2409,7 +2409,7 @@ Expected:有瓦片被缓存,打印「通过」。
 
 > 这两条(Step 6 与 7)必须**都**过。只过 Step 6 说明判据过于激进(把真实数据也当空的);只过 Step 7 说明判据没生效。
 
-- [ ] **Step 8: 验证 Google 404 分流(设计清单第 16 条)**
+- [x] **Step 8: 验证 Google 404 分流(设计清单第 16 条)**
 
 提交任务:数据源 `google_img`,范围选**渤海近岸**(119.5~119.55 / 38.5~38.55),级别 z16。
 
@@ -2419,7 +2419,7 @@ Expected:任务**不报"端点可能已变更"**,正常完成;成果对应区域
 
 Run: `grep -c "404" logs/*.log`(或在界面的运行日志里查看)
 
-- [ ] **Step 9: 写验证记录**
+- [x] **Step 9: 写验证记录**
 
 创建 `docs/验证记录-google-esri影像.md`,记录:
 
@@ -2446,7 +2446,7 @@ Run: `grep -c "404" logs/*.log`(或在界面的运行日志里查看)
 (填写:通过 / 发现的问题及处理)
 ```
 
-- [ ] **Step 10: 提交**
+- [x] **Step 10: 提交**
 
 ```bash
 git add docs/验证记录-google-esri影像.md
