@@ -251,6 +251,24 @@ async def _probe_imagery_max_level(bbox, provider: str) -> int | None:
                                    settings.esri_imagery)
 
 
+def _anno_extra(detail: dict, levels: list[int]) -> tuple[int, int]:
+    """注记带来的额外 (瓦片数, 字节数)。
+
+    只统计 **≤ ANNOTATION_MAX_Z 的级别** —— 天地图注记最高 z18,
+    Google 选 z19~21 时注记一张都不下。旧的 `total *= 2` 在这种场景下
+    会虚高一倍。
+
+    detail["levels"] 已是逐级别明细 {z, tiles, bytes},直接筛出来求和:
+    不必再算一次瓦片数,也不依赖任何"单瓦片平均字节"的经验常量。
+    """
+    from ..core.runner import ANNOTATION_MAX_Z
+
+    keep = {int(z) for z in levels if int(z) <= ANNOTATION_MAX_Z}
+    rows = [r for r in detail.get("levels", []) if r.get("z") in keep]
+    return (sum(r.get("tiles", 0) for r in rows),
+            sum(r.get("bytes", 0) for r in rows))
+
+
 async def _probe_dem_max_level(bbox, provider: str) -> int | None:
     """探测 DEM 数据源在该范围的最高可用级别;None 表示探测失败(网络问题)。"""
     from ..providers.terrain import probe_max_level
@@ -817,13 +835,14 @@ async def api_create_task(data: TaskCreate):
         raise HTTPException(400, "所选范围在该级别下没有瓦片,请检查范围或级别")
     # 预估原始瓦片下载量(字节):仅下载量,非成果大小
     est_bytes = detail["total_bytes"]
-    # 叠加注记时需额外下载同网格的注记瓦片,总数翻倍(保持进度准确)。
-    # 注记是天地图特有的同网格覆盖层:DEM 与墨卡托源(Google/Esri)都没有,
-    # 用 grid 判定而非逐个列 provider。
-    has_annotation = (not dem and grid_of(data.provider) != GEO_MERCATOR)
+    # 叠加注记要额外下载同网格的注记瓦片,进度分母与体积都要算上。
+    # ⚠️ 不能整体翻倍:天地图注记最高 z18(见 ANNOTATION_MAX_Z),
+    # Google 选 z19~21 时注记一张都不下,翻倍会虚高一倍。
+    has_annotation = not dem
     if data.annotate and has_annotation:
-        total *= 2
-        est_bytes *= 2
+        anno_tiles, anno_bytes = _anno_extra(detail, levels)
+        total += anno_tiles
+        est_bytes += anno_bytes
 
     task_id = create_task(data, total, est_bytes)
     await task_queue.enqueue(task_id)
