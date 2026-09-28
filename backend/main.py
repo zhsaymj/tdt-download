@@ -18,6 +18,7 @@ from .api import buildings as buildings_api
 from .api import local as local_api
 from .api import services as services_api
 from .api import tasks as tasks_api
+from .api import tiles as tiles_api
 from .api import tokens as tokens_api
 from .api import tools as tools_api
 from .api import ws as ws_api
@@ -37,6 +38,8 @@ async def lifespan(app: FastAPI):
     reset_stale_running()
     # 主进程只做调度:任务由 worker 子进程执行,不再注册本地 runner
     task_queue.start()
+    # 预览瓦片转发用的共享 HTTP session(必须在事件循环里创建)
+    await tiles_api.startup()
     # tk 使用池:池空时把 config.yaml 的密钥作为初始种子导入;注入 WS 广播回调
     token_pool.seed_from_config(settings.tianditu.token)
     token_pool.reload()
@@ -56,6 +59,9 @@ async def lifespan(app: FastAPI):
     finally:
         # 退出前把未落库的计数写回
         token_pool.flush()
+        # 先关预览 session:下面 task_queue.shutdown() 会 join worker 数十秒,
+        # 放它后面会让 session 悬着那么久(Unclosed client session 警告)
+        await tiles_api.shutdown()
         # 收工:通知 worker 退出,超时强杀。
         # 必须 await —— shutdown 内部 join 每个 worker(最坏 timeout×N 秒),
         # 同步调用会阻塞事件循环,期间服务完全不响应、Ctrl-C 收尾也被拖着。
@@ -65,6 +71,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="天地图下载处理工具", lifespan=lifespan)
 
 app.include_router(tasks_api.router)
+app.include_router(tiles_api.router)
 app.include_router(tokens_api.router)
 app.include_router(ws_api.router)
 app.include_router(buildings_api.router)
