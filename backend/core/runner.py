@@ -26,6 +26,9 @@ from ..config import settings
 from ..models import get_task, parse_export, update_task
 from ..providers.buildings import is_building_provider
 from ..providers.local_file import LocalFileProvider
+from ..providers.esri_imagery import (build_esri_imagery_provider,
+                                      is_esri_imagery_provider)
+from ..providers.google import build_google_provider, is_google_provider
 from ..providers.terrain import build_terrain_provider, is_dem_provider
 from ..providers.tianditu import build_annotation_provider, build_provider
 from .containers import container_of, convert_raster
@@ -34,8 +37,8 @@ from .mbtiles import pack_mbtiles
 from .dem import hillshade_from_dem, mosaic_dem_geotiff
 from .dem_tiling import mercator_range_for_bbox, mosaic_bounds_3857
 from .downloader import TileDownloader
-from .formats import (CONTAINERS, DataKind, STAGES, is_local_source, kind_of,
-                      resolve_outputs)
+from .formats import (CONTAINERS, GEO_MERCATOR, DataKind, STAGES, grid_of,
+                      is_local_source, kind_of, resolve_outputs)
 from .logs import logger
 from .metadata import write_metadata
 from .mosaic import mosaic_to_geotiff
@@ -74,6 +77,41 @@ def _safe_unlink(p: Path, retries: int = 5, delay: float = 0.3) -> None:
     logger.warning("临时文件暂时无法删除(将于下次清理):%s", p)
 
 
+def _range_fn_for(provider: str):
+    """按数据源的网格返回瓦片区间函数。
+
+    geodetic(天地图)用 4326 的 range_for_bbox;mercator(Google/Esri 影像、
+    Esri DEM)用墨卡托 XYZ 的 mercator_range_for_bbox。两者不能混用 ——
+    混了会按错误的网格取瓦片,下出来的图整体错位。
+    """
+    if grid_of(provider) == GEO_MERCATOR:
+        return mercator_range_for_bbox
+    return range_for_bbox
+
+
+def _crs_for_grid(grid: str) -> str:
+    """网格对应的拼接坐标系。"""
+    return "EPSG:3857" if grid == GEO_MERCATOR else "EPSG:4326"
+
+
+def _build_provider_for(task):
+    """按 provider key 构造数据源实例(分发即守卫)。
+
+    分支顺序无所谓(各 is_xxx 互斥),但必须都在 —— 漏一个会静默回落到
+    build_provider 并报"暂不支持的数据源"。
+    """
+    key = task["provider"]
+    if is_dem_provider(key):
+        return build_terrain_provider(key)
+    if is_google_provider(key):
+        return build_google_provider(key, settings.google)
+    if is_esri_imagery_provider(key):
+        return build_esri_imagery_provider(settings.esri_imagery)
+    token_src = (token_pool.use_token if token_pool.has_any()
+                 else settings.tianditu.token)
+    return build_provider(key, token_src)
+
+
 async def run_task(task_id: str, emit, should_stop) -> None:
     """执行任务。
 
@@ -108,11 +146,8 @@ async def run_task(task_id: str, emit, should_stop) -> None:
         # 与 metadata),不做任何下载。这样 write_tilemapresource、_write_metadata
         # 等无需到处判空。
         provider = LocalFileProvider(task["provider"], local_src)
-    elif is_dem:
-        provider = build_terrain_provider(task["provider"])
     else:
-        token_src = token_pool.use_token if token_pool.has_any() else settings.tianditu.token
-        provider = build_provider(task["provider"], token_src)
+        provider = _build_provider_for(task)
     downloader = None if local_src is not None else TileDownloader(
         provider,
         cache_dir=settings.cache_dir,
@@ -123,8 +158,12 @@ async def run_task(task_id: str, emit, should_stop) -> None:
     )
 
     # 注记要联网下载同网格的注记瓦片,本地文件源没有这个概念
+    # 注记是天地图特有的同网格覆盖层(cia/cva/cta)。DEM、本地文件源、
+    # Google/Esri 都没有这个概念 —— 用 grid 判定而非逐个列 provider:
+    # 墨卡托源一律无注记,新增墨卡托数据源时不必再回来改这里。
     annotate = (task.get("annotate", False) and not is_dem
-                and local_src is None)
+                and local_src is None
+                and grid_of(task["provider"]) != GEO_MERCATOR)
     anno_token_src = token_pool.use_token if token_pool.has_any() else settings.tianditu.token
     anno_provider = build_annotation_provider(task["provider"], anno_token_src) if annotate else None
     anno_downloader = TileDownloader(
@@ -186,7 +225,9 @@ async def run_task(task_id: str, emit, should_stop) -> None:
 
         tracker.start("download", total=total, message="下载原始瓦片")
         logger.info("任务[%s] 阶段[下载] 开始,共 %d 张瓦片", task["name"], total)
-        range_fn = mercator_range_for_bbox if is_dem else range_for_bbox
+        # 按网格取区间函数:影像也可能是墨卡托(Google/Esri),
+        # 不能再按 is_dem 二选一
+        range_fn = _range_fn_for(task["provider"])
         stopped = False
         for z in levels:
             tr = range_fn(west, south, east, north, z)
@@ -217,6 +258,8 @@ async def run_task(task_id: str, emit, should_stop) -> None:
         task=task, provider=provider, downloader=downloader,
         anno_downloader=anno_downloader, out_dir=out_dir, bbox=bbox,
         levels=levels, geom=geom, target_crs=target_crs, is_dem=is_dem,
+        # 数据源网格("geodetic" / "mercator")。各导出阶段据此选瓦片数学与拼接 crs。
+        grid=grid_of(task["provider"]),
         tracker=tracker, should_stop=should_stop, cur_stage="",
         # 延后到全部阶段结束后再做的容器转换(见 _stage_geotiff 的说明)
         deferred_convert=[],
@@ -467,7 +510,10 @@ def _stage_geotiff(ctx) -> list[str]:
     task = ctx.task
     anno_path_fn = ctx.anno_downloader.tile_path if ctx.anno_downloader is not None else None
     levels = ctx.levels
-    trs = {z: range_for_bbox(*ctx.bbox, z) for z in levels}
+    # 按网格取区间与拼接坐标系:天地图出 4326,Google/Esri 出 3857
+    range_fn = _range_fn_for(task["provider"])
+    mosaic_crs = _crs_for_grid(ctx.grid)
+    trs = {z: range_fn(*ctx.bbox, z) for z in levels}
     total_rows = sum(trs[z].rows for z in levels)
     ctx.tracker.start("geotiff", total=total_rows, message="合并 GeoTIFF")
     outputs = []
@@ -481,8 +527,10 @@ def _stage_geotiff(ctx) -> list[str]:
             ctx.tracker.update("geotiff", done=_base + done_rows,
                                message=f"拼接第 {_z} 级({done_rows}/{total_r} 行)")
 
-        # 主文件恒为 EPSG:4326(供 OSM/TMS 切片复用,不必再自拼源)。
-        # 裁剪在 4326 下做(几何本身即 WGS84,直接匹配)。
+        # 主文件的坐标系跟随数据源网格:天地图出 4326,Google/Esri 出 3857。
+        # 下游 tms/osm 会据此决定是否需要重投影。
+        # 裁剪在主文件坐标系下做;几何是 WGS84,3857 主文件需先转换
+        # (见 postprocess.clip_to_geometry)。
         geotiff = ctx.out_dir / f"{task['name']}_z{z}.tif"
         if ctx.local_src is not None:
             # 本地源:没有瓦片可拼,直接由源文件重采样出该级别的图。
@@ -491,7 +539,8 @@ def _stage_geotiff(ctx) -> list[str]:
             _resample_to_level(ctx, ctx.local_src, geotiff, tr, on_row)
         else:
             mosaic_to_geotiff(ctx.provider, settings.cache_dir, tr, geotiff,
-                              ctx.downloader.tile_path, anno_path_fn, on_row=on_row)
+                              ctx.downloader.tile_path, anno_path_fn,
+                              on_row=on_row, crs=mosaic_crs)
 
         # 裁剪 + 需要 OSM 时:裁剪前把最高级那张未裁剪 4326 图留一份给 OSM 复用。
         # OSM 需未裁剪源(自带几何遮罩精确切边),裁过的源会在几何边缘产生暗边。
