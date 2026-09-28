@@ -44,23 +44,19 @@ def _estimate_total(bbox, levels: list[int], provider: str) -> int:
 
 
 def _z_cap_for(provider: str) -> int:
-    """该数据源的服务级最高级别(前端下拉的上限)。
+    """该数据源的服务级最高级别。
 
-    注意这只是**服务级天花板**。Esri 的实际可用级别随地区变化,
-    由 /api/tasks/imagery_max_level 按选区探测(设计 §3.11)。
+    委托给 core.formats(级别范围的唯一判定处)—— 此处曾是第二份实现,
+    与 models.level_list 的硬编码 18 矛盾,导致 Google z21 / Esri z19 下不到。
     """
-    if is_dem_provider(provider):
-        return DEM_LAYERS[provider][2]
-    if is_google_provider(provider):
-        return int(settings.google.max_zoom)
-    if is_esri_imagery_provider(provider):
-        return int(settings.esri_imagery.max_zoom)
-    return 18          # 天地图
+    from ..core.formats import z_cap_of
+    return z_cap_of(provider)
 
 
 def _z_floor_for(provider: str) -> int:
-    """该数据源的最低级别。DEM 从 0 起,影像从 1 起(z0 盖全球,对影像无意义)。"""
-    return 0 if is_dem_provider(provider) else 1
+    """该数据源的最低级别。委托给 core.formats(同上前提)。"""
+    from ..core.formats import z_floor_of
+    return z_floor_of(provider)
 
 
 # DEM 单瓦片平均字节数(Esri Terrain3D LERC 经验值,约 40-90KB)

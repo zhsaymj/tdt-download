@@ -422,6 +422,43 @@ def grid_of(provider: str) -> str:
     return PROVIDER_GRID.get(provider, GEO_GEODETIC)
 
 
+#: 未登记数据源的级别回落(与旧行为一致:影像 1~18)
+_DEFAULT_Z_CAP = 18
+
+
+def z_cap_of(provider: str) -> int:
+    """数据源的**服务级**最高级别。
+
+    ⚠️ 这是级别范围的唯一判定处。此前 api/tasks.py 按 provider 配置判定、
+    models.level_list 却硬编码 18,两者矛盾且 create_task 走后者 ——
+    导致 Google 的 z21 与 Esri 的 z19 实际下不到(请求 [20,21] 会被过滤成
+    空列表,任务直接建不出来),且不报错。
+
+    注意这只是**服务级天花板**。Esri 影像的实际可用级别随地区变化,
+    由 /api/tasks/imagery_max_level 按选区探测(见设计 §3.11)。
+    """
+    from ..config import settings
+    from ..providers.terrain import DEM_LAYERS, is_dem_provider
+
+    if provider == "img":
+        provider = "tianditu_img"
+    if is_dem_provider(provider):
+        return DEM_LAYERS[provider][2]
+    from ..providers.esri_imagery import is_esri_imagery_provider
+    from ..providers.google import is_google_provider
+    if is_google_provider(provider):
+        return int(settings.google.max_zoom)
+    if is_esri_imagery_provider(provider):
+        return int(settings.esri_imagery.max_zoom)
+    return _DEFAULT_Z_CAP
+
+
+def z_floor_of(provider: str) -> int:
+    """数据源的最低级别。DEM 从 0 起,影像从 1 起(z0 盖全球,对影像无意义)。"""
+    from ..providers.terrain import is_dem_provider
+    return 0 if is_dem_provider(provider) else 1
+
+
 #: provider key -> DataKind
 PROVIDER_KIND: dict[str, str] = {
     # 天地图影像/底图(EPSG:4326 经纬度瓦片)

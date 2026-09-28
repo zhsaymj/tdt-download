@@ -218,18 +218,20 @@ class TaskCreate(BaseModel):
     def level_list(self) -> list[int]:
         """归一化出去重升序的级别列表:优先 levels,回退 z_min..z_max。
 
-        天地图级别 1-18;DEM(Esri Terrain3D)级别 0-16(允许 0 级)。
+        级别范围**按数据源**取(天地图 1-18、Google 1-21、Esri 影像 1-19、
+        DEM 0-16),由 core.formats.z_cap_of/z_floor_of 单处判定。
+
+        ⚠️ 这里曾经硬编码「非 DEM 一律 1-18」,与 api 层的按 provider 判定
+        矛盾 —— 后果是 Google 的 z21 / Esri 的 z19 实际下不到(请求 [20,21]
+        会被过滤成空列表,任务直接建不出来),且**不报错**。
         """
+        from .core.formats import z_cap_of, z_floor_of
         from .providers.buildings import is_building_provider
-        from .providers.terrain import DEM_LAYERS, is_dem_provider
         # 三维建筑无瓦片级别概念(数据是矢量要素集);返回合成级别让通用校验通过,
         # 底面高程 DEM 的级别由 runner 按范围自行决定。
         if is_building_provider(self.provider):
             return [0]
-        if is_dem_provider(self.provider):
-            z_floor, z_cap = 0, DEM_LAYERS[self.provider][2]
-        else:
-            z_floor, z_cap = 1, 18
+        z_floor, z_cap = z_floor_of(self.provider), z_cap_of(self.provider)
         if self.levels:
             return sorted({z for z in self.levels if z_floor <= z <= z_cap})
         if self.z_min is not None and self.z_max is not None and self.z_min <= self.z_max:
