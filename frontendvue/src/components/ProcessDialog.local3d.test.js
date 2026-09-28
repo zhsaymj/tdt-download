@@ -32,8 +32,13 @@ test('阶段 key → 格式名映射集中到 utils/provider,提交与补导两�
   // 映射值本身在 provider.test.js 锁定;这里锁引用关系:
   // 早先 AddExportDialog 只抄了 dem→geotiff 一条本地映射,三维任务补导时对不上阶段,
   // 故 FMT_NAME_OF_STAGE 集中到 utils/provider,两处不得再各抄一份。
-  assert.ok(componentSource.includes("import { fmtNameOf } from '../utils/provider'"),
-    'ProcessDialog 应使用共享映射')
+  // 不用正则、也不精确匹配整行 import:该断言要锁的是"从共享模块引入 fmtNameOf"
+  // 这一语义,不是 import 的成员清单 —— 后者加个 canAnnotate 之类的新成员就会误报
+  // (2026-09-28 实际踩到)。
+  const sharedImportLines = componentSource.split('\n')
+    .filter((l) => l.includes('utils/provider'))
+  assert.ok(sharedImportLines.some((l) => l.includes('fmtNameOf')),
+    'ProcessDialog 应从 utils/provider 引入 fmtNameOf')
   assert.ok(addExportSource.includes("import { fmtNameOf, isModel3dProvider } from '../utils/provider'"),
     'AddExportDialog 应使用共享映射')
   assert.ok(!addExportSource.includes("stageKey === 'dem' ? 'geotiff'"),

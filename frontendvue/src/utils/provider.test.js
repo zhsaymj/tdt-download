@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  BASEMAP_ONLY_IMAGE_PROVIDERS,
   BUILDING_PROVIDERS,
   DEM_PROVIDERS,
   FMT_NAME_OF_STAGE,
@@ -9,6 +10,8 @@ import {
   PREVIEWABLE_STAGE_KEYS,
   TILESET_STAGE_KEYS,
   fmtNameOf,
+  MERCATOR_IMAGE_PROVIDERS,
+  canAnnotate,
   isBuildingProvider,
   isDemProvider,
   isModel3dProvider,
@@ -74,4 +77,44 @@ test('既有 buildings/dem/image 分支不受影响', () => {
   assert.equal(taskKindOf({ provider: 'tianditu_img' }), 'image')
   assert.equal(taskKindOf({ provider: 'local_image' }), 'image')
   assert.equal(taskKindOf({}), 'image')
+})
+
+
+// ---------- 叠加路网注记的适用性 ----------
+
+test('天地图影像源支持叠加注记', () => {
+  for (const k of ['tianditu_img', 'tianditu_vec', 'tianditu_ter']) {
+    assert.equal(canAnnotate(k), true, k)
+  }
+})
+
+test('Google / Esri 影像源不支持叠加注记', () => {
+  // 注记是天地图特有的同网格覆盖层;墨卡托源没有对应图层,
+  // 后端会按网格跳过。界面必须同步隐藏入口,否则勾了没效果还误报翻倍。
+  for (const k of ['google_img', 'google_hybrid', 'google_road',
+                   'google_terrain', 'esri_imagery']) {
+    assert.equal(canAnnotate(k), false, k)
+  }
+})
+
+test('DEM 不支持叠加注记', () => {
+  assert.equal(canAnnotate('esri_terrain'), false)
+})
+
+test('本地文件源不支持叠加注记', () => {
+  // 不联网,没有注记可下
+  assert.equal(canAnnotate('local_image'), false)
+})
+
+test('墨卡托源列表覆盖全部 Google/Esri 影像', () => {
+  for (const k of ['google_img', 'google_hybrid', 'google_road',
+                   'google_terrain', 'esri_imagery']) {
+    assert.ok(MERCATOR_IMAGE_PROVIDERS.includes(k), k)
+  }
+})
+
+test('仅底图的三个源在墨卡托列表里', () => {
+  for (const k of BASEMAP_ONLY_IMAGE_PROVIDERS) {
+    assert.ok(MERCATOR_IMAGE_PROVIDERS.includes(k), k)
+  }
 })
