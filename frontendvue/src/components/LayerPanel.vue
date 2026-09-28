@@ -19,6 +19,7 @@ import { mapController } from '../composables/mapController'
 import { useBasemapStore } from '../stores/basemap'
 import { BASEMAP_OPTIONS } from '../utils/basemap'
 import ServiceLayerPicker from './ServiceLayerPicker.vue'
+import InfoTip from './InfoTip.vue'
 
 const emit = defineEmits(['open-data'])
 const overlayStore = useOverlayStore()
@@ -103,6 +104,15 @@ function onPickService(svc) {
             @click="basemapStore.move(1)">⤒</button>
           <button class="mini" title="底图下移一层" :disabled="basemapStore.level === 0"
             @click="basemapStore.move(-1)">⤓</button>
+        </div>
+        <div class="r2 anno-row">
+          <t-checkbox :checked="basemapStore.annotationVisible"
+            @change="(v) => basemapStore.setAnnotationVisible(v)">
+            路网注记
+          </t-checkbox>
+          <InfoTip
+            content="叠加天地图路网注记(含地名、行政界等),始终位于底图的最上层。注记最高 18 级,更高层级不会有注记。"
+            max-width="320px" />
         </div>
         <div class="base-note">底图不可移除和定位，可切换、调透明度并调整与成果图层的上下关系。</div>
       </div>
@@ -232,4 +242,5 @@ function onPickService(svc) {
 .picker-wrap {
   position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 30;
 }
+.anno-row { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
 </style>
