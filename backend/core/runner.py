@@ -651,6 +651,42 @@ def _convert_stage_outputs(outputs: list[str], container: str) -> list[str]:
     return converted
 
 
+def _count_tiles(root: Path) -> int:
+    """数一个瓦片目录下的瓦片文件数(不存在则 0)。"""
+    if not root.exists():
+        return 0
+    return sum(1 for p in root.rglob("*") if p.is_file())
+
+
+def _tms_output_looks_empty(expected: int, after: int) -> bool:
+    """TMS 阶段是否"本该有产出,结束时目录却是空的"。
+
+    抽成纯函数以便单测:实测踩到的坑是墨卡托源(3857)被直接喂给
+    export_tms_from_source —— 它用 4326 网格枚举瓦片再与源图 bounds 求交,
+    源是米制时交集恒为空,一张都没切出来,阶段却报 "8/8 张"、状态 done,
+    成果目录全空。用户要到打开目录才发现,属于最难排查的一类问题。
+
+    判据是"结束时目录为空"而非"本次没新增":断点续切/重试时瓦片已存在,
+    重切会原地覆盖、文件数不增,按"没新增"判会**误报失败**。
+    """
+    return expected > 0 and after == 0
+
+
+def _tms_from_planned_sources_guarded(ctx, tms_dir: Path, clip_geom, plan,
+                                      source_for_level) -> list[str]:
+    """包一层:产出为空时报错而不是静默成功(判据见 _tms_output_looks_empty)。"""
+    out = _tms_from_planned_sources(ctx, tms_dir, clip_geom, plan,
+                                    source_for_level)
+    after = _count_tiles(tms_dir)
+    expected = sum(_tms_tile_count(ctx.bbox, lv) for _, lv in plan)
+    if _tms_output_looks_empty(expected, after):
+        raise RuntimeError(
+            f"TMS 切片产出为空:计划 {expected} 张瓦片,结束时目录里没有任何文件。"
+            f"常见原因是源图坐标系与 geodetic(4326)网格不匹配 —— "
+            f"源图必须是 EPSG:4326。")
+    return out
+
+
 def _stage_tms(ctx) -> list[str]:
     """输出 gdal2tiles geodetic TMS 瓦片包 + tilemapresource.xml。
 
@@ -683,7 +719,10 @@ def _stage_tms(ctx) -> list[str]:
     if _tms_needs_resample(_ctx_grid(ctx)):
         plan = [(z, [z])
                 for z in sorted({int(v) for v in levels}, reverse=True)]
-        return _tms_from_downloaded_sources(ctx, tms_dir, clip_geom, plan)
+        # 源要先转 4326(export_tms_from_source 的硬要求,见该函数说明)
+        return _tms_from_planned_sources_guarded(
+            ctx, tms_dir, clip_geom, plan,
+            lambda source_z: _mercator_raster_source(ctx, source_z))
 
     plan = _source_tms_plan_for_task(ctx)
     if _tms_plan_requires_source(plan):
@@ -835,6 +874,30 @@ def _tms_from_downloaded_sources(ctx, tms_dir: Path, clip_geom,
     return _tms_from_planned_sources(
         ctx, tms_dir, clip_geom, plan,
         lambda source_z: _downloaded_raster_source(ctx, source_z))
+
+
+def _mercator_raster_source(ctx, source_z: int) -> Path:
+    """墨卡托源任务里,供 TMS 切片用的 **4326** 源图。
+
+    ⚠️ 必须先转 4326,不能把 3857 拼接图直接喂给 export_tms_from_source:
+    那个函数用 range_for_bbox(4326 网格)枚举输出瓦片,再与源图 bounds 求交集。
+    源若是 3857(bounds 是米,±2e7 量级),而瓦片四至是经纬度(±180 量级),
+    交集**恒为空** —— 一张都切不出来,却仍然返回成功(实测 TMS 阶段报
+    "8/8 张"、状态 done,而 tms/ 目录是空的)。
+
+    这与 DEM 的处理同源(_tms_from_dem 也是先渲染 4326 可视化源再切)。
+    """
+    task = ctx.task
+    src = ctx.out_dir / f"{task['name']}_z{source_z}.tif"
+    if not (src.exists() and src.stat().st_size > 0):
+        src = _downloaded_raster_source(ctx, source_z)
+    dst = ctx.out_dir / f".tms_src4326_z{source_z}.tif"
+    if dst.exists() and dst.stat().st_size > 0:
+        return dst
+    import shutil as _shutil
+    _shutil.copyfile(src, dst)
+    reproject_geotiff(dst, "EPSG:4326")
+    return dst
 
 
 def _tms_from_source_file(ctx, tms_dir: Path, clip_geom) -> list[str]:
