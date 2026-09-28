@@ -85,6 +85,8 @@ export const api = {
     req(`/api/tasks/suggest_levels?west=${west}&south=${south}&east=${east}&north=${north}&provider=${provider || 'tianditu_img'}`),
   demMaxLevel: ({ west, south, east, north, provider }) =>
     req(`/api/tasks/dem_max_level?west=${west}&south=${south}&east=${east}&north=${north}&provider=${provider || 'esri_terrain'}`),
+  imageryMaxLevel: ({ west, south, east, north, provider }) =>
+    req(`/api/tasks/imagery_max_level?west=${west}&south=${south}&east=${east}&north=${north}&provider=${provider || 'esri_imagery'}`),
   createTask: (payload) =>
     req('/api/tasks', {
       method: 'POST',

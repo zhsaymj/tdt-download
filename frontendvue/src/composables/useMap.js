@@ -16,7 +16,9 @@ import { never } from 'ol/events/condition'
 import { unByKey } from 'ol/Observable'
 import { DRAW_Z } from './overlays'
 import { createMeasureTool } from './measure'
-import { basemapTypesFor, basemapZIndexForLevel } from '../utils/basemap'
+import {
+  basemapMaxZoom, basemapTileUrl, basemapTypesFor, basemapZIndexForLevel,
+} from '../utils/basemap'
 
 const geojsonFmt = new GeoJSON()
 
@@ -84,6 +86,18 @@ export function createMapController(target, hooks = {}) {
     })
   }
 
+  // 经后端转发的底图(Google / Esri)。走 /api/tiles/...,
+  // 因此浏览器不直接接触这些站点,前端无需任何代理配置。
+  function backendXyzLayer(providerKey) {
+    return new TileLayer({
+      source: new XYZ({
+        url: basemapTileUrl(providerKey),
+        crossOrigin: 'anonymous',
+        maxZoom: basemapMaxZoom(providerKey),
+      }),
+    })
+  }
+
   let baseLayers = []   // 当前底图图层组(供切换时移除)
   let baseToken = null
   let baseKey = 'tianditu_img'
@@ -107,11 +121,19 @@ export function createMapController(target, hooks = {}) {
   // 按用户选择/下载数据类型切换中间地图底图(底图 + 对应注记)
   function setBasemap(providerKey) {
     baseKey = providerKey || 'tianditu_img'
-    if (!baseToken) { applyBasemapStyle(); return }
-    const types = basemapTypesFor(baseKey)
+    const backendUrl = basemapTileUrl(baseKey)
     // 移除旧底图组
     baseLayers.forEach((l) => map.removeLayer(l))
-    baseLayers = types.map((t) => tiandituLayer(t, baseToken))
+    if (backendUrl) {
+      // Google / Esri:经后端转发(浏览器用不了后端的代理配置),
+      // 因此不需要天地图 token,也不能在缺 token 时直接返回。
+      baseLayers = [backendXyzLayer(baseKey)]
+    } else {
+      // 天地图:需 token(未配置时只应用样式,保持原行为)
+      if (!baseToken) { baseLayers = []; applyBasemapStyle(); return }
+      const types = basemapTypesFor(baseKey)
+      baseLayers = types.map((t) => tiandituLayer(t, baseToken))
+    }
     applyBasemapStyle()
     // 插到最底层(矢量/预览层之下)
     baseLayers.forEach((l, i) => map.getLayers().insertAt(i, l))

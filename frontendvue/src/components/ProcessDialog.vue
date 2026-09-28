@@ -334,8 +334,33 @@ async function loadDemMaxLevel() {
     if (kept.length !== form.levels.length) form.levels = kept
   }
 }
+// ---- Esri 影像可用最高级别(仅 esri_imagery)----
+// (声明与 demMaxLevel 并列放在这里,供下方 reset 提前引用)
+// 实测 Esri World Imagery 各区域最高级别不同:城市(含拉萨/乌鲁木齐)到 19、
+// 喀什/漠河 18、西藏青海新疆无人区仅 17。超限时返回 200 + 占位图,拼出来是
+// 一整片灰色。这里探测后置灰超限级别。
+// null = 探测失败(网络/代理问题),此时不禁用任何级别 —— 与 DEM 的约定一致。
+const imgMaxLevel = ref(null)
+async function loadImgMaxLevel() {
+  imgMaxLevel.value = null
+  const b = drawStore.bbox
+  if (!b || !isDownload.value || !needsRegionProbe(form.provider)) return
+  try {
+    const d = await api.imageryMaxLevel({
+      west: b[0], south: b[1], east: b[2], north: b[3], provider: form.provider,
+    })
+    imgMaxLevel.value = d?.max_level ?? null
+  } catch (_) { imgMaxLevel.value = null }
+  // 已勾上的超限级别要摘掉:留着提交也会被后端剔除,不如当场如实反映
+  if (imgMaxLevel.value != null) {
+    const kept = form.levels.filter((z) => z <= imgMaxLevel.value)
+    if (kept.length !== form.levels.length) form.levels = kept
+  }
+}
+
 function levelUnavailable(z) {
-  return demMaxLevel.value != null && z > demMaxLevel.value
+  if (demMaxLevel.value != null && z > demMaxLevel.value) return true
+  return imgMaxLevel.value != null && z > imgMaxLevel.value
 }
 
 // ---- 各级瓦片数/大小预估 ----
@@ -384,6 +409,9 @@ const levelColumns = computed(() => (isDem.value
   : ['影像级别', '像素分辨率', '比例尺(72DPI)', '总大小']))
 function levelTitle(z) {
   if (levelUnavailable(z)) {
+    if (imgMaxLevel.value != null && z > imgMaxLevel.value) {
+      return `${z} 级:该范围 Esri 影像最高只到 ${imgMaxLevel.value} 级，此级别没有影像数据`
+    }
     return `${z} 级:该范围的地形数据源最高只到 ${demMaxLevel.value} 级，此级别没有高程数据`
   }
   const cols = levelColumns.value
@@ -455,6 +483,7 @@ function resetFormState() {
   suggest.value = null
   est.value = null
   demMaxLevel.value = null
+  imgMaxLevel.value = null
   bldParams.value = null
   bldBbox.value = null
   submitting.value = false
@@ -470,6 +499,7 @@ async function initForCurrentSource() {
     await loadSuggest()
     await loadEstimate()
     await loadDemMaxLevel()
+    await loadImgMaxLevel()
     return
   }
 
@@ -504,6 +534,7 @@ watch(() => form.provider, async () => {
   await loadSuggest()
   await loadEstimate()
   await loadDemMaxLevel()
+    await loadImgMaxLevel()
 })
 
 // 三维来源内切换数据类型:路径与检查结果全部作废,导出勾选待重新检查
@@ -523,6 +554,7 @@ watch(() => drawStore.bbox, async () => {
   await loadSuggest()
   await loadEstimate()
   await loadDemMaxLevel()
+    await loadImgMaxLevel()
 }, { deep: true })
 
 /** 勾 OSM 自动带上 GeoTIFF:OSM 切片以最高级拼接图作源,后端会直接复用 */
