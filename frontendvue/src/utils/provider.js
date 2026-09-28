@@ -28,6 +28,14 @@ export const MERCATOR_IMAGE_PROVIDERS = [
 ]
 
 /**
+ * 天地图注记的最高级别。与后端 `core/runner.ANNOTATION_MAX_Z` 对应,改动需同步。
+ *
+ * 实测 z19+ 返回 HTTP 200 + 213 字节空图(0 不透明像素),不是 404。
+ * Google 开放到 z21,故 z19~z21 的成果没有注记可叠。
+ */
+export const ANNOTATION_MAX_Z = 18
+
+/**
  * 该数据源是否支持"叠加路网注记"。
  *
  * 注记是**天地图特有的**同网格透明覆盖层(cia/cva/cta,与底图按类型配对)。

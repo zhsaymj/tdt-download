@@ -17,8 +17,10 @@ import { unByKey } from 'ol/Observable'
 import { DRAW_Z } from './overlays'
 import { createMeasureTool } from './measure'
 import {
-  basemapMaxZoom, basemapTileUrl, basemapTypesFor, basemapZIndexForLevel,
+  annotationLayerOf, basemapMaxZoom, basemapTileUrl, basemapTypesFor,
+  basemapZIndexForLevel,
 } from '../utils/basemap'
+import { ANNOTATION_MAX_Z } from '../utils/provider'
 
 const geojsonFmt = new GeoJSON()
 
@@ -110,6 +112,50 @@ export function createMapController(target, hooks = {}) {
       l.setOpacity(baseOpacity)
       l.setZIndex(z)
     }
+    // 注记跟随底基层级(底图 zIndex + 1)
+    if (annoLayer) annoLayer.setZIndex(annoLayerZ())
+  }
+
+  // ---- 天地图路网注记(独立于底图,永远在底图的最上层)----
+  // 从底图图层组里摘出来的原因:用户要能单独开关注记,而不是"影像+注记"
+  // 一起显示(见 utils/basemap.js 的 ANNOTATION_OF_BASEMAP)。
+  let annoLayer = null
+  let annoVisible = true          // 默认开启:保持与原"影像+注记"一致的观感
+
+  function annoLayerZ() {
+    // 跟随底基层级:底图 zIndex + 1 —— 始终"在底图的最上层"。
+    // 底图被调到成果图层之上时,注记也跟着上去。
+    return basemapZIndexForLevel(baseLevel) + 1
+  }
+
+  function tiandituAnnoLayer(layerType, token) {
+    const layerName = layerType.split('_')[0]
+    return new TileLayer({
+      source: new XYZ({
+        url:
+          `https://t{0-7}.tianditu.gov.cn/${layerType}/wmts?` +
+          `SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=${layerName}` +
+          `&STYLE=default&TILEMATRIXSET=w&FORMAT=tiles` +
+          `&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&tk=${token}`,
+        crossOrigin: 'anonymous',
+        maxZoom: ANNOTATION_MAX_Z,   // 注记最高 z18
+      }),
+      zIndex: annoLayerZ(),
+    })
+  }
+
+  function applyAnnotation() {
+    // 底图切换时注记类型要跟着换(cia↔cva↔cta),故每次都重建
+    if (annoLayer) { map.removeLayer(annoLayer); annoLayer = null }
+    const layerType = annotationLayerOf(baseKey)
+    if (!annoVisible || !layerType || !baseToken) return
+    annoLayer = tiandituAnnoLayer(layerType, baseToken)
+    map.addLayer(annoLayer)
+  }
+
+  function setAnnotationVisible(on) {
+    annoVisible = !!on
+    applyAnnotation()
   }
 
   function setupBasemap(token) {
@@ -137,6 +183,8 @@ export function createMapController(target, hooks = {}) {
     applyBasemapStyle()
     // 插到最底层(矢量/预览层之下)
     baseLayers.forEach((l, i) => map.getLayers().insertAt(i, l))
+    // 注记类型随底图变化(cia↔cva↔cta),层级也要重算
+    applyAnnotation()
   }
 
   // 兼容旧调用名:下载数据源切换时仍能同步底图
@@ -430,7 +478,7 @@ export function createMapController(target, hooks = {}) {
 
   return {
     map, setupBasemap, setOverlayByProvider, setBasemap,
-    setBasemapOpacity, setBasemapLevel,
+    setBasemapOpacity, setBasemapLevel, setAnnotationVisible,
     startDrawRect, startDrawPolygon, toggleEdit, clearDraw, loadGeojson,
     showPreview, clearPreview, zoomTo, measure,
     hasFeature: () => !!state.feature,
