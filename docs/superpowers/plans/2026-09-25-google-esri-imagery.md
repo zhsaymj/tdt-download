@@ -3844,7 +3844,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 - Create: `tests/test_export_grid_routing.py`
 - Modify: `backend/core/runner.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `tests/test_export_grid_routing.py`:
 
@@ -3887,12 +3887,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `.venv/Scripts/python.exe -m unittest tests.test_export_grid_routing -v`
 Expected: FAIL — `ImportError: cannot import name '_tms_needs_resample'`
 
-- [ ] **Step 3: 在 `runner.py` 加两个分流辅助函数**
+- [x] **Step 3: 在 `runner.py` 加两个分流辅助函数**
 
 在 `_crs_for_grid` 之后插入:
 
@@ -3919,7 +3919,7 @@ def _mbtiles_scheme_for(grid: str, stage_key: str) -> str:
     return "xyz" if stage_key == "osm" else "tms"
 ```
 
-- [ ] **Step 4: 改 `_stage_tms` 按网格取源**
+- [x] **Step 4: 改 `_stage_tms` 按网格取源**
 
 在 `_stage_tms` 函数开头,把决定"能否直映射"的判断改为同时考虑网格。找到该函数里调用 `export_tms` 与 `export_tms_from_source` 的分支,在其之前加:
 
@@ -3934,7 +3934,7 @@ def _mbtiles_scheme_for(grid: str, stage_key: str) -> str:
 
 > 具体合并位置随现有代码结构而定。原则:**mercator 源一律走 `export_tms_from_source`**,源图取 `{name}_z{max}.tif`(阶段 geotiff 的产出,此时是 3857)。
 
-- [ ] **Step 5: 确认 `_stage_osm` 对 3857 源可用**
+- [x] **Step 5: 确认 `_stage_osm` 对 3857 源可用**
 
 `export_osm` 以 WarpedVRT 做重投影到 3857。源已是 3857 时是恒等变换,GDAL 会优化,结果正确(设计 §4.6 的取舍:一期沿用,不加快路径)。
 
@@ -3946,7 +3946,7 @@ def _mbtiles_scheme_for(grid: str, stage_key: str) -> str:
     # 一期不加"3857 直映射"快路径,控制改动面;若实测性能不可接受再补(设计 §4.6)。
 ```
 
-- [ ] **Step 6: 改 MBTiles 打包的 scheme**
+- [x] **Step 6: 改 MBTiles 打包的 scheme**
 
 找到 `runner.py` 里调用 `pack_mbtiles(...)` 的位置,把硬编码的 `scheme=` 改为:
 
@@ -3954,17 +3954,17 @@ def _mbtiles_scheme_for(grid: str, stage_key: str) -> str:
                     scheme=_mbtiles_scheme_for(ctx.grid, key),
 ```
 
-- [ ] **Step 7: 运行测试**
+- [x] **Step 7: 运行测试**
 
 Run: `.venv/Scripts/python.exe -m unittest tests.test_export_grid_routing -v`
 Expected: PASS,5 项通过
 
-- [ ] **Step 8: 运行全量测试**
+- [x] **Step 8: 运行全量测试**
 
 Run: `.venv/Scripts/python.exe -m unittest discover tests`
 Expected: 全绿(天地图的 TMS/OSM 路径未变)
 
-- [ ] **Step 9: 提交**
+- [x] **Step 9: 提交**
 
 ```bash
 git add backend/core/runner.py tests/test_export_grid_routing.py
@@ -3984,13 +3984,13 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ## Task 17: 阶段四导出格式验收
 
-- [ ] **Step 1: 四格式全勾提交**
+- [x] **Step 1: 四格式全勾提交**
 
 提交任务:`google_img`,北京 0.01° 范围,级别 z15~z17,导出勾选**全部四项**(合并 GeoTIFF、TMS 瓦片、OSM 瓦片、MBTiles 容器)。
 
 Expected:四个阶段全部 done,无 failed。
 
-- [ ] **Step 2: 检查目录结构**
+- [x] **Step 2: 检查目录结构**
 
 Run:
 ```bash
@@ -4013,13 +4013,13 @@ for d in glob.glob('output/*'):
 ```
 Expected:`tms/` 下是 gdal 级目录(源 z15~17 对应 L14~16)、`osm/` 下是 z15~17。
 
-- [ ] **Step 3: 验证 TMS 瓦片坐标正确(重采样路径)**
+- [x] **Step 3: 验证 TMS 瓦片坐标正确(重采样路径)**
 
 用 QGIS 加载 `tms/tilemapresource.xml`(或直接看某张瓦片对应的地理位置),确认与底图对齐。
 
 > **这一步最容易出问题**:若 TMS 走了直映射(没走重采样),瓦片会整体错位。错位表现为图在纬度方向被拉伸/偏移。
 
-- [ ] **Step 4: 验证 MBTiles 可读**
+- [x] **Step 4: 验证 MBTiles 可读**
 
 Run:
 ```bash
@@ -4035,11 +4035,11 @@ for f in glob.glob('output/*/*.mbtiles'):
 ```
 Expected:瓦片数 > 0,bounds 是经纬度范围(MBTiles 规范要求 WGS84)。
 
-- [ ] **Step 5: 对 Esri 源重复 Step 1-4**
+- [x] **Step 5: 对 Esri 源重复 Step 1-4**
 
 数据源换 `esri_imagery`,级别 z15~z17(北京该区域 z19 可用,z17 稳妥)。
 
-- [ ] **Step 6: 补验证记录并提交**
+- [x] **Step 6: 补验证记录并提交**
 
 在 `docs/验证记录-google-esri影像.md` 追加:
 

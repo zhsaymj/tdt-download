@@ -99,6 +99,43 @@ provider=google_road bands=1 ext=png
 确认 `lyrs=m` 确实是单波段调色板 PNG;拼接未抛 `DatasetIOShapeError`,
 且像素值非全 0(调色板已由 `mosaic._read_tile` 展开)。
 
+## 阶段四:四种导出格式(Task 16-17)
+
+用真实管线跑完整阶段链路(models.create_task + runner.run_task),不经 UI。
+
+| 任务 | 数据源 | 级别 | download | geotiff | tms | osm |
+|---|---|---|---|---|---|---|
+| verify_export_google | google_img | z15,16 | 4/0 | done | **8 张**(L14+L15) | 17 张 |
+| verify_export_esri | esri_imagery | z15,16 | 4/0 | done | **6 张** | 16 张 |
+| verify_mbtiles | google_img | z15,16 | 4/0 | — | MBTiles 8 张 | MBTiles 13 张 |
+
+- 输出结构:`tms/{级别}/{x}/{y}.png`(级别 = 输入 z-1,与 CLAUDE.md 记录的
+  gdal2tiles geodetic 约定一致)、`osm/{z}/{x}/{y}.png`。
+- GeoTIFF crs 均为 EPSG:3857,转回经纬度落在选区内。
+- TMS 瓦片内容有效率 11%~66%、取值 0~255 —— 与"小选区落在较大瓦片内"的
+  预期一致(投影错则应为 ~0%,即空白)。
+- MBTiles 两份均可被 sqlite 读出,`bounds` 是 WGS84 经纬度(MBTiles 规范
+  要求),`format=png`。
+
+### 实现期发现并修复的 bug(TMS 静默空产出)
+
+首次跑 `google_img` 时 **TMS 阶段报 "8/8 张"、状态 done,而 tms/ 目录一张
+瓦片都没有**。
+
+根因:`export_tms_from_source` 要求源图是 **EPSG:4326** —— 它用
+`range_for_bbox`(4326 网格)枚举输出瓦片,再与源图 bounds 求交。墨卡托源的
+bounds 是米(±2e7)而瓦片四至是经纬度(±180),交集**恒为空**,一张都切不出来,
+函数却照常返回成功。
+
+修法沿用 DEM 的既有做法(`_tms_from_dem` 也是先渲染 4326 源再切):新增
+`_mercator_raster_source`,把 3857 拼接图重投影成 4326 副本再喂进去。
+
+另加空产出守卫 `_tms_output_looks_empty`:计划里有瓦片而**结束时目录为空**
+即报错,让这类静默失败立刻可见。
+
+> 该守卫的判据被自己新写的测试纠正过一次:初版用"本次没新增文件"判定,
+> 而断点续切会原地覆盖、文件数不增,会**误报失败**。改为"结束时目录为空"。
+
 ## 待后续阶段验收的项
 
 | 项 | 所属 Task |
