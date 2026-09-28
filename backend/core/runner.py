@@ -78,6 +78,21 @@ def _safe_unlink(p: Path, retries: int = 5, delay: float = 0.3) -> None:
     logger.warning("临时文件暂时无法删除(将于下次清理):%s", p)
 
 
+#: 天地图注记的最高可用级别。实测 z19+ 返回 HTTP 200 + 213 字节空图
+#: (0 不透明像素),不是 404 —— 若不裁剪会白跑请求、把空图写进缓存。
+#: 而 Google 开放到 z21,故 z19~z21 的成果没有注记可叠。
+#: 前端 utils/provider.js 有同名常量,改动需同步。
+ANNOTATION_MAX_Z = 18
+
+
+def _anno_levels_for(levels: list[int]) -> list[int]:
+    """注记实际要下载的级别:裁掉超过 ANNOTATION_MAX_Z 的部分。
+
+    底图仍下全部选中级别(它没有级别上限),只有注记受 z18 限制。
+    """
+    return sorted({int(z) for z in levels if int(z) <= ANNOTATION_MAX_Z})
+
+
 def _range_fn_for(provider: str):
     """按数据源的网格返回瓦片区间函数。
 
@@ -192,14 +207,18 @@ async def run_task(task_id: str, emit, should_stop) -> None:
     )
 
     # 注记要联网下载同网格的注记瓦片,本地文件源没有这个概念
-    # 注记是天地图特有的同网格覆盖层(cia/cva/cta)。DEM、本地文件源、
-    # Google/Esri 都没有这个概念 —— 用 grid 判定而非逐个列 provider:
-    # 墨卡托源一律无注记,新增墨卡托数据源时不必再回来改这里。
+    # 注记是天地图提供的透明覆盖层(cia/cva/cta),按底图类型配对。
+    # DEM 无此概念、本地文件源不联网,两者都不带注记。
+    # Google/Esri 支持:它们走 3857,而天地图注记有 3857 版本(cia_w),
+    # 同格可直接对取(见 build_annotation_provider 的 grid 参数)。
     annotate = (task.get("annotate", False) and not is_dem
-                and local_src is None
-                and grid_of(task["provider"]) != GEO_MERCATOR)
+                and local_src is None)
     anno_token_src = token_pool.use_token if token_pool.has_any() else settings.tianditu.token
-    anno_provider = build_annotation_provider(task["provider"], anno_token_src) if annotate else None
+    # 注记的网格必须跟底图一致:行列号由底图的 range_fn 算出,网格选错会
+    # 请求到另一个地方的注记(不报错,只是路网对不上影像)。
+    anno_provider = (build_annotation_provider(
+        task["provider"], anno_token_src, grid=grid_of(task["provider"]))
+        if annotate else None)
     anno_downloader = TileDownloader(
         anno_provider,
         cache_dir=settings.cache_dir,
@@ -262,13 +281,17 @@ async def run_task(task_id: str, emit, should_stop) -> None:
         # 按网格取区间函数:影像也可能是墨卡托(Google/Esri),
         # 不能再按 is_dem 二选一
         range_fn = _range_fn_for(task["provider"])
+        # 注记只下 ≤ z18 的级别(底图不受此限)
+        anno_levels = _anno_levels_for(levels)
         stopped = False
         for z in levels:
             tr = range_fn(west, south, east, north, z)
             _ok, _fail, stopped = await downloader.download_range(tr, on_progress, should_stop)
             if stopped:
                 break
-            if anno_downloader is not None:
+            # 注记复用底图算出的同一个 tr —— 这是"天然对齐"的实现点:
+            # 两者行列号同源,不需要第二套坐标换算。
+            if anno_downloader is not None and z in anno_levels:
                 _ok, _fail, stopped = await anno_downloader.download_range(tr, on_progress, should_stop)
                 if stopped:
                     break
