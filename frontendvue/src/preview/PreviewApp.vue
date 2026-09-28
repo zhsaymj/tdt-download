@@ -277,7 +277,7 @@ async function init() {
     timeline: false, animation: false, fullscreenButton: true, infoBox: false,
     selectionIndicator: false,
   })
-  viewer.scene.globe.baseColor = window.Cesium?.Color?.DARKSLATEGRAY || undefined
+  viewer.scene.globe.baseColor = Color.DARKSLATEGRAY
   measure.value = createCesiumMeasure(viewer)
 
   // 底图(最底层):NaturalEarthII 离线 geodetic TMS
