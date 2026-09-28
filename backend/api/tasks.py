@@ -14,6 +14,8 @@ from ..config import settings
 from ..core.dem_tiling import (
     TILE_SIZE as DEM_TILE_SIZE, estimate_dem_tiles, mercator_range_for_bbox,
 )
+from ..core.formats import GEO_MERCATOR, grid_of
+from ..core.mercator_tiling import estimate_mercator_tiles, suggest_mercator_levels
 from ..core.logs import logger
 from ..core.queue import task_queue
 from ..core.tiling import estimate_levels, estimate_levels_detail, estimate_total_tiles
@@ -23,37 +25,74 @@ from ..models import (
     list_tasks, normalize_tms_source_strategy, parse_export, update_task,
 )
 from ..providers.buildings import is_building_provider
+from ..providers.esri_imagery import (build_esri_imagery_provider,
+                                      is_esri_imagery_provider)
+from ..providers.google import build_google_provider, is_google_provider
 from ..providers.terrain import DEM_LAYERS, is_dem_provider
 
 
 def _estimate_total(bbox, levels: list[int], provider: str) -> int:
-    """按数据源选择瓦片计数方式:DEM 用墨卡托 XYZ,天地图用 4326。"""
-    if is_dem_provider(provider):
-        return estimate_dem_tiles(bbox, levels)
+    """按数据源的**网格**选择瓦片计数方式。
+
+    墨卡托(Google/Esri 影像、Esri DEM)用 XYZ 计数,天地图用 4326。
+    刻意不在这里做任何上限检查:用户明确要求不设单任务瓦片数上限
+    (设计 §9 Q1),规模由调用方如实呈现、由用户判断。
+    """
+    if grid_of(provider) == GEO_MERCATOR:
+        return estimate_mercator_tiles(bbox, levels)
     return estimate_levels(bbox, levels)
+
+
+def _z_cap_for(provider: str) -> int:
+    """该数据源的服务级最高级别(前端下拉的上限)。
+
+    注意这只是**服务级天花板**。Esri 的实际可用级别随地区变化,
+    由 /api/tasks/imagery_max_level 按选区探测(设计 §3.11)。
+    """
+    if is_dem_provider(provider):
+        return DEM_LAYERS[provider][2]
+    if is_google_provider(provider):
+        return int(settings.google.max_zoom)
+    if is_esri_imagery_provider(provider):
+        return int(settings.esri_imagery.max_zoom)
+    return 18          # 天地图
+
+
+def _z_floor_for(provider: str) -> int:
+    """该数据源的最低级别。DEM 从 0 起,影像从 1 起(z0 盖全球,对影像无意义)。"""
+    return 0 if is_dem_provider(provider) else 1
 
 
 # DEM 单瓦片平均字节数(Esri Terrain3D LERC 经验值,约 40-90KB)
 _DEM_AVG_BYTES = 60 * 1024
 
+# 墨卡托影像单瓦片平均字节数。实测 Google/Esri 的 jpg 在 9~27KB 之间,
+# 取 18KB 作估算基准(设计 §3.8)。比 DEM 的 LERC 小得多,不能套用后者。
+_MERC_IMG_AVG_BYTES = 18 * 1024
+
 
 def _estimate_detail(bbox, levels: list[int], provider: str) -> dict:
-    """预估明细。DEM 用墨卡托网格逐层计数;其余走天地图 4326 明细。"""
-    if not is_dem_provider(provider):
+    """预估明细。墨卡托源逐层按 XYZ 网格计数;天地图走 4326 明细。
+
+    ⚠️ 取消瓦片数硬上限后(设计 §9 Q1),**这是用户提交前唯一能看到规模的
+    途径** —— 3 度选区 z21 是 5.3 亿张瓦片、约 9.6 TB。如实返回,不拦截。
+    """
+    if grid_of(provider) != GEO_MERCATOR:
         return estimate_levels_detail(bbox, levels, provider)
+    avg = _DEM_AVG_BYTES if is_dem_provider(provider) else _MERC_IMG_AVG_BYTES
     w, s, e, n = bbox
     per = []
     total_tiles = 0
     for z in sorted(set(levels)):
         tr = mercator_range_for_bbox(w, s, e, n, z)
         tiles = tr.count
-        per.append({"z": z, "tiles": tiles, "bytes": tiles * _DEM_AVG_BYTES,
+        per.append({"z": z, "tiles": tiles, "bytes": tiles * avg,
                     "cols": tr.cols, "rows": tr.rows,
                     "width": tr.cols * DEM_TILE_SIZE,
                     "height": tr.rows * DEM_TILE_SIZE})
         total_tiles += tiles
     return {"levels": per, "total_tiles": total_tiles,
-            "total_bytes": total_tiles * _DEM_AVG_BYTES}
+            "total_bytes": total_tiles * avg}
 
 
 async def _probe_dem_max_level(bbox, provider: str) -> int | None:
@@ -118,9 +157,9 @@ async def api_estimate(west: float, south: float, east: float, north: float,
 
     levels 为逗号分隔级别,兼容旧的 z_min/z_max。total 字段保留向后兼容。
     """
-    dem = is_dem_provider(provider)
-    z_cap = DEM_LAYERS[provider][2] if dem else 18
-    lv = _parse_levels(levels, z_min, z_max, z_cap, z_floor=0 if dem else 1)
+    z_cap = _z_cap_for(provider)
+    lv = _parse_levels(levels, z_min, z_max, z_cap,
+                       z_floor=_z_floor_for(provider))
     detail = _estimate_detail((west, south, east, north), lv, provider)
     # total 保留:旧前端只读 total
     return {"total": detail["total_tiles"], **detail}
@@ -136,15 +175,17 @@ async def api_suggest_levels(west: float, south: float, east: float, north: floa
     """
     from ..core.tiling import suggest_levels
 
-    dem = is_dem_provider(provider)
-    if dem:
-        # DEM 是墨卡托 XYZ 网格,列行数与 4326 不同,不能用同一套换算
+    bbox = (west, south, east, north)
+    if is_dem_provider(provider):
+        # DEM 是墨卡托 XYZ 网格,且预算/级别下限与影像不同
         from ..core.dem_tiling import suggest_dem_levels
         return await asyncio.to_thread(
-            suggest_dem_levels, (west, south, east, north),
-            DEM_LAYERS[provider][2])
-    return await asyncio.to_thread(
-        suggest_levels, (west, south, east, north), 18, 1)
+            suggest_dem_levels, bbox, DEM_LAYERS[provider][2])
+    if grid_of(provider) == GEO_MERCATOR:
+        # 墨卡托影像:级别从 1 起、预算 8000(见 suggest_mercator_levels 的说明)
+        return await asyncio.to_thread(
+            suggest_mercator_levels, bbox, _z_cap_for(provider))
+    return await asyncio.to_thread(suggest_levels, bbox, 18, 1)
 
 
 @router.get("/dem_max_level")
