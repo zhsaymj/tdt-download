@@ -1,6 +1,35 @@
 export const IMG_LEVELS = Array.from({ length: 18 }, (_, i) => i + 1)
 export const DEM_LEVELS = Array.from({ length: 17 }, (_, i) => i)
 
+// Google 影像级别。实测陆地处处可到 z21(含拉萨/乌鲁木齐等西部城市),
+// z22 仅部分地区有 —— 21 是全球陆地可用的临界值。
+export const GOOGLE_LEVELS = Array.from({ length: 21 }, (_, i) => i + 1)
+
+// Esri World Imagery 级别。19 是服务级天花板(亚欧城市实际上限;
+// z20 仅美国境内有)。注意**实际可用级别随地区变化**:西藏/青海/新疆
+// 无人区最高仅 z17,由后端 /api/tasks/imagery_max_level 按选区探测,
+// 前端据结果禁用超限级别(见 needsRegionProbe)。
+export const ESRI_IMAGERY_LEVELS = Array.from({ length: 19 }, (_, i) => i + 1)
+
+/** 按数据源给出可选级别列表。 */
+export function levelsForProvider(provider) {
+  if (provider === 'esri_terrain' || provider === 'aws_terrain') return DEM_LEVELS
+  if (provider === 'esri_imagery') return ESRI_IMAGERY_LEVELS
+  if (typeof provider === 'string' && provider.startsWith('google_')) return GOOGLE_LEVELS
+  return IMG_LEVELS
+}
+
+/**
+ * 该数据源是否需要按选区探测最高可用级别。
+ *
+ * 只有 Esri World Imagery 需要:实测它各区域最高级别不同(城市 z19、
+ * 喀什/漠河 z18、西部无人区仅 z17),不探测的话用户选 z18 在西部会下到
+ * 一整片灰色占位图。Google 实测无地区性降级,不必探测。
+ */
+export function needsRegionProbe(provider) {
+  return provider === 'esri_imagery'
+}
+
 const WEB_MERCATOR_EQUATOR_RESOLUTION_M = 156543.03392804097
 const WEB_MERCATOR_LAT_LIMIT = 85.05112878
 
@@ -8,6 +37,11 @@ const PROVIDER_LABELS = {
   tianditu_img: '天地图影像',
   tianditu_vec: '天地图矢量底图',
   tianditu_ter: '天地图地形晕渲',
+  google_img: 'Google卫星影像',
+  google_hybrid: 'Google影像含路网',
+  google_road: 'Google路线图',
+  google_terrain: 'Google地形',
+  esri_imagery: 'EsriWorldImagery',
   esri_terrain: '全国地形DEM',
   osm_buildings: '三维建筑白模',
   local_vector: '本地矢量白模',

@@ -24,6 +24,9 @@ const FORMAT_TEXT = {
 const PROVIDER_TEXT = {
   tianditu_img: '天地图影像', tianditu_vec: '天地图矢量底图', tianditu_ter: '天地图地形晕渲',
   esri_terrain: '全国地形 DEM(Esri Terrain3D)',
+  google_img: 'Google 卫星影像', google_hybrid: 'Google 影像(含路网)',
+  google_road: 'Google 路线图', google_terrain: 'Google 地形',
+  esri_imagery: 'Esri World Imagery',
   overture_buildings: '三维建筑白模(Overture)',
   osm_buildings: '三维建筑白模(OSM/Overpass)',
   local_vector: '三维建筑白模(本地矢量面)',

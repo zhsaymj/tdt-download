@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 
 import {
   DEM_LEVELS,
+  ESRI_IMAGERY_LEVELS,
+  GOOGLE_LEVELS,
   IMG_LEVELS,
   defaultTaskName,
   defaultContainersForStages,
@@ -13,6 +15,8 @@ import {
   formatSampleSpacing,
   formatScale72Dpi,
   levelResolutionMeters,
+  levelsForProvider,
+  needsRegionProbe,
   normalizeContainerMap,
 } from './taskDefaults.js'
 
@@ -99,4 +103,45 @@ test('影像级别显示 72DPI 比例尺,地形级别显示成果像素尺寸', 
   assert.match(formatScale72Dpi(13, 30), /^1:4[0-9],\d{3}$/)
   assert.equal(formatPixelSize(1072, 1008), '1072×1008')
   assert.equal(formatPixelSize(0, 256), '')
+})
+
+
+// ---------- Google / Esri 影像的级别常量 ----------
+
+test('GOOGLE_LEVELS 覆盖 1-21', () => {
+  assert.equal(GOOGLE_LEVELS[0], 1)
+  assert.equal(GOOGLE_LEVELS[GOOGLE_LEVELS.length - 1], 21)
+  assert.equal(GOOGLE_LEVELS.length, 21)
+})
+
+test('ESRI_IMAGERY_LEVELS 覆盖 1-19', () => {
+  assert.equal(ESRI_IMAGERY_LEVELS[0], 1)
+  assert.equal(ESRI_IMAGERY_LEVELS[ESRI_IMAGERY_LEVELS.length - 1], 19)
+  assert.equal(ESRI_IMAGERY_LEVELS.length, 19)
+})
+
+test('levelsForProvider 按数据源给出级别列表', () => {
+  assert.deepEqual(levelsForProvider('tianditu_img'), IMG_LEVELS)
+  assert.deepEqual(levelsForProvider('google_img'), GOOGLE_LEVELS)
+  assert.deepEqual(levelsForProvider('google_road'), GOOGLE_LEVELS)
+  assert.deepEqual(levelsForProvider('esri_imagery'), ESRI_IMAGERY_LEVELS)
+  assert.deepEqual(levelsForProvider('esri_terrain'), DEM_LEVELS)
+})
+
+test('levelsForProvider 未知数据源回落影像级别', () => {
+  assert.deepEqual(levelsForProvider('whatever'), IMG_LEVELS)
+})
+
+test('needsRegionProbe 只对 Esri 影像为真', () => {
+  // Google 实测陆地处处可到 z21,无地区性降级,不必探测
+  assert.equal(needsRegionProbe('google_img'), false)
+  assert.equal(needsRegionProbe('esri_imagery'), true)
+  assert.equal(needsRegionProbe('tianditu_img'), false)
+  assert.equal(needsRegionProbe('esri_terrain'), false)
+})
+
+test('新数据源的任务名有中文标签', () => {
+  const now = new Date(2026, 7, 21, 13, 14, 15)
+  assert.equal(defaultTaskName('google_img', now), 'Google卫星影像_20260821_131415')
+  assert.equal(defaultTaskName('esri_imagery', now), 'EsriWorldImagery_20260821_131415')
 })

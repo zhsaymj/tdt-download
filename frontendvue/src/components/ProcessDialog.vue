@@ -17,11 +17,11 @@ import { crsOptions } from '../utils/crs'
 import { fmtNum, fmtSize } from '../utils/format'
 import { fmtNameOf } from '../utils/provider'
 import {
-  DEM_CRS_HINT, DEM_LEVELS, IMG_LEVELS,
+  DEM_CRS_HINT, IMG_LEVELS,
   defaultContainersForStages, defaultTaskName,
   downloadDefaultsForProvider, ensureImageTmsLevels,
   formatPixelResolution, formatPixelSize, formatSampleSpacing, formatScale72Dpi,
-  normalizeContainerMap,
+  levelsForProvider, needsRegionProbe, normalizeContainerMap,
 } from '../utils/taskDefaults'
 import { api } from '../api'
 import InfoTip from './InfoTip.vue'
@@ -46,6 +46,11 @@ const providerOptions = [
   { value: 'tianditu_img', label: '天地图影像', group: '影像' },
   { value: 'tianditu_vec', label: '天地图矢量底图', group: '影像' },
   { value: 'tianditu_ter', label: '天地图地形晕渲', group: '影像' },
+  { value: 'google_img', label: 'Google 卫星影像', group: '影像' },
+  { value: 'google_hybrid', label: 'Google 影像(含路网)', group: '影像' },
+  { value: 'google_road', label: 'Google 路线图', group: '影像' },
+  { value: 'google_terrain', label: 'Google 地形', group: '影像' },
+  { value: 'esri_imagery', label: 'Esri World Imagery', group: '影像' },
   { value: 'esri_terrain', label: '全国地形 DEM(Esri Terrain3D)', group: '地形' },
   { value: 'osm_buildings', label: '三维建筑白模(OSM)', group: '三维建筑' },
   { value: 'local_vector', label: '三维建筑白模(本地矢量面)', group: '三维建筑' },
@@ -155,7 +160,8 @@ const bldVecOptions = computed(() => {
   return (s?.containers || []).map((c) => ({ value: c.key, label: c.label }))
 })
 
-const levelList = computed(() => (isDem.value ? DEM_LEVELS : IMG_LEVELS))
+// 级别列表按数据源取:Google 到 21、Esri 影像到 19、天地图 18、DEM 0-16
+const levelList = computed(() => levelsForProvider(form.provider))
 const picksMbtiles = computed(() => ['tms', 'osm'].some(
   (k) => form.export.includes(k) && form.containers[k] === 'mbtiles'))
 const tmsSourceStrategyOptions = [
