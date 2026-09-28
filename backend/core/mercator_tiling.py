@@ -89,3 +89,96 @@ def _tile_xyz_range(bbox, z: int):
     xs = range(min(x0, x1), max(x0, x1) + 1)
     ys = range(min(y0, y1), max(y0, y1) + 1)
     return xs, ys
+
+
+def suggest_levels_mercator(
+    bbox: tuple[float, float, float, float],
+    z_max_cap: int,
+    z_floor: int,
+    min_useful_ratio: float,
+    tile_budget: int,
+    depth: int,
+) -> dict:
+    """墨卡托网格的建议级别判据(DEM 与影像共用的内核)。
+
+    判据同 tiling.suggest_levels:瓦片是固定网格,低级别单张就能盖住远超选区
+    的范围(实测 0.07° 选区在天地图第 7 级只有 0.1% 有效占比),全选会下一堆
+    几乎全是选区外内容的图。这里在 3857 下算面积占比。
+
+    调用方传各自的参数,不要在这里塞默认值 —— DEM 与影像的取舍不同
+    (见两个包装函数的说明),混在一起会让两套取舍互相污染。
+    """
+    from rasterio.warp import transform_bounds
+
+    w, s, e, n = bbox
+    # 选区面积在 3857 下算,与瓦片覆盖面积同坐标系才可比
+    sw, ss, se, sn = transform_bounds("EPSG:4326", "EPSG:3857", w, s, e, n)
+    sel_area = max((se - sw) * (sn - ss), 1e-9)
+
+    rows = []
+    for z in range(z_floor, z_max_cap + 1):
+        tr = mercator_range_for_bbox(w, s, e, n, z)
+        bw, bs, be, bn = mosaic_bounds_3857(tr)
+        cov = max((be - bw) * (bn - bs), 1e-9)
+        ratio = min(sel_area / cov, 1.0)
+        rows.append({"z": z, "tiles": tr.count, "ratio": round(ratio, 4),
+                     "useful": ratio >= min_useful_ratio})
+
+    tiles_of = {r["z"]: r["tiles"] for r in rows}
+    useful = [r["z"] for r in rows if r["useful"]]
+    pool = useful or [r["z"] for r in rows]
+
+    top = pool[0]
+    for z in pool:
+        if tiles_of[z] <= tile_budget:
+            top = z
+        else:
+            break
+    budget_limited = top < pool[-1]
+
+    picked: list[int] = []
+    total = 0
+    for z in range(top, pool[0] - 1, -1):
+        if z not in tiles_of:
+            break
+        t = tiles_of[z]
+        if picked and (total + t > tile_budget or len(picked) >= depth):
+            break
+        picked.append(z)
+        total += t
+    picked.reverse()
+
+    return {
+        "levels": rows,
+        "recommended": picked,
+        "recommended_tiles": total,
+        "budget_limited": budget_limited,
+        "max_useful": useful[-1] if useful else z_max_cap,
+        "min_useful": useful[0] if useful else picked[0],
+    }
+
+
+def suggest_mercator_levels(
+    bbox: tuple[float, float, float, float],
+    z_max_cap: int = 21,
+    min_useful_ratio: float = 0.25,
+    tile_budget: int = 8000,
+    depth: int = 3,
+) -> dict:
+    """墨卡托**影像**的建议级别(Google / Esri World Imagery)。
+
+    与 DEM 版(suggest_dem_levels)的两处差别,都是实测后定的:
+
+      - **级别从 1 起而非 0**:z0 单张瓦片盖全球,对影像毫无意义。
+        天地图影像的下限也是 1(api/tasks.py 的 z_floor)。
+      - **预算 8000 而非 2000**:2000 是为 LERC 瓦片解码慢而定的
+        (见 suggest_dem_levels 的说明);影像瓦片是 jpg,解码快得多,
+        沿用 2000 会把推荐级别压得过低。
+
+    ⚠️ tile_budget=8000 是推断值,尚未按实际拼接耗时校准(设计 §9 Q2)。
+
+    这一道是取消瓦片数硬上限后最重要的护栏:默认值合理地低,用户
+    就不会无意间触发 TB 级任务(设计 §4.10)。
+    """
+    return suggest_levels_mercator(bbox, z_max_cap, 1, min_useful_ratio,
+                                   tile_budget, depth)
