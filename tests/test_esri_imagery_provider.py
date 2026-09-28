@@ -162,5 +162,195 @@ class TestIsEmptyTile(unittest.TestCase):
             mod._mean_std = orig
 
 
+class TestProbeMaxLevel(unittest.TestCase):
+    """区域最高级别探测。
+
+    不打真实网络:注入一个假的取瓦片函数,模拟"某级别以上返回占位图"。
+    """
+
+    def _probe(self, real_max: int | None, cfg=None, **kw):
+        """real_max=None 模拟网络全失败。"""
+        from backend.providers import esri_imagery as mod
+
+        placeholder = _fx("esri_wi_placeholder_2521B.jpg")
+        real = _fx("esri_wi_real_beijing.jpg")
+        calls = []
+
+        def fake_fetch(provider, col, row, z, timeout=10):
+            calls.append(z)
+            if real_max is None:
+                return None                      # 取不到 = 判不了
+            return real if z <= real_max else placeholder
+
+        orig = mod._fetch_tile_bytes
+        mod._probe_cache.clear()
+        mod._fetch_tile_bytes = fake_fetch
+        try:
+            got = mod.probe_max_level((116.38, 39.99, 116.39, 40.00),
+                                      cfg=cfg or _cfg(), **kw)
+        finally:
+            mod._fetch_tile_bytes = orig
+            mod._probe_cache.clear()
+        return got, calls
+
+    def test_finds_city_level_19(self):
+        got, _calls = self._probe(19)
+        self.assertEqual(got, 19)
+
+    def test_finds_remote_level_17(self):
+        """西部无人区:z18 起是占位图,应返回 17。"""
+        got, _calls = self._probe(17)
+        self.assertEqual(got, 17)
+
+    def test_probes_downward_from_cap(self):
+        """从服务级天花板往下探,命中即停 —— 不该把所有级别都探一遍。"""
+        _got, calls = self._probe(17)
+        self.assertEqual(calls[0], 19)           # 从 max_zoom 开始
+        self.assertEqual(calls, [19, 18, 17])    # 命中 17 即停
+
+    def test_network_failure_returns_none(self):
+        """None = 判不了。调用方据此放行用户选的级别,
+        而不是误判成"该范围没有影像"把级别降到最低。"""
+        got, _calls = self._probe(None)
+        self.assertIsNone(got)
+
+    def test_all_placeholder_returns_min_zoom(self):
+        """逐级都是占位图(如公海):确实无影像,返回最低级别兜底。"""
+        got, _calls = self._probe(0)
+        self.assertEqual(got, 1)                 # min_zoom
+
+    def test_respects_configured_cap(self):
+        got, calls = self._probe(19, cfg=_cfg(max_zoom=18))
+        self.assertEqual(calls[0], 18)
+        self.assertEqual(got, 18)
+
+    def test_transient_failure_does_not_drop_a_level(self):
+        """★ 回归护栏 ★
+
+        实测:同一张真实瓦片连取 4 次会有 1 次失败。若单次失败就下探一级,
+        用户会**静默损失一个缩放级别** —— 实测上海 z19 明明有数据
+        (20833 字节),却因一次抖动被探测成 z18。
+
+        这里模拟"第一级第 1 次失败、之后正常":仍须返回该级。
+        """
+        from backend.providers import esri_imagery as mod
+
+        real = _fx("esri_wi_real_beijing.jpg")
+        attempts = {"n": 0}
+
+        def flaky_fetch(provider, col, row, z, timeout=10):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                return None            # 首次抖动
+            return real
+
+        orig = mod._fetch_tile_bytes
+        mod._probe_cache.clear()
+        mod._fetch_tile_bytes = flaky_fetch
+        try:
+            got = mod.probe_max_level((116.38, 39.99, 116.39, 40.00),
+                                      cfg=_cfg())
+        finally:
+            mod._fetch_tile_bytes = orig
+            mod._probe_cache.clear()
+        self.assertEqual(got, 19, "一次抖动把级别从 19 降到了更低")
+
+    def test_persistent_failure_at_top_level_still_probes_lower(self):
+        """顶层持续失败时应下探(不能整段返回 None)。"""
+        from backend.providers import esri_imagery as mod
+
+        real = _fx("esri_wi_real_beijing.jpg")
+
+        def fail_top(provider, col, row, z, timeout=10):
+            return None if z == 19 else real
+
+        orig = mod._fetch_tile_bytes
+        mod._probe_cache.clear()
+        mod._fetch_tile_bytes = fail_top
+        try:
+            got = mod.probe_max_level((116.38, 39.99, 116.39, 40.00),
+                                      cfg=_cfg())
+        finally:
+            mod._fetch_tile_bytes = orig
+            mod._probe_cache.clear()
+        self.assertEqual(got, 18)
+
+
+class TestProbeCache(unittest.TestCase):
+    def setUp(self):
+        from backend.providers import esri_imagery as mod
+        mod._probe_cache.clear()
+
+    def tearDown(self):
+        from backend.providers import esri_imagery as mod
+        mod._probe_cache.clear()
+
+    def test_same_bbox_hits_cache(self):
+        """探测是逐级网络请求,用户拖拽选区会连续触发,缓存是必需不是优化。"""
+        from backend.providers import esri_imagery as mod
+
+        real = _fx("esri_wi_real_beijing.jpg")
+        calls = []
+
+        def fake_fetch(provider, col, row, z, timeout=10):
+            calls.append(z)
+            return real
+
+        orig = mod._fetch_tile_bytes
+        mod._fetch_tile_bytes = fake_fetch
+        try:
+            bbox = (116.38, 39.99, 116.39, 40.00)
+            a = mod.probe_max_level(bbox, cfg=_cfg())
+            n_after_first = len(calls)
+            b = mod.probe_max_level(bbox, cfg=_cfg())
+        finally:
+            mod._fetch_tile_bytes = orig
+        self.assertEqual(a, b)
+        self.assertEqual(len(calls), n_after_first)   # 第二次没有新请求
+
+    def test_failure_not_cached(self):
+        """判不了(None)不该缓存 —— 否则代理刚起来时的一次失败会粘住 24 小时。"""
+        from backend.providers import esri_imagery as mod
+
+        calls = []
+
+        def fake_fail(provider, col, row, z, timeout=10):
+            calls.append(z)
+            return None
+
+        orig = mod._fetch_tile_bytes
+        mod._fetch_tile_bytes = fake_fail
+        try:
+            bbox = (116.38, 39.99, 116.39, 40.00)
+            mod.probe_max_level(bbox, cfg=_cfg())
+            n1 = len(calls)
+            mod.probe_max_level(bbox, cfg=_cfg())
+        finally:
+            mod._fetch_tile_bytes = orig
+        self.assertGreater(len(calls), n1)           # 第二次重新探测
+
+    def test_cache_disabled_when_hours_zero(self):
+        from backend.providers import esri_imagery as mod
+
+        real = _fx("esri_wi_real_beijing.jpg")
+        calls = []
+
+        def fake_fetch(provider, col, row, z, timeout=10):
+            calls.append(z)
+            return real
+
+        orig = mod._fetch_tile_bytes
+        mod._fetch_tile_bytes = fake_fetch
+        try:
+            bbox = (116.38, 39.99, 116.39, 40.00)
+            cfg = _cfg(probe_cache_hours=0)
+            mod.probe_max_level(bbox, cfg=cfg)
+            n1 = len(calls)
+            mod.probe_max_level(bbox, cfg=cfg)
+        finally:
+            mod._fetch_tile_bytes = orig
+        self.assertGreater(len(calls), n1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -121,3 +121,153 @@ def is_esri_imagery_provider(key: str) -> bool:
 
 def build_esri_imagery_provider(cfg) -> EsriImageryProvider:
     return EsriImageryProvider(cfg)
+
+
+# ---------- 区域最高级别探测 ----------
+#
+# 为什么必须有:实测 Esri 的最高可用级别**随地理位置变化** ——
+#   上海/广州/成都/纽约/伦敦/东京/悉尼:z19 有数据
+#   北京/拉萨/乌鲁木齐/喀什/漠河        :z18(z19 是占位图)
+#   格尔木/可可西里/塔克拉玛干/阿里      :z17(z18 已是占位图)
+# 用户按全局 max_zoom 选级别,在西部会下到一整片灰色占位图。
+#
+# 这与项目现有 DEM 的行为完全同构(providers/terrain.py::probe_max_level
+# 的注释原文:"最高 LOD 随地理位置变化,新疆等西部区域实测只到 14 级"),
+# 故沿用同一模式而非重新设计。
+#
+# ⚠️ 与 terrain 版的关键差别:**必须走代理**。
+# Terrain3D 直连可用,故它用 urllib 直连是合理的;World Imagery 直连全部超时,
+# 照抄会让探测永远失败并静默降级到最低级别。
+
+#: 探测结果缓存:量化后的 bbox key -> (最高级别, 写入时间戳)
+_probe_cache: dict[tuple, tuple[int, float]] = {}
+
+#: bbox 量化粒度(度)。用户拖拽选区时相邻请求会落到同一格,复用结果。
+_PROBE_GRID_DEG = 0.1
+
+
+def _probe_cache_key(bbox, cap: int) -> tuple:
+    w, s, e, n = bbox
+    q = _PROBE_GRID_DEG
+    return (round(w / q), round(s / q), round(e / q), round(n / q), cap)
+
+
+def _fetch_tile_bytes(provider: EsriImageryProvider, col: int, row: int,
+                      z: int, timeout: int = 10) -> bytes | None:
+    """同步取一张瓦片;失败返回 None。
+
+    用 urllib 而非 aiohttp:本函数由 api 层放进 asyncio.to_thread 调用
+    (与现有 _probe_dem_max_level 一致),在线程里再起事件循环会把简单的事复杂化。
+
+    必须带代理 —— 见本节顶部的警告。
+    """
+    import urllib.error
+    import urllib.request
+
+    url = provider.tile_url(col, row, z)
+    proxy = provider.proxy
+    try:
+        if proxy:
+            handler = urllib.request.ProxyHandler({"http": proxy,
+                                                   "https": proxy})
+            opener = urllib.request.build_opener(handler)
+        else:
+            opener = urllib.request.build_opener()
+        req = urllib.request.Request(url, headers=provider.headers)
+        with opener.open(req, timeout=timeout) as resp:
+            if resp.status != 200:
+                return None
+            return resp.read()
+    except urllib.error.HTTPError:
+        # 明确的 HTTP 错误:当作"该级别没有"(与 terrain 版一致)
+        return b""
+    except Exception:
+        # 网络/代理问题:判不了
+        return None
+
+
+#: 单级探测的重试次数。实测代理下 Esri 偶发取不到瓦片(同一张瓦片连取 4 次,
+#: 第 2 次返回失败、其余 3 次正常),不重试就会把网络抖动当成"该级无数据"。
+_PROBE_ATTEMPTS = 3
+
+
+def _fetch_tile_with_retry(provider: EsriImageryProvider, col: int, row: int,
+                           z: int, timeout: int = 10) -> bytes | None:
+    """取一张瓦片,失败重试;全失败返回 None。
+
+    重试是必需的,不是保险:实测同一张真实瓦片连取 4 次会有 1 次失败。
+    若单次失败就下探到低一级,用户会**静默损失一个缩放级别**
+    (实测上海 z19 有数据,却因一次抖动被探测成 z18)。
+    """
+    for attempt in range(_PROBE_ATTEMPTS):
+        data = _fetch_tile_bytes(provider, col, row, z, timeout=timeout)
+        if data is not None:
+            return data
+    return None
+
+
+def probe_max_level(bbox: tuple[float, float, float, float],
+                    cfg=None, timeout: int = 10) -> int | None:
+    """探测 Esri World Imagery 在某范围的最高可用级别。
+
+    从服务级天花板(cfg.max_zoom)往下,取范围中心瓦片逐级探测,
+    返回第一个有真实影像的级别。
+
+    返回 None 表示**无法判定**(网络不通/代理未配)。调用方据此放行用户选的
+    级别,而不是误判成"该范围没有影像"把级别降到最低 —— 与 terrain 版的
+    返回值语义一致(providers/terrain.py:129 的注释)。
+
+    逐级都是占位图(如公海)则返回 min_zoom 兜底:该范围确实无影像。
+
+    **单点采样的固有局限**(记录备查,不额外处理):探的只是选区中心那一张
+    瓦片。若中心恰是占位图而周边有数据,会少报一级;反之会多报。实测
+    0.01° 选区的 4x4 抽查里同级别取值一致,故按单点采样是实现上的合理取舍;
+    真正需要精确时应当改成多瓦片表决。
+    """
+    import time as _time
+
+    from ..config import settings
+    from ..core.logs import logger
+    from ..core.mercator_tiling import mercator_range_for_bbox
+
+    cfg = cfg if cfg is not None else settings.esri_imagery
+    provider = EsriImageryProvider(cfg)
+    zmax, zmin = provider.max_zoom(), provider.min_zoom()
+
+    cache_hours = float(getattr(cfg, "probe_cache_hours", 0) or 0)
+    ckey = _probe_cache_key(bbox, zmax)
+    if cache_hours > 0:
+        hit = _probe_cache.get(ckey)
+        if hit is not None:
+            level, ts = hit
+            if _time.time() - ts < cache_hours * 3600:
+                return level
+
+    determined = False
+    found: int | None = None
+    for z in range(zmax, zmin - 1, -1):
+        tr = mercator_range_for_bbox(*bbox, z)
+        cx = (tr.col_min + tr.col_max) // 2
+        cy = (tr.row_min + tr.row_max) // 2
+        data = _fetch_tile_with_retry(provider, cx, cy, z, timeout=timeout)
+        if data is None:
+            # 重试后仍取不到:这一级判不了,下探一级。
+            # 记一笔 —— 这种情况下报出的级别偏低,用户会少拿一级细节,
+            # 不记日志就完全不可见。
+            logger.warning("Esri 级别探测:z%s 重试 %s 次仍取不到瓦片,"
+                           "该级判不了,下探(%s 张的选区中心瓦片 %s,%s)",
+                           z, _PROBE_ATTEMPTS, bbox, cx, cy)
+            continue
+        determined = True
+        if data and not provider.is_empty_tile(data):
+            found = z
+            break
+
+    if found is None and determined:
+        found = zmin          # 逐级都无影像(如公海),取最低级别兜底
+    if found is None:
+        return None           # 全程网络失败:判不了,不缓存
+
+    if cache_hours > 0:
+        _probe_cache[ckey] = (found, _time.time())
+    return found
