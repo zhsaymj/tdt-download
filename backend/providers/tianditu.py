@@ -39,6 +39,13 @@ ANNOTATION_OF = {
     "tianditu_img": "tianditu_cia",
     "tianditu_vec": "tianditu_cva",
     "tianditu_ter": "tianditu_cta",
+    # Google/Esri 是影像源 → 配影像注记。
+    # 它们的注记走 3857(见 build_annotation_provider 的 grid 参数)。
+    "google_img": "tianditu_cia",
+    "google_hybrid": "tianditu_cia",
+    "google_road": "tianditu_cia",
+    "google_terrain": "tianditu_cia",
+    "esri_imagery": "tianditu_cia",
 }
 
 
@@ -100,9 +107,23 @@ def build_provider(key: str, token: TokenSource) -> TileProvider:
     raise ValueError(f"暂不支持的数据源:{key}")
 
 
-def build_annotation_provider(base_key: str, token: TokenSource) -> TiandituProvider | None:
-    """按底图数据源构造对应的注记 provider;无对应注记时返回 None。"""
+def build_annotation_provider(base_key: str, token: TokenSource,
+                              grid: str = "geodetic") -> TiandituProvider | None:
+    """按底图数据源构造对应的注记 provider;无对应注记时返回 None。
+
+    grid 决定注记走哪套瓦片网格:
+      - geodetic(天地图源,默认)= `_c` + TILEMATRIXSET=c,与下载网格同构
+      - mercator(Google/Esri)  = `_w` + TILEMATRIXSET=w
+
+    ⚠️ 必须与底图网格一致。行列号由底图的 range_fn 算出,网格选错会请求到
+    **另一个地方**的注记 —— 不报错,只是路网与影像对不上,很难发现。
+    """
+    from ..core.formats import GEO_MERCATOR
+
     if base_key in ("img",):
         base_key = "tianditu_img"
     anno_key = ANNOTATION_OF.get(base_key)
-    return TiandituProvider(anno_key, token) if anno_key else None
+    if not anno_key:
+        return None
+    matrix = "w" if grid == GEO_MERCATOR else "c"
+    return TiandituProvider(anno_key, token, matrix_set=matrix)
