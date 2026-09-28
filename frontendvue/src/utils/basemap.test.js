@@ -1,7 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { BASEMAP_OPTIONS, basemapTileUrl, basemapMaxZoom, basemapTypesFor, basemapZIndexForLevel } from './basemap.js'
+import {
+  BASEMAP_OPTIONS, annotationLayerOf, basemapMaxZoom, basemapTileUrl,
+  basemapTypesFor, basemapZIndexForLevel,
+} from './basemap.js'
 
 test('图层管理提供三个不可移除的天地图底图选项', () => {
   // 天地图三项仍在最前且属性不变。Google/Esri 是后加的可移除底图
@@ -19,10 +22,12 @@ test('图层管理提供三个不可移除的天地图底图选项', () => {
   ])
 })
 
-test('底图选项携带对应底图与注记 WMTS 图层', () => {
-  assert.deepEqual(basemapTypesFor('tianditu_img'), ['img_w', 'cia_w'])
-  assert.deepEqual(basemapTypesFor('tianditu_vec'), ['vec_w', 'cva_w'])
-  assert.deepEqual(basemapTypesFor('tianditu_ter'), ['ter_w', 'cta_w'])
+test('底图选项只携带底图图层,注记已摘出', () => {
+  // 注记改由图层面板的独立开关控制(见 annotationLayerOf),
+  // 不再与底图绑成一个图层组 —— 原断言期望 ['img_w','cia_w'] 这类组合。
+  assert.deepEqual(basemapTypesFor('tianditu_img'), ['img_w'])
+  assert.deepEqual(basemapTypesFor('tianditu_vec'), ['vec_w'])
+  assert.deepEqual(basemapTypesFor('tianditu_ter'), ['ter_w'])
 })
 
 test('底图层级可在成果图层下方、中间和上方移动', () => {
@@ -73,4 +78,45 @@ test('basemapTileUrl 对天地图返回 null(不走转发)', () => {
 test('basemapMaxZoom 未声明时回落 18', () => {
   assert.equal(basemapMaxZoom('tianditu_img'), 18)
   assert.equal(basemapMaxZoom('google_img'), 21)
+})
+
+
+// ---------- 注记不再绑在底图上 ----------
+
+test('天地图三项底图不再自带注记层', () => {
+  // 注记改由图层面板的独立开关控制,不再随底图一起显示。
+  const ANNO_LAYERS = ['cia_w', 'cva_w', 'cta_w']
+  for (const v of ['tianditu_img', 'tianditu_vec', 'tianditu_ter']) {
+    const opt = BASEMAP_OPTIONS.find((x) => x.value === v)
+    for (const t of opt.types) {
+      assert.ok(!ANNO_LAYERS.includes(t), `${v} 不应再含注记层 ${t}`)
+    }
+  }
+})
+
+test('天地图底图标签不再声称叠加注记', () => {
+  // 去掉注记层后标签里的"(叠加路网注记)"会变成假话,必须同步改
+  for (const v of ['tianditu_img', 'tianditu_vec', 'tianditu_ter']) {
+    const opt = BASEMAP_OPTIONS.find((x) => x.value === v)
+    assert.ok(!opt.label.includes('注记'), `${v} 标签仍写着注记:${opt.label}`)
+  }
+})
+
+test('annotationLayerOf 按底图配对注记层', () => {
+  assert.equal(annotationLayerOf('tianditu_img'), 'cia_w')
+  assert.equal(annotationLayerOf('tianditu_vec'), 'cva_w')
+  assert.equal(annotationLayerOf('tianditu_ter'), 'cta_w')
+})
+
+test('Google/Esri 底图配对影像注记', () => {
+  for (const v of ['google_img', 'google_hybrid', 'google_road',
+                   'google_terrain', 'esri_imagery']) {
+    assert.equal(annotationLayerOf(v), 'cia_w', v)
+  }
+})
+
+test('未知底图无配对注记', () => {
+  assert.equal(annotationLayerOf('nope'), null)
+  assert.equal(annotationLayerOf(undefined), null)
+  assert.equal(annotationLayerOf(''), null)
 })
