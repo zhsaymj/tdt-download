@@ -95,6 +95,124 @@ def _estimate_detail(bbox, levels: list[int], provider: str) -> dict:
             "total_bytes": total_tiles * avg}
 
 
+def _needs_proxy_provider(provider: str) -> bool:
+    """该数据源是否需要代理才能取瓦片。
+
+    实测:Google 与 Esri World Imagery 直连均不通;天地图与 Esri Terrain3D
+    直连可用,本地文件源不联网。故只有前两者走预检。
+    """
+    return is_google_provider(provider) or is_esri_imagery_provider(provider)
+
+
+def _proxy_config_key(provider: str) -> str:
+    """该数据源的代理配置项名(用于错误文案,让用户知道改哪里)。"""
+    if is_google_provider(provider):
+        return "google.proxy"
+    if is_esri_imagery_provider(provider):
+        return "esri_imagery.proxy"
+    return ""
+
+
+def _is_connection_refused(exc: BaseException) -> bool:
+    """异常链里是否含"连接被拒绝"。
+
+    这是**代理没开**的确证信号:端口无监听时系统会立刻拒绝连接
+    (实测 WinError 10061,异常链为 URLError -> ConnectionRefusedError),
+    与"超时"有本质区别 —— 超时可能只是网络抖动,不能据此拒绝提交。
+
+    必须沿异常链找:urllib 把底层异常包在 URLError 里(URLError.reason)。
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, ConnectionRefusedError):
+            return True
+        reason = getattr(cur, "reason", None)
+        if isinstance(reason, BaseException):
+            if isinstance(reason, ConnectionRefusedError):
+                return True
+            cur = reason
+            continue
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
+def _probe_provider_reachable(provider: str, timeout: int = 6) -> bool | None:
+    """取一张低级别瓦片判连通性。
+
+    返回 True=通,False=不通(**确证**),None=判不了(超时等,**放行**)。
+
+    取真实瓦片而非 HEAD 根域名:端点失效(旧 khms 端点 404)与代理不通是两种
+    不同故障,只有真正请求一张瓦片才能区分 —— 而这正是用户最需要区分的两种
+    情况(前者改 url_template,后者开代理)。
+
+    用 z2 的瓦片:世界级,任何时候都该有数据,不受选区位置影响。
+    """
+    import urllib.error
+    import urllib.request
+
+    if is_google_provider(provider):
+        p = build_google_provider(provider, settings.google)
+    elif is_esri_imagery_provider(provider):
+        p = build_esri_imagery_provider(settings.esri_imagery)
+    else:
+        return True
+
+    url = p.tile_url(1, 1, 2)
+    proxy = p.proxy
+    try:
+        if proxy:
+            handler = urllib.request.ProxyHandler({"http": proxy,
+                                                   "https": proxy})
+            opener = urllib.request.build_opener(handler)
+        else:
+            opener = urllib.request.build_opener()
+        req = urllib.request.Request(url, headers=p.headers)
+        with opener.open(req, timeout=timeout) as resp:
+            return resp.status == 200 and bool(resp.read(64))
+    except urllib.error.HTTPError:
+        # 明确的 HTTP 错误(404/403):端点问题,不是代理不通
+        return False
+    except Exception as e:
+        if _is_connection_refused(e):
+            # 代理端口拒绝连接 = 代理软件没开(或端口写错)。确证,拒绝提交。
+            #
+            # 这一条不能省:代理没开恰恰是本预检存在的理由,而它走的正是
+            # "连不上"这条分支 —— 若这里也返回 None(放行),预检就永远不会
+            # 拦住任何东西,成了个看着有的空壳。
+            return False
+        # 超时等:区分不了"网络抖动"与"代理慢",按放行处理
+        return None
+
+
+async def _precheck_network_provider(provider: str) -> tuple[bool, str]:
+    """提交前预检:该数据源现在能不能取到瓦片。返回 (是否放行, 错误文案)。
+
+    为什么在主进程做:留给 worker 的话,代理不通表现为"任务变 running →
+    瓦片逐张重试 → 全部失败",用户看到进度条停在 0% 然后红字失败,真正原因
+    (代理没开)埋在日志里,还白占一个 worker 槽位数分钟。
+
+    **判不了时放行**:与 probe_max_level 返回 None 时的取舍一致
+    (providers/terrain.py:129)。不要把网络抖动当成"代理不通"而拒绝提交。
+    """
+    if not _needs_proxy_provider(provider):
+        return True, ""
+    reachable = await asyncio.to_thread(_probe_provider_reachable, provider)
+    if reachable is not False:
+        return True, ""           # True 或 None 都放行
+    key = _proxy_config_key(provider)
+    proxy = (settings.google.proxy if is_google_provider(provider)
+             else settings.esri_imagery.proxy)
+    where = f"代理 {proxy}" if proxy else "直连(未配置代理)"
+    return False, (
+        f"该数据源当前取不到瓦片({where})。"
+        f"这两个源实测直连不通,必须配置 HTTP 代理:"
+        f"请确认代理软件已启动,并检查 config.yaml 的 {key}。"
+        f"注意修改配置后需**重启服务**才会生效。"
+        f"若代理正常,则可能是端点已变更,请检查对应的 url_template。")
+
+
 async def _probe_dem_max_level(bbox, provider: str) -> int | None:
     """探测 DEM 数据源在该范围的最高可用级别;None 表示探测失败(网络问题)。"""
     from ..providers.terrain import probe_max_level
@@ -592,10 +710,19 @@ async def api_create_task(data: TaskCreate):
         return await _create_local_task(data)
 
     dem = is_dem_provider(data.provider)
-    # DEM 走 AWS 公开数据集,无需天地图密钥;天地图数据源才校验密钥
-    # (密钥来源:tk 使用池 或 config.yaml 的固定密钥)
-    if not dem and not settings.tianditu.token and not token_pool.has_any():
+    # 需要天地图密钥的只有天地图数据源:DEM 走 Esri 公开服务、Google/Esri 影像
+    # 用非官方端点(且忽略 key 参数),都不校验密钥。
+    needs_tdt_token = not (dem or is_google_provider(data.provider)
+                           or is_esri_imagery_provider(data.provider))
+    if (needs_tdt_token and not settings.tianditu.token
+            and not token_pool.has_any()):
         raise HTTPException(400, "未配置天地图密钥,请在密钥管理中添加,或在 config.yaml 填写 tianditu.token")
+
+    # Google/Esri 需要代理才能下载。不预检的话失败会推迟到 worker 里,
+    # 表现为"任务跑起来又全部瓦片失败",且白占一个 worker 槽位数分钟。
+    ok, msg = await _precheck_network_provider(data.provider)
+    if not ok:
+        raise HTTPException(400, msg)
 
     levels = data.level_list()
     if not levels:
@@ -614,8 +741,11 @@ async def api_create_task(data: TaskCreate):
         raise HTTPException(400, "所选范围在该级别下没有瓦片,请检查范围或级别")
     # 预估原始瓦片下载量(字节):仅下载量,非成果大小
     est_bytes = detail["total_bytes"]
-    # 叠加注记时需额外下载同网格的注记瓦片,总数翻倍(保持进度准确)。DEM 无注记。
-    if data.annotate and not dem:
+    # 叠加注记时需额外下载同网格的注记瓦片,总数翻倍(保持进度准确)。
+    # 注记是天地图特有的同网格覆盖层:DEM 与墨卡托源(Google/Esri)都没有,
+    # 用 grid 判定而非逐个列 provider。
+    has_annotation = (not dem and grid_of(data.provider) != GEO_MERCATOR)
+    if data.annotate and has_annotation:
         total *= 2
         est_bytes *= 2
 

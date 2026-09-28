@@ -129,15 +129,53 @@ def _diagnose_py3dtiles(item: dict, python: Path) -> dict:
     return item
 
 
+async def _diagnose_network_source(name: str, cfg, provider_key: str) -> dict:
+    """探测一个需代理的影像数据源:未启用则跳过,启用则实际取一张瓦片。
+
+    与 _diagnose_one(探测本机可执行文件)并列但实现不同:这里是网络请求。
+    按症状给可操作的 hint —— 用户最需要区分的是"代理没开"与"端点变了"。
+    """
+    from ..api.tasks import _probe_provider_reachable
+    from ..providers.base import normalize_proxy
+
+    item = {"name": name, "enabled": bool(cfg.enabled), "proxy": "",
+            "reachable": False, "error": "", "hint": ""}
+    if not cfg.enabled:
+        item["hint"] = "未启用(config.yaml 中设 enabled: true 后可用)"
+        return item
+    proxy = normalize_proxy(cfg.proxy)
+    item["proxy"] = proxy or "(直连)"
+    state = await asyncio.to_thread(_probe_provider_reachable, provider_key, 6)
+    if state is True:
+        item["reachable"] = True
+        return item
+    if state is None:
+        item["error"] = "连接超时"
+        item["hint"] = ("代理不可连接或网络不通。确认代理软件已启动;"
+                        "该源实测直连不通,必须配代理。改配置后需重启服务。")
+    else:
+        item["error"] = "端点返回错误(非 200)"
+        item["hint"] = "代理可能正常但端点已变更,请检查 url_template。"
+    return item
+
+
 @router.get("/diagnose")
 async def api_tools_diagnose(request: Request):
-    """逐项诊断外部三维处理器,返回 {name: {configured, path, exists, runnable, version, error}}。
+    """逐项诊断外部工具与需代理的数据源。
 
-    前端提交三维任务前调用:任一环节 configured/exists/runnable 为 False
-    都应先提示用户去修配置,而不是把任务排进队列再失败。
+    三维处理器返回 {name: {configured, path, exists, runnable, version, error}};
+    影像数据源另在 google / esri_imagery 键下返回
+    {enabled, proxy, reachable, error, hint}。
+
+    前端提交任务前调用:任一环节不满足都应先提示用户去修配置,
+    而不是把任务排进队列再失败。
     """
     _require_local(request)
     result = {}
     for name, attr in _TOOLS:
         result[name] = await asyncio.to_thread(_diagnose_one, attr)
+    result["google"] = await _diagnose_network_source(
+        "Google 影像", settings.google, "google_img")
+    result["esri_imagery"] = await _diagnose_network_source(
+        "Esri World Imagery", settings.esri_imagery, "esri_imagery")
     return result
