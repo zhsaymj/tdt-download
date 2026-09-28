@@ -71,7 +71,18 @@ class TileDownloader:
         ok = fail = 0
         stopped = False
 
-        async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
+        # 代理取自 provider(Google/Esri 需要;天地图与 DEM 直连)。
+        # getattr 带默认值是为兼容 CachedBuildingSource 这类装饰器与测试替身。
+        #
+        # 必须用 session 级 proxy 而非逐请求传:_one 里有重试循环,逐请求要在
+        # 每处 session.get 都带上,漏一处就是"重试时突然直连" —— 表现为偶发
+        # 超时,极难定位。
+        #
+        # 刻意不设 trust_env=True:那会读 HTTP_PROXY 环境变量,把天地图/DEM
+        # 也绕进用户为别的软件设的系统代理(现有功能的静默回归)。
+        proxy = getattr(self.provider, "proxy", None)
+        async with aiohttp.ClientSession(headers=headers, timeout=timeout,
+                                         proxy=proxy) as session:
             tasks = [
                 asyncio.create_task(self._one(session, sem, col, row, tr.z))
                 for col, row in tr.iter_tiles()
@@ -104,10 +115,24 @@ class TileDownloader:
         path.parent.mkdir(parents=True, exist_ok=True)
         url = self.provider.tile_url(col, row, z)
 
+        # 该数据源用哪些状态码表示"此瓦片无数据"(Google 用 404)。
+        # 循环外取一次,避免每次重试都调。
+        missing = getattr(self.provider, "missing_statuses",
+                          lambda: frozenset())()
+
         for attempt in range(self.max_retries + 1):
             try:
                 async with sem:
                     async with session.get(url) as resp:
+                        if resp.status in missing:
+                            # 该处确实无影像(海洋/极地/无覆盖),非瞬态故障。
+                            # 不重试、不计失败、不写缓存 —— 与 is_empty_tile
+                            # 的处理一致(请求本身是成功的)。
+                            #
+                            # 不重试是关键:海域范围大时这是绝大多数瓦片,按
+                            # 原逻辑每张要白跑 max_retries 次 + 指数退避
+                            # (一个纯海域 0.05 度选区约 1800 张 => 5400 次无效请求)。
+                            return True
                         if resp.status == 200:
                             data = await resp.read()
                             if data:
