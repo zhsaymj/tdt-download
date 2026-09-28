@@ -8,6 +8,48 @@ export const BUILDING_PROVIDERS = ['osm_buildings', 'overture_buildings', 'local
 // DEM/地形数据源
 export const DEM_PROVIDERS = ['esri_terrain']
 
+/**
+ * 仅作底图预览、**不出现在下载列表**的影像源。
+ *
+ * 这三个是 Google 的制图渲染层(含路网/路线图/地形),不是原始影像,
+ * 作为下载成果意义不大;但仍保留在底图下拉里 —— 它们当参考底图很有用。
+ *
+ * 后端仍登记这些 provider(PROVIDER_GRID/PROVIDER_KIND),因为底图预览走
+ * /api/tiles/{provider}/... 需要它们;此处约束的只是"下载列表"这一层。
+ */
+export const BASEMAP_ONLY_IMAGE_PROVIDERS = [
+  'google_hybrid', 'google_road', 'google_terrain',
+]
+
+/** EPSG:3857 墨卡托影像源。与天地图的 4326 网格不同构。 */
+export const MERCATOR_IMAGE_PROVIDERS = [
+  'google_img', 'google_hybrid', 'google_road', 'google_terrain',
+  'esri_imagery',
+]
+
+/**
+ * 该数据源是否支持"叠加路网注记"。
+ *
+ * 注记是**天地图特有的**同网格透明覆盖层(cia/cva/cta,与底图按类型配对)。
+ * Google/Esri 属墨卡托网格,没有对应的注记图层 —— 后端会按网格跳过
+ * (见 runner.py 的 annotate 判定),故界面也不该提供入口:
+ * 勾了没效果、还会误报"瓦片数翻倍"。
+ *
+ * 实测(2026-09-28):google_img + annotate=true 与不带注记产出完全相同,
+ * 未下载任何注记瓦片,估算也不翻倍。
+ */
+/** 本地文件源:不联网,没有注记可下。 */
+export const LOCAL_FILE_PROVIDERS = [
+  'local_image', 'local_dem', 'local_vector', 'local_osgb', 'local_pointcloud',
+]
+
+export function canAnnotate(provider) {
+  if (isDemProvider(provider)) return false
+  if (LOCAL_FILE_PROVIDERS.includes(provider)) return false
+  if (MERCATOR_IMAGE_PROVIDERS.includes(provider)) return false
+  return true
+}
+
 // 本地三维数据源:OSGB 倾斜模型目录 / 点云文件(与后端 formats.py 的登记保持一致)
 export const MODEL3D_PROVIDERS = ['local_osgb', 'local_pointcloud']
 

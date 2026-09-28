@@ -15,7 +15,7 @@ import { useTaskStore } from '../stores/task'
 import { useBasemapStore } from '../stores/basemap'
 import { crsOptions } from '../utils/crs'
 import { fmtNum, fmtSize } from '../utils/format'
-import { fmtNameOf } from '../utils/provider'
+import { canAnnotate, fmtNameOf } from '../utils/provider'
 import {
   DEM_CRS_HINT, IMG_LEVELS,
   defaultContainersForStages, defaultTaskName,
@@ -47,9 +47,6 @@ const providerOptions = [
   { value: 'tianditu_vec', label: '天地图矢量底图', group: '影像' },
   { value: 'tianditu_ter', label: '天地图地形晕渲', group: '影像' },
   { value: 'google_img', label: 'Google 卫星影像', group: '影像' },
-  { value: 'google_hybrid', label: 'Google 影像(含路网)', group: '影像' },
-  { value: 'google_road', label: 'Google 路线图', group: '影像' },
-  { value: 'google_terrain', label: 'Google 地形', group: '影像' },
   { value: 'esri_imagery', label: 'Esri World Imagery', group: '影像' },
   { value: 'esri_terrain', label: '全国地形 DEM(Esri Terrain3D)', group: '地形' },
   { value: 'osm_buildings', label: '三维建筑白模(OSM)', group: '三维建筑' },
@@ -436,7 +433,7 @@ const estTotal = computed(() => {
     tiles += r.tiles || 0
     bytes += r.bytes || 0
   }
-  const mul = form.annotate && !isDem.value ? 2 : 1
+  const mul = form.annotate && canAnnotate(form.provider) ? 2 : 1
   return { tiles: tiles * mul, bytes: bytes * mul }
 })
 
@@ -651,7 +648,7 @@ function buildPayload() {
     // 勾了裁切就送裁切几何:矩形没有自己的 geometry,clipGeometry 用 bbox 造矩形环
     geometry: (form.clip ? drawStore.clipGeometry : drawStore.geometry) || null,
     clip: !!(form.clip && drawStore.clipGeometry),
-    annotate: isDem.value ? false : form.annotate,
+    annotate: canAnnotate(form.provider) ? form.annotate : false,
     tms_source_strategy: form.tmsSourceStrategy,
   }
 }
@@ -936,7 +933,7 @@ const title = computed(() => ({
             <div v-if="estTotal" class="lv-total">
               已选 {{ form.levels.length }} 级，共 {{ fmtNum(estTotal.tiles) }} 张瓦片，
               约 {{ fmtSize(estTotal.bytes) }}
-              <span v-if="form.annotate && !isDem" class="dim">（含注记，瓦片数翻倍）</span>
+              <span v-if="form.annotate && canAnnotate(form.provider)" class="dim">（含注记，瓦片数翻倍）</span>
             </div>
             </div>
           </t-form-item>
@@ -994,7 +991,7 @@ const title = computed(() => ({
                 <InfoTip content="瓦片是固定网格,边界由级别决定、不会刚好落在选区上——级别越低超出越多。勾选后成果按选区裁切,超出部分透明或裁掉。"
                   max-width="360px" />
               </t-form-item>
-              <t-form-item v-if="isDownload && !isDem" label-width="0">
+              <t-form-item v-if="isDownload && canAnnotate(form.provider)" label-width="0">
                 <t-checkbox v-model="form.annotate">叠加路网注记</t-checkbox>
                 <InfoTip content="同步下载注记图层并烘焙进成果,瓦片数翻倍。" max-width="320px" />
               </t-form-item>
