@@ -2,6 +2,10 @@
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 websockets==14.1
+# httpx 仅测试用:fastapi.testclient 依赖它。没有它时 TestClient 直接不可用,
+# 而服务端点的错误语义(403 未开启 / 410 源失效)与路径穿越拦截都发生在路由层,
+# 直接调函数测不到。
+httpx==0.28.1
 
 # 异步 HTTP 下载
 aiohttp==3.11.11

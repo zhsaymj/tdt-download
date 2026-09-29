@@ -8,17 +8,23 @@
  */
 import { computed } from 'vue'
 import { useTaskStore } from '../stores/task'
+import { useServiceStore } from '../stores/service'
 
 const emit = defineEmits([
-  'new-download', 'new-local', 'new-vector',
-  'open-data', 'open-tasks', 'open-tokens', 'open-logs', 'open-about',
+  'new-download', 'new-local', 'new-vector', 'new-3d',
+  'open-data', 'open-tasks', 'open-services', 'open-tokens', 'open-logs',
+  'open-about',
 ])
 
 const taskStore = useTaskStore()
+const serviceStore = useServiceStore()
 
 /** 进行中的任务数,做顶栏角标——不必打开队列就知道有没有在跑 */
 const activeCount = computed(() => taskStore.tasks.filter(
   (t) => ['running', 'pending'].includes(t.status)).length)
+
+/** 已开启的服务数,做顶栏角标 */
+const serviceCount = computed(() => serviceStore.countEnabled)
 </script>
 
 <template>
@@ -42,12 +48,18 @@ const activeCount = computed(() => taskStore.tasks.filter(
           <t-dropdown-item @click="emit('new-vector')">
             选本地矢量文件转换
           </t-dropdown-item>
+          <t-dropdown-item @click="emit('new-3d')">
+            选本地三维数据处理(OSGB / 点云)
+          </t-dropdown-item>
         </t-dropdown-menu>
       </t-dropdown>
 
       <button class="nav-btn" @click="emit('open-data')">数据</button>
       <button class="nav-btn" @click="emit('open-tasks')">
         任务<span v-if="activeCount" class="badge">{{ activeCount }}</span>
+      </button>
+      <button class="nav-btn" @click="emit('open-services')">
+        服务<span v-if="serviceCount" class="badge">{{ serviceCount }}</span>
       </button>
     </nav>
 

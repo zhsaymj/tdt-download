@@ -17,7 +17,7 @@ import { api } from '../api'
 import { fmtSize } from '../utils/format'
 import { mapController } from '../composables/mapController'
 import { useDrawStore } from '../stores/draw'
-import { parseVectorFiles, looksLikeLonLat, reprojectGeojson } from '../utils/vector'
+import { parseVectorFiles, resolveVectorImport, reprojectGeojson } from '../utils/vector'
 import InfoTip from './InfoTip.vue'
 import SrsModal from './SrsModal.vue'
 
@@ -96,17 +96,12 @@ async function onBldFileChange(e) {
   e.target.value = ''
   if (!files.length) return
   try {
-    const res = await parseVectorFiles(files)
-    if (!res) { MessagePlugin.warning('未解析到矢量内容'); return }
-    const { geojson, prjText } = res
-    if (looksLikeLonLat(geojson)) { await doUpload(geojson); return }
-    if (prjText) {
-      try {
-        reprojectGeojson(geojson, prjText)
-        if (looksLikeLonLat(geojson)) { await doUpload(geojson); return }
-      } catch (_) { /* 落到手选坐标系 */ }
-    }
-    pendingGeojson = geojson
+    // 拆包装、试转 .prj、判断要不要手选坐标系都在 resolveVectorImport 里,
+    // 与地图工具条的「导入矢量」共用同一套判断
+    const picked = resolveVectorImport(await parseVectorFiles(files))
+    if (!picked) { MessagePlugin.warning('未解析到矢量内容'); return }
+    if (!picked.needSrs) { await doUpload(picked.geojson); return }
+    pendingGeojson = picked.geojson
     srsVisible.value = true
   } catch (err) {
     MessagePlugin.error('矢量解析失败:' + (err?.message || err))

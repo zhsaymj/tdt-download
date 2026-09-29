@@ -2,10 +2,14 @@
 
 瓦片按 {cache_dir}/{provider.key}/{z}/{col}_{row}.{ext} 缓存;
 已存在且非空的文件直接跳过,实现断点续传。
+
+缓存写入必须是原子的(临时文件 + os.replace),原因见 `_one` 内注释:
+缓存路径与任务无关,多 worker 下多个任务会写同一路径。
 """
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from typing import Callable
 
@@ -67,7 +71,18 @@ class TileDownloader:
         ok = fail = 0
         stopped = False
 
-        async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
+        # 代理取自 provider(Google/Esri 需要;天地图与 DEM 直连)。
+        # getattr 带默认值是为兼容 CachedBuildingSource 这类装饰器与测试替身。
+        #
+        # 必须用 session 级 proxy 而非逐请求传:_one 里有重试循环,逐请求要在
+        # 每处 session.get 都带上,漏一处就是"重试时突然直连" —— 表现为偶发
+        # 超时,极难定位。
+        #
+        # 刻意不设 trust_env=True:那会读 HTTP_PROXY 环境变量,把天地图/DEM
+        # 也绕进用户为别的软件设的系统代理(现有功能的静默回归)。
+        proxy = getattr(self.provider, "proxy", None)
+        async with aiohttp.ClientSession(headers=headers, timeout=timeout,
+                                         proxy=proxy) as session:
             tasks = [
                 asyncio.create_task(self._one(session, sem, col, row, tr.z))
                 for col, row in tr.iter_tiles()
@@ -100,10 +115,24 @@ class TileDownloader:
         path.parent.mkdir(parents=True, exist_ok=True)
         url = self.provider.tile_url(col, row, z)
 
+        # 该数据源用哪些状态码表示"此瓦片无数据"(Google 用 404)。
+        # 循环外取一次,避免每次重试都调。
+        missing = getattr(self.provider, "missing_statuses",
+                          lambda: frozenset())()
+
         for attempt in range(self.max_retries + 1):
             try:
                 async with sem:
                     async with session.get(url) as resp:
+                        if resp.status in missing:
+                            # 该处确实无影像(海洋/极地/无覆盖),非瞬态故障。
+                            # 不重试、不计失败、不写缓存 —— 与 is_empty_tile
+                            # 的处理一致(请求本身是成功的)。
+                            #
+                            # 不重试是关键:海域范围大时这是绝大多数瓦片,按
+                            # 原逻辑每张要白跑 max_retries 次 + 指数退避
+                            # (一个纯海域 0.05 度选区约 1800 张 => 5400 次无效请求)。
+                            return True
                         if resp.status == 200:
                             data = await resp.read()
                             if data:
@@ -113,12 +142,38 @@ class TileDownloader:
                                 # 请求本身是成功的(该处确实无数据),故不计失败。
                                 if self.provider.is_empty_tile(data):
                                     return True
-                                path.write_bytes(data)
+                                # 原子写:缓存路径只由 provider+z+col+row 决定,
+                                # 与任务无关 —— 多 worker 下两个范围重叠的任务
+                                # (相邻范围、重跑失败任务、同区先影像后注记)
+                                # 会写同一路径。直接 write_bytes 是非原子的,
+                                # 另一进程的命中判定 `exists() && size>0` 会在
+                                # 写到一半时为真,于是残缺瓦片被当成有效缓存
+                                # 带进拼接(产出错像素/nodata),且此后永远命中
+                                # 跳过分支、不会自愈。
+                                # 先写同目录临时文件,再 os.replace 原子改名:
+                                # 同卷上 Windows/POSIX 都保证 replace 是原子的,
+                                # 观察者看到的要么是无文件、要么是完整文件。
+                                # 临时文件名带 pid,避免多进程互相覆盖。
+                                tmp = path.with_name(
+                                    f"{path.name}.{os.getpid()}.tmp"
+                                )
+                                try:
+                                    tmp.write_bytes(data)
+                                    os.replace(tmp, path)
+                                except OSError:
+                                    # 改名失败(Windows 上被其它进程句柄挡住等)
+                                    # 时清理临时文件,不留垃圾;按一次失败处理,
+                                    # 交给外层重试。
+                                    tmp.unlink(missing_ok=True)
+                                    raise
                                 return True
                         # 非 200 或空响应,进入重试
             except asyncio.CancelledError:
                 raise  # 暂停/取消时被取消,直接向上抛出
-            except (aiohttp.ClientError, asyncio.TimeoutError):
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+                # OSError 也重试:落盘/改名失败多为瞬时(磁盘忙、目标被占用),
+                # 直接让任务失败代价过大 —— 整个下载任务会因为一张瓦片的
+                # 瞬时文件锁而中止。重试次数受 max_retries 约束,不会无限重试。
                 pass
 
             if attempt < self.max_retries:

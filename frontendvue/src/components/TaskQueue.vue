@@ -2,13 +2,15 @@
 import { onMounted, ref } from 'vue'
 import { DialogPlugin, MessagePlugin } from 'tdesign-vue-next'
 import { useTaskStore, STATUS_TEXT } from '../stores/task'
+import { useOverlayStore } from '../stores/overlay'
 import { mapController } from '../composables/mapController'
 import { fmtEta, fmtSize } from '../utils/format'
-import { isBuildingProvider } from '../utils/provider'
+import { isBuildingProvider, isDemProvider, isModel3dProvider, PREVIEWABLE_STAGE_KEYS } from '../utils/provider'
 import RedownloadDialog from './RedownloadDialog.vue'
 import AddExportDialog from './AddExportDialog.vue'
 
 const taskStore = useTaskStore()
+const overlayStore = useOverlayStore()
 
 // 重新下载弹窗
 const redownloadVisible = ref(false)
@@ -70,6 +72,13 @@ function totalEta(t) { return fmtEta(t.total_eta_sec) }
 // 是否显示重试按钮:失败阶段可单独重跑
 function canRetryStage(s) { return s.status === 'failed' }
 
+// 三维四阶段没有增量续传语义(见 backend/core/runner_3d.py):
+//   convert_3d  整目录一次转换,fanvanzh 不支持增量,非空目录下重跑行为未知
+//   pc_tile_3d  py3dtiles 遇非空目录直接报错,重跑前无条件清空 3dtiles/
+//   pc_dsm/pc_dem  PDAL 逐文件覆盖重跑,无 skip-existing 逻辑
+// 「续切」对它们名不副实,只保留「删除并重试」。
+const NO_RESUME_STAGES = new Set(['convert_3d', 'pc_dsm', 'pc_dem', 'pc_tile_3d'])
+
 // 续切:保留已切成果,跳过已存在瓦片,只补未完成的
 async function onRetryStage(t, s) {
   try { await taskStore.retryStage(t.id, s.key, false) }
@@ -81,16 +90,31 @@ async function onPurgeRetryStage(t, s) {
   catch (e) { MessagePlugin.error(e?.message || '删除并重试失败') }
 }
 
-// 任务类型:三维建筑 / 地形(DEM) / 影像,用于卡片上明显区分
+// 任务类型:三维建筑 / 三维数据(OSGB/点云) / 地形(DEM) / 影像,用于卡片上明显区分
 function isBuildings(t) { return isBuildingProvider(t.provider) }
-function isDem(t) {
-  if (isBuildings(t)) return false
-  return String(t.provider || '').startsWith('esri') || String(t.provider || '').includes('terrain')
+function isModel3d(t) { return isModel3dProvider(t.provider) }
+// 复用 provider.js 的精确名单判定,不在这里做字符串匹配。
+// 原实现用 String(t.provider).startsWith('esri') 判 DEM —— 写上它时
+// esri_terrain 是唯一的 esri 源尚可;新增 esri_imagery 后
+// 'esri_imagery'.startsWith('esri') 为真,影像任务被标成「地形」。
+function isDem(t) { return isDemProvider(t.provider) }
+function taskKind(t) {
+  return isBuildings(t) ? '三维' : (isModel3d(t) ? '三维数据' : (isDem(t) ? '地形' : '影像'))
 }
-function taskKind(t) { return isBuildings(t) ? '三维' : (isDem(t) ? '地形' : '影像') }
-// 卡片配色类名:三维/地形/影像 三色区分
-function kindClass(t) { return isBuildings(t) ? 'kind-bld' : (isDem(t) ? 'kind-dem' : 'kind-img') }
-function kindTagClass(t) { return isBuildings(t) ? 'bld' : (isDem(t) ? 'dem' : 'img') }
+// 卡片配色类名:三维/三维数据/地形/影像 四色区分
+function kindClass(t) {
+  return isBuildings(t) ? 'kind-bld' : (isModel3d(t) ? 'kind-m3d' : (isDem(t) ? 'kind-dem' : 'kind-img'))
+}
+function kindTagClass(t) {
+  return isBuildings(t) ? 'bld' : (isModel3d(t) ? 'm3d' : (isDem(t) ? 'dem' : 'img'))
+}
+
+// 三维数据任务的源路径末段(目录名/文件名),meta 行展示用。
+// 路径可能以 \ 或 / 分隔、可能带尾部分隔符,取最后非空段。
+function sourceTail(t) {
+  const parts = String(t.source_path || '').split(/[\\/]/).filter(Boolean)
+  return parts.length ? parts[parts.length - 1] : ''
+}
 
 function fmtLevels(t) {
   const lv = (t.levels && t.levels.length) ? [...t.levels].sort((a, b) => a - b)
@@ -100,12 +124,13 @@ function fmtLevels(t) {
   return continuous && lv.length > 1 ? `${lv[0]}-${lv[lv.length - 1]}` : lv.join(',')
 }
 
-// 是否可预览:任一切片阶段(tms/osm/terrain)已完成即可预览(不必整任务完成)。
+// 是否可预览:任一可预览阶段已完成即可预览(不必整任务完成)。
+// 白名单集中在 provider.js 的 PREVIEWABLE_STAGE_KEYS,新增阶段只改那里。
 // 旧任务无 stages 时回退按 export + done 判断。
 function previewable(t) {
   const stages = t.stages || []
   if (stages.length) {
-    return stages.some((s) => ['tms', 'osm', 'terrain', 'tile_3d'].includes(s.key)
+    return stages.some((s) => PREVIEWABLE_STAGE_KEYS.includes(s.key)
       && (s.status === 'done' || s.status === 'skipped'))
   }
   if (t.status !== 'done') return false
@@ -141,6 +166,10 @@ function onDelete(t) {
 async function doDelete(id, purge) {
   try {
     await taskStore.remove(id, purge)
+    // 必须清掉该任务的叠加图层：成果记录没了之后，图层留在地图上就再也
+    // 无法从任何界面移除（「数据与成果」面板里已经没有这个任务了）。
+    // 这是与 DataDialog.doDelete 同样的处理，早先只在那里做了。
+    overlayStore.removeByTask(id)
     if (mapController.value && taskStore.activeId == null) mapController.value.clearPreview()
     MessagePlugin.success('已删除')
   } catch (e) { MessagePlugin.error(e?.message || '删除失败') }
@@ -170,6 +199,11 @@ async function doDelete(id, purge) {
           {{ t.building_count ? `${t.building_count} 栋建筑` : '建筑数待定' }}
           · 底面{{ BASE_MODE_TEXT[t.base_height_mode] || t.base_height_mode }}
         </div>
+        <!-- 三维数据同样无级别/瓦片计数(total 恒 0),展示数据类型与源路径末段 -->
+        <div v-else-if="isModel3d(t)" class="meta">
+          {{ t.provider === 'local_osgb' ? 'OSGB 倾斜模型' : '点云' }}
+          · {{ sourceTail(t) || '源路径待定' }}
+        </div>
         <div v-else class="meta">
           级别 {{ fmtLevels(t) }} · {{ t.downloaded }}/{{ t.total }}
           <span v-if="t.failed"> · 失败{{ t.failed }}</span>
@@ -183,7 +217,8 @@ async function doDelete(id, purge) {
               <span class="stage-name">{{ s.label }}</span>
               <span :class="['stage-status', s.status]">{{ STAGE_STATUS_TEXT[s.status] || s.status }}</span>
               <span v-if="stageEta(s)" class="stage-eta">{{ stageEta(s) }}</span>
-              <t-button v-if="canRetryStage(s)" size="small" variant="text" theme="primary"
+              <t-button v-if="canRetryStage(s) && !NO_RESUME_STAGES.has(s.key)"
+                size="small" variant="text" theme="primary"
                 class="stage-retry" @click.stop="onRetryStage(t, s)">续切</t-button>
               <t-button v-if="canRetryStage(s)" size="small" variant="text" theme="danger"
                 class="stage-retry" @click.stop="onPurgeRetryStage(t, s)">删除并重试</t-button>
@@ -208,7 +243,9 @@ async function doDelete(id, purge) {
           <t-button v-if="canAddExport(t)"
             size="small" variant="outline" theme="primary"
             @click="openAddExport(t)">补充格式</t-button>
-          <t-button v-if="['done','failed','canceled','paused'].includes(t.status)"
+          <!-- 三维任务输入是本地源,没有"重新下载"语义(RedownloadDialog 是影像/建筑
+               语义,对占位 bbox 估算只会报困惑错误);整体重跑用逐阶段「删除并重试」 -->
+          <t-button v-if="['done','failed','canceled','paused'].includes(t.status) && !isModel3d(t)"
             size="small" variant="outline" @click="openRedownload(t)">重新下载</t-button>
           <t-button size="small" variant="outline" theme="danger" @click="onDelete(t)">删除</t-button>
         </t-space>
@@ -239,10 +276,12 @@ async function doDelete(id, purge) {
 .kind-tag.dem { background: #b45309; }   /* 地形:琥珀 */
 .kind-tag.img { background: #0ea5e9; }   /* 影像:天蓝 */
 .kind-tag.bld { background: #7c3aed; }   /* 三维建筑:紫 */
+.kind-tag.m3d { background: #0d9488; }   /* 三维数据:青 */
 /* 卡片左侧色条,进一步强化区分 */
 .task.kind-dem { border-left: 3px solid #b45309; }
 .task.kind-img { border-left: 3px solid #0ea5e9; }
 .task.kind-bld { border-left: 3px solid #7c3aed; }
+.task.kind-m3d { border-left: 3px solid #0d9488; }
 .meta { font-size: 12px; color: #94a3b8; margin-bottom: 8px; }
 .meta .est { color: #0369a1; }
 .actions { margin-top: 10px; }

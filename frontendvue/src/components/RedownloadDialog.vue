@@ -7,7 +7,7 @@ import { fmtSize } from '../utils/format'
 import {
   formatPixelResolution, formatPixelSize, formatSampleSpacing, formatScale72Dpi,
 } from '../utils/taskDefaults'
-import { isBuildingProvider } from '../utils/provider'
+import { canAnnotate, isBuildingProvider } from '../utils/provider'
 import { api } from '../api'
 
 const props = defineProps({
@@ -24,6 +24,8 @@ const ALL_PROVIDER_OPTIONS = [
   { value: 'tianditu_img', label: '天地图影像' },
   { value: 'tianditu_vec', label: '天地图矢量底图' },
   { value: 'tianditu_ter', label: '天地图地形晕渲' },
+  { value: 'google_img', label: 'Google 卫星影像' },
+  { value: 'esri_imagery', label: 'Esri World Imagery' },
   { value: 'esri_terrain', label: '全国地形 DEM(Esri Terrain3D)' },
   { value: 'osm_buildings', label: '三维建筑白模(OSM,境内直连)' },
   { value: 'local_vector', label: '三维建筑白模(本地矢量面)' },
@@ -161,6 +163,14 @@ watch(() => form.export, (exp) => {
 
 // 各级别明细 z -> { tiles, bytes }
 const perLevel = ref({})
+// 后端按 provider+格式推导出的、本次实际要下载的网格(与 ProcessDialog 同一口径)
+const estGrids = ref([])
+/** 双网格提示:天地图同时勾 tms+osm 时会下两套原生瓦片(都不重投影,量约 2×)。 */
+const twoGridNote = computed(() => {
+  if (estGrids.value.length < 2) return ''
+  return 'tms 与 osm 各自用原生网格下载两套数据(都不会有重投影损失),'
+    + '代价是下载量约 2× —— 上面的数已按两套计。'
+})
 async function refreshEstimate() {
   const b = props.task?.bbox
   if (!b) { perLevel.value = {}; return }
@@ -168,7 +178,16 @@ async function refreshEstimate() {
     const d = await api.estimate({
       west: b[0], south: b[1], east: b[2], north: b[3],
       levels: ALL_LEVELS.value.join(','), provider: form.provider,
+      // 注记增量由后端按 ≤z18 逐级算 —— 与 ProcessDialog 同一口径。
+      // 原实现不传它、改在 selectedSummary 里整体 ×2,后果是每级明细列
+      // (未含注记)与总计(2 倍)对不上,且 z19+ 会虚高一倍。
+      annotate: form.annotate && canAnnotate(form.provider),
+      // 格式决定**要下载哪些网格**(天地图 tms+osm 同选时两套原生瓦片),
+      // 与 ProcessDialog 同一口径。不传的话这里显示的是实际的一半,而本对话框
+      // 提交时会把 export 发出去、由后端重算 total —— 同一个对话框里自相矛盾。
+      export: form.export.join(','),
     })
+    estGrids.value = d.grids || []
     const map = {}
     for (const it of (d.levels || [])) {
       map[it.z] = { tiles: it.tiles, bytes: it.bytes, width: it.width, height: it.height }
@@ -182,7 +201,9 @@ const selectedSummary = computed(() => {
     const it = perLevel.value[z]
     if (it) { tiles += it.tiles; bytes += it.bytes }
   }
-  if (form.annotate) { tiles *= 2; bytes *= 2 }
+  // 注记增量已由后端算进 perLevel(见 refreshEstimate 的 annotate 参数),
+  // 这里不再乘 —— 前后端各算一遍必然漂移,而且整体 ×2 对 z19+ 是错的
+  // (天地图注记只到 18 级)。
   return { tiles, bytes }
 })
 function levelSize(z) {
@@ -266,6 +287,12 @@ watch(() => props.visible, async (v) => {
 })
 
 watch(() => form.provider, () => {
+  if (props.visible && !isBuildings.value) refreshEstimate()
+})
+
+// 勾选/取消「叠加路网注记」要重新估算 —— 注记增量由后端算(见 refreshEstimate),
+// 不重算的话数字会停在上一次的结果上。
+watch(() => form.annotate, () => {
   if (props.visible && !isBuildings.value) refreshEstimate()
 })
 
@@ -468,6 +495,7 @@ async function submit() {
             约 {{ fmtSize(selectedSummary.bytes) }}
           </div>
           <div class="rd-esthint">仅原始瓦片下载量,非最终成果大小(GeoTIFF/TMS/OSM 经压缩/重编码后不同)</div>
+          <div v-if="twoGridNote" class="rd-esthint">{{ twoGridNote }}</div>
         </div>
       </t-form-item>
       <t-form-item v-if="!isBuildings" label="导出格式">

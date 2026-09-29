@@ -2,11 +2,15 @@
 import { ref, shallowRef, computed, onMounted, onBeforeUnmount } from 'vue'
 import {
   Viewer, TileMapServiceImageryProvider, UrlTemplateImageryProvider,
-  Rectangle, GeographicTilingScheme, WebMercatorTilingScheme, Ion,
+  Rectangle, GeographicTilingScheme, Ion,
   CesiumTerrainProvider, EllipsoidTerrainProvider,
   Cesium3DTileset, Color, Cartesian3,
 } from 'cesium'
 import { createCesiumMeasure } from './measure3d'
+import { isModel3dProvider, TILESET_STAGE_KEYS } from '../utils/provider'
+import ServiceLayerPicker from '../components/ServiceLayerPicker.vue'
+import { useServiceStore } from '../stores/service'
+import { addVectorGround, removeVectorGround, POINT_LIMIT } from './vectorGround'
 
 // 离线自用:不使用任何 Cesium Ion 在线资源
 Ion.defaultAccessToken = ''
@@ -18,23 +22,42 @@ const taskPath = ref('')
 const layers = ref([])   // [{ key, label, layer, show }]
 const buildingHint = ref('')   // 三维建筑相关提示(底面高与地形不匹配时)
 
+// ---- 服务图层 ----
+const serviceStore = useServiceStore()
+const showServicePicker = ref(false)
+
 // 全国 30 米地形(在线服务)。与本任务导出的地形切片互斥——
 // viewer.terrainProvider 只能挂一个,同时开启没有意义。
 const NATIONAL_TERRAIN_URL =
   'https://gisearth-1301434080.cos.ap-nanjing.myqcloud.com/MapData/terrain'
 
-// 互斥的地形图层 key(同时最多一个生效)
-const TERRAIN_KEYS = ['terrain', 'terrain-national']
-
 let viewer = null
 let taskBbox = null       // [west, south, east, north]
 let terrainProvider = null       // 本任务导出的地形提供者
-let nationalTerrain = null       // 全国 30m 地形提供者(首次勾选时才加载)
 let rangeEntity = null    // 下载范围矩形轮廓 entity
-let tileset3d = null      // 三维建筑 b3dm 瓦片集
+
+/**
+ * 三维瓦片集:key -> Cesium3DTileset。
+ *
+ * **不能只用一个变量**:场景里同时存在多个瓦片集时(比如任务的三维建筑 +
+ * 服务里的倾斜模型),单变量只能控制最后一个——先加载的关不掉、定位只认
+ * 最后一个、移除时也无处取实例来释放 GPU 资源。
+ */
+const tilesets = new Map()
+
+/**
+ * 地形 provider 缓存:key -> provider。地形互斥靠这张表,而不是硬编码的
+ * if/else 链——后者遇到未知 key 会静默回落到平面椭球,表现为"勾了地形但
+ * 没有任何变化、也不报错"。
+ */
+const terrainProviders = new Map()   // key -> CesiumTerrainProvider
+const terrainLoaders = new Map()     // key -> Promise(并发去重)
+
+/** 矢量图元句柄：key -> handle。与瓦片集同理，移除时要释放 GPU 资源 */
+const vectorHandles = new Map()
 const flatTerrain = new EllipsoidTerrainProvider()   // 关闭地形时回落的平面椭球
-const terrainLoading = ref(false)   // 全国地形加载中(首次勾选需联网)
-const terrainError = ref('')        // 全国地形加载失败提示(面板内,不阻断预览)
+const terrainLoading = ref(false)   // 地形加载中(首次勾选需联网)
+const terrainError = ref('')        // 地形加载失败提示(面板内,不阻断预览)
 
 // ---- 量测 ----
 // 结果只在本页内存里,刷新即清(见 measure3d.js 顶部说明)。
@@ -55,9 +78,15 @@ const MEASURE_TIP = {
   line: '依次点击折点,双击结束;右键移除上一拐点。',
   area: '依次点击顶点,双击结束;右键移除上一拐点。',
 }
+/** 地形 key 判定：本任务地形、全国地形、以及各服务地形（svc-terrain:<id>） */
+function isTerrainKey(key) {
+  return key === 'terrain' || key === 'terrain-national'
+    || String(key || '').startsWith('svc-terrain:')
+}
+
 // 未挂真实地形时高程恒为 0,必须说清楚,否则读数会误导
 const flatHint = computed(
-  () => !layers.value.some((it) => TERRAIN_KEYS.includes(it.key) && it.show))
+  () => !layers.value.some((it) => isTerrainKey(it.key) && it.show))
 
 function toggleMeasurePanel() {
   measureCollapsed.value = !measureCollapsed.value
@@ -70,9 +99,10 @@ function measureTagStyle(type) {
   return c ? { color: '#fff', background: c } : null
 }
 
-// 是否同时存在两个地形项(本任务切片 + 全国 30m):此时才需提示互斥关系
-const hasBothTerrain = computed(
-  () => layers.value.filter((it) => TERRAIN_KEYS.includes(it.key)).length > 1)
+// 地形项数量：超过一个才需提示互斥关系（不写死"两个"——加入服务地形后
+// 可能同时存在三四个选项）
+const terrainCount = computed(
+  () => layers.value.filter((it) => isTerrainKey(it.key)).length)
 
 // 绘制下载范围:贴地半透明矩形(填充)+ 贴地形折线(边框)。
 // Cesium 贴地矩形(ground primitive)不支持 outline,故边框改用 clampToGround 折线,
@@ -97,17 +127,25 @@ function drawRange(bbox) {
   })
 }
 
-// 相机飞到成果范围。
-// 有三维建筑时用倾斜视角(正俯视看不出立体感),否则正俯视看栅格成果更合适。
-function flyToBbox() {
-  if (!viewer || !taskBbox || taskBbox.length !== 4) return
-  const rect = Rectangle.fromDegrees(...taskBbox)
-  if (!tileset3d) {
-    viewer.camera.flyTo({ destination: rect, duration: 1.2 })
+/**
+ * 相机飞到指定范围。
+ *
+ * **参数化**（bbox / has3d 都可传）：服务图层要飞到自己的范围，不能总用
+ * 任务的 taskBbox。不传参数时保持原有行为（飞任务范围）。
+ *
+ * 有三维时用倾斜视角（正俯视看不出立体感），否则正俯视看栅格成果更合适。
+ */
+function flyToBbox(bbox = taskBbox, has3d = null) {
+  if (!viewer || !bbox || bbox.length !== 4) return
+  const use3d = has3d === null ? tilesets.size > 0 : has3d
+  if (!use3d) {
+    viewer.camera.flyTo({
+      destination: Rectangle.fromDegrees(...bbox), duration: 1.2,
+    })
     return
   }
-  // 三维建筑:从范围中心南侧、按范围尺度取一个高度,俯角 45° 斜视
-  const [w, s, e, n] = taskBbox
+  // 三维：从范围中心南侧、按范围尺度取一个高度，俯角 45° 斜视
+  const [w, s, e, n] = bbox
   const cx = (w + e) / 2
   const cy = (s + n) / 2
   const spanDeg = Math.max(e - w, n - s)
@@ -132,54 +170,80 @@ function parseFormats(v) {
   return s.replace(/\+/g, ',').split(',').map((x) => x.trim()).filter(Boolean)
 }
 
-// 全国 30m 地形按需加载:默认不勾选,不该在打开预览时就发请求。
-async function ensureNationalTerrain() {
-  if (nationalTerrain) return nationalTerrain
+/**
+ * 按 key 加载地形 provider。全国地形与服务地形走同一条路。
+ *
+ * 服务地形的 URL 从已加入场景的服务记录里取（access_path 由后端给）。
+ */
+async function loadTerrain(key) {
+  if (key === 'terrain') return terrainProvider
+  if (key === 'terrain-national') {
+    // 该服务 layer.json 声明了 octvertexnormals 扩展,请求法线可获得
+    // 正确的地形光照/山体阴影(本任务自切的地形没写法线,故那边为 false)
+    return CesiumTerrainProvider.fromUrl(NATIONAL_TERRAIN_URL, {
+      requestVertexNormals: true, requestWaterMask: false,
+    })
+  }
+  const svcId = String(key).slice('svc-terrain:'.length)
+  const svc = serviceStore.items.find((s) => s.id === svcId)
+  if (!svc) throw new Error('服务已不存在')
+  // Cesium 会在这个地址后追加 /layer.json 与各级瓦片路径
+  return CesiumTerrainProvider.fromUrl(svc.access_path, {
+    requestVertexNormals: false, requestWaterMask: false,
+  })
+}
+
+/** 取（必要时加载）地形 provider；同一 key 并发只加载一次 */
+async function ensureTerrain(key) {
+  if (terrainProviders.has(key)) return terrainProviders.get(key)
+  if (!terrainLoaders.has(key)) {
+    terrainLoaders.set(key, loadTerrain(key).then((p) => {
+      if (p) terrainProviders.set(key, p)
+      terrainLoaders.delete(key)
+      return p
+    }).catch((e) => {
+      terrainLoaders.delete(key)
+      throw e
+    }))
+  }
+  return terrainLoaders.get(key)
+}
+
+/**
+ * 应用地形选择:把除 activeKey 外的地形项全部取消,并挂上对应 provider。
+ * activeKey 为 null 表示不启用任何地形(回落平面椭球)。
+ *
+ * 用 provider 映射表而不是 if/else 链:后者遇到未知 key(比如服务地形的
+ * svc-terrain:<id>)会落到 else 分支被设成平面椭球——界面看起来完全正常、
+ * 互斥也对,但地形永远不出现,且不报任何错。
+ */
+async function applyTerrain(activeKey) {
+  for (const it of layers.value) {
+    if (isTerrainKey(it.key)) it.show = it.key === activeKey
+  }
+  if (!viewer) return
+  if (!activeKey) { viewer.terrainProvider = flatTerrain; return }
   terrainLoading.value = true
   try {
-    nationalTerrain = await CesiumTerrainProvider.fromUrl(NATIONAL_TERRAIN_URL, {
-      // 该服务 layer.json 声明了 octvertexnormals 扩展,请求法线可获得
-      // 正确的地形光照/山体阴影(本任务自切的地形没写法线,故那边为 false)
-      requestVertexNormals: true,
-      requestWaterMask: false,
-    })
-    return nationalTerrain
+    const p = await ensureTerrain(activeKey)
+    viewer.terrainProvider = p || flatTerrain
+  } catch (e) {
+    console.warn('地形加载失败', activeKey, e)
+    terrainError.value = '地形加载失败：'
+      + String(e?.message || e).slice(0, 120)
+    setTimeout(() => { terrainError.value = '' }, 8000)
+    viewer.terrainProvider = flatTerrain
   } finally {
     terrainLoading.value = false
   }
 }
 
-// 应用地形选择:把除 activeKey 外的地形项全部取消,并挂上对应 provider。
-// activeKey 为 null 表示不启用任何地形(回落平面椭球)。
-function applyTerrain(activeKey) {
-  for (const it of layers.value) {
-    if (TERRAIN_KEYS.includes(it.key)) it.show = it.key === activeKey
-  }
-  if (!viewer) return
-  if (activeKey === 'terrain') viewer.terrainProvider = terrainProvider || flatTerrain
-  else if (activeKey === 'terrain-national') viewer.terrainProvider = nationalTerrain || flatTerrain
-  else viewer.terrainProvider = flatTerrain
-}
-
 async function toggle(item) {
-  // 地形类:互斥单选。勾选其一即自动取消另一个;再点已选中的则关闭地形。
-  if (TERRAIN_KEYS.includes(item.key)) {
-    const turningOn = !item.show
-    if (!turningOn) { applyTerrain(null); return }
-    if (item.key === 'terrain-national') {
-      try {
-        await ensureNationalTerrain()
-      } catch (e) {
-        console.warn('全国 30m 地形加载失败', e)
-        // 不用 errorMsg:那是全屏遮罩,会挡住整个预览。加载失败只提示、不阻断。
-        terrainError.value = '全国 30 米地形加载失败(网络或跨域限制):'
-          + String(e?.message || e).slice(0, 120)
-        setTimeout(() => { terrainError.value = '' }, 8000)
-        return
-      }
-    }
-    applyTerrain(item.key)
-    flyToBbox()
+  // 地形类:互斥单选。勾选其一即自动取消其他;再点已选中的则关闭地形。
+  if (isTerrainKey(item.key)) {
+    if (item.show) { await applyTerrain(null); return }
+    await applyTerrain(item.key)
+    if (viewer?.terrainProvider !== flatTerrain) flyToBbox()
     return
   }
 
@@ -187,84 +251,33 @@ async function toggle(item) {
   if (item.key === 'terrain-range') {
     // 下载范围框:开关 entity 显隐
     if (rangeEntity) rangeEntity.show = item.show
-  } else if (item.key === 'buildings') {
-    // 三维建筑瓦片集:Cesium3DTileset 有独立的 show 属性
-    if (tileset3d) tileset3d.show = item.show
+  } else if (item.key === 'buildings' || String(item.key).startsWith('svc-')) {
+    // 瓦片集类（任务的三维建筑、服务的三维模型）:按 key 取对应实例。
+    // 早先用单变量只控制最后一个，多个瓦片集时先加载的关不掉。
+    const ts = tilesets.get(item.key)
+    if (ts) ts.show = item.show
   } else if (item.layer) {
     item.layer.show = item.show
   }
-  // 勾选显示时,定位到成果范围
-  if (item.show) flyToBbox()
+  // 勾选显示时,定位到该图层范围（服务图层用自己的 bounds，不是任务的）
+  if (item.show) flyToBbox(item.bbox || taskBbox, tilesets.has(item.key))
 }
 
 async function init() {
   const id = new URLSearchParams(location.search).get('id')
-  if (!id) { errorMsg.value = '缺少任务 id 参数'; loading.value = false; return }
 
-  let task
-  try {
-    task = await (await fetch(`/api/tasks/${id}`)).json()
-  } catch (e) {
-    errorMsg.value = '读取任务信息失败:' + (e?.message || e)
-    loading.value = false
-    return
-  }
-  taskName.value = task.name || id
-  taskPath.value = task.output_path || ''
-  const base = `/output/${encodeURIComponent(outputBase(task.output_path))}`
-
-  // 只加载"已完成切片阶段"对应的图层。有 stages 时按阶段状态判断;
-  // 旧任务无 stages 时回退按导出格式(整任务已完成)。
-  const stages = Array.isArray(task.stages) ? task.stages : []
-  const stageDone = (key) => stages.some(
-    (s) => s.key === key && (s.status === 'done' || s.status === 'skipped'))
-  const ready = stages.length
-    ? {
-        tms: stageDone('tms'), osm: stageDone('osm'), terrain: stageDone('terrain'),
-        buildings: stageDone('tile_3d'),
-      }
-    : (() => {
-        const f = parseFormats(task.export)
-        return {
-          tms: f.includes('tms'), osm: f.includes('osm'), terrain: f.includes('terrain'),
-          buildings: f.includes('b3dm'),
-        }
-      })()
-
-  // 瓦片装在 MBTiles 单文件里时没有可直接访问的目录,改走后端瓦片端点
-  // (/api/tasks/<id>/mbtiles/<kind>/{z}/{x}/{y})。这里先问后端拿级别范围,
-  // 拿到了就说明该成果是 MBTiles 形式。
-  // 两种形态可能并存(任务勾了「同时保留瓦片目录」),此时优先用目录:
-  // 静态文件由浏览器直读,不必每张瓦片都过后端查 sqlite。
-  // 成果形态由后端告知(前端无法自行探目录:/output 是 StaticFiles,对存在与
-  // 不存在的目录都返回 404)。两种形态并存时优先用目录——静态文件浏览器直读,
-  // 不必每张瓦片都过后端查一次 sqlite。
-  const mb = { tms: null, osm: null }
-  for (const kind of ['tms', 'osm']) {
-    if (!ready[kind]) continue
-    try {
-      const form = await (await fetch(`/api/tasks/${task.id}/tiles_form/${kind}`)).json()
-      if (form.dir) continue                    // 有目录,按原方式加载
-      if (!form.mbtiles) continue               // 两者都没有,交给原逻辑报错
-      const r = await fetch(`/api/tasks/${task.id}/mbtiles/${kind}/meta`)
-      if (r.ok) mb[kind] = await r.json()
-    } catch (e) { /* 形态探测失败,按目录方式加载 */ }
-  }
-
-  // 天地图底图密钥(后端已保底:basemap_token 缺省回落 token)
-  let basemapToken = ''
-  try {
-    const cfg = await (await fetch('/api/config')).json()
-    basemapToken = cfg.basemap_token || ''
-  } catch (_) { /* 取不到则天地图图层不可用 */ }
-
+  // ---- viewer 与底图先建：它们不依赖任务 ----
+  // 顺序很关键：measure3d 的 createCesiumMeasure(viewer) 内部注册
+  // camera.moveEnd 与 ScreenSpaceEventHandler(viewer.scene.canvas)，拿到
+  // null 会直接崩。所以 viewer 必须在任何提前 return 之前建好——否则
+  // "不带 id 打开空白预览"会在建 measure 时就挂掉。
   viewer = new Viewer('cesium-container', {
     baseLayer: false, baseLayerPicker: false, geocoder: false,
     homeButton: false, sceneModePicker: true, navigationHelpButton: false,
     timeline: false, animation: false, fullscreenButton: true, infoBox: false,
     selectionIndicator: false,
   })
-  viewer.scene.globe.baseColor = window.Cesium?.Color?.DARKSLATEGRAY || undefined
+  viewer.scene.globe.baseColor = Color.DARKSLATEGRAY
   measure.value = createCesiumMeasure(viewer)
 
   // 底图(最底层):NaturalEarthII 离线 geodetic TMS
@@ -276,6 +289,13 @@ async function init() {
   } catch (e) {
     console.warn('底图加载失败', e)
   }
+
+  // 天地图底图密钥(后端已保底:basemap_token 缺省回落 token)
+  let basemapToken = ''
+  try {
+    const cfg = await (await fetch('/api/config')).json()
+    basemapToken = cfg.basemap_token || ''
+  } catch (_) { /* 取不到则天地图图层不可用 */ }
 
   // 天地图影像(第二层,叠在离线底图之上、成果之下)。默认不勾选,主动勾选才显示。
   // 图层顺序由添加顺序决定,这里在 TMS/OSM 之前添加,保证成果始终在天地图之上。
@@ -294,6 +314,76 @@ async function init() {
       layer.show = false   // 默认不显示
       layers.value.push({ key: 'tianditu', label: '天地图影像(在线)', layer, show: false })
     } catch (e) { console.warn('天地图图层加载失败', e) }
+  }
+
+  // 全国 30 米地形(在线):所有预览都提供,默认不勾选、勾选时才联网加载。
+  // 与「本任务地形切片」「服务地形」互斥(见 isTerrainKey / applyTerrain)。
+  layers.value.push({
+    key: 'terrain-national', label: '全国 30 米地形(在线)',
+    layer: null, show: false,
+  })
+
+  // ---- 无 id：空白预览，只加载底图与服务图层 ----
+  if (!id) { loading.value = false; return }
+
+  // ---- 有 id：加载任务成果 ----
+  let task
+  try {
+    const res = await fetch(`/api/tasks/${id}`)
+    // fetch 对 404 不抛错，body 是合法 JSON，必须显式判 ok——否则不存在的
+    // id 会静默渲染成空预览、顶栏显示 /output/undefined，不报任何错。
+    if (!res.ok) throw new Error(`任务接口返回 ${res.status}`)
+    task = await res.json()
+  } catch (e) {
+    errorMsg.value = '读取任务信息失败:' + (e?.message || e)
+    loading.value = false
+    return
+  }
+  if (!task || !task.id) {
+    errorMsg.value = '任务不存在'
+    loading.value = false
+    return
+  }
+  taskName.value = task.name || id
+  taskPath.value = task.output_path || ''
+  const base = `/output/${encodeURIComponent(outputBase(task.output_path))}`
+
+  // 只加载"已完成切片阶段"对应的图层。有 stages 时按阶段状态判断;
+  // 旧任务无 stages 时回退按导出格式(整任务已完成)。
+  const stages = Array.isArray(task.stages) ? task.stages : []
+  const stageDone = (key) => stages.some(
+    (s) => s.key === key && (s.status === 'done' || s.status === 'skipped'))
+  const ready = stages.length
+    ? {
+        tms: stageDone('tms'), osm: stageDone('osm'), terrain: stageDone('terrain'),
+        // 产出 3dtiles/ 瓦片集的阶段:三维建筑 tile_3d;三维数据(OSGB/点云)convert_3d/pc_tile_3d。
+        // 名单集中在 provider.js 的 TILESET_STAGE_KEYS,新增阶段只改那里。
+        buildings: TILESET_STAGE_KEYS.some(stageDone),
+      }
+    : (() => {
+        const f = parseFormats(task.export)
+        return {
+          tms: f.includes('tms'), osm: f.includes('osm'), terrain: f.includes('terrain'),
+          buildings: f.includes('b3dm'),
+        }
+      })()
+
+  // 瓦片装在 MBTiles 单文件里时没有可直接访问的目录,改走后端瓦片端点
+  // (/api/tasks/<id>/mbtiles/<kind>/{z}/{x}/{y})。这里先问后端拿级别范围,
+  // 拿到了就说明该成果是 MBTiles 形式。
+  // 成果形态由后端告知(前端无法自行探目录:/output 是 StaticFiles,对存在与
+  // 不存在的目录都返回 404)。两种形态并存时优先用目录——静态文件浏览器直读,
+  // 不必每张瓦片都过后端查一次 sqlite。
+  const mb = { tms: null, osm: null }
+  for (const kind of ['tms', 'osm']) {
+    if (!ready[kind]) continue
+    try {
+      const form = await (await fetch(`/api/tasks/${task.id}/tiles_form/${kind}`)).json()
+      if (form.dir) continue                    // 有目录,按原方式加载
+      if (!form.mbtiles) continue               // 两者都没有,交给原逻辑报错
+      const r = await fetch(`/api/tasks/${task.id}/mbtiles/${kind}/meta`)
+      if (r.ok) mb[kind] = await r.json()
+    } catch (e) { /* 形态探测失败,按目录方式加载 */ }
   }
 
   // 叠加图层(成果,始终位于天地图之上)
@@ -356,27 +446,36 @@ async function init() {
     } catch (e) { console.warn('地形加载失败', e) }
   }
 
-  // 全国 30 米地形(在线):所有预览都提供,默认不勾选、勾选时才联网加载。
-  // 与「本任务地形切片」互斥(见 TERRAIN_KEYS / applyTerrain)。
-  layers.value.push({
-    key: 'terrain-national', label: '全国 30 米地形(在线)',
-    layer: null, show: false,
-  })
-
-  // 三维建筑白模(b3dm 3D Tiles):作为 primitive 加入场景,不是影像图层
+  // 三维瓦片集(b3dm/pnts 3D Tiles):作为 primitive 加入场景,不是影像图层。
+  // 三维数据任务的 tileset.json 位置问后端 layers 接口——多文件点云的主产物在
+  // 3dtiles/001_<文件名>/ 子目录,而 /output 是静态挂载、前端无法自行探目录;
+  // 取不到时回落根路径(OSGB/单文件点云约定)。建筑任务恒在根路径,不查接口。
   if (ready.buildings) {
     try {
-      tileset3d = await Cesium3DTileset.fromUrl(`${base}/3dtiles/tileset.json`, {
-        // 建筑量大时限制内存占用;maximumScreenSpaceError 越大越省、越粗
-        maximumScreenSpaceError: 16,
-        skipLevelOfDetail: true,
-      })
-      viewer.scene.primitives.add(tileset3d)
+      let tilesetUrl = `${base}/3dtiles/tileset.json`
+      if (isModel3dProvider(task.provider)) {
+        try {
+          const d = await (await fetch(`/api/tasks/${task.id}/layers`)).json()
+          const hit = (d.layers || []).find((L) => L.kind === 'preview3d' && L.url)
+          if (hit) tilesetUrl = hit.url
+        } catch (_) { /* 接口失败时按根路径约定加载 */ }
+      }
+      await addTileset('buildings', tilesetUrl)
+      const tiles3dLabel = task.provider === 'local_osgb' ? '倾斜模型 3D Tiles'
+        : task.provider === 'local_pointcloud' ? '点云 3D Tiles'
+        : `三维建筑白模${task.building_count ? `(${task.building_count} 栋)` : ''}`
       layers.value.push({
         key: 'buildings',
-        label: `三维建筑白模${task.building_count ? `(${task.building_count} 栋)` : ''}`,
+        label: tiles3dLabel,
         layer: null, show: true,
       })
+      // 三维数据任务没有有效 bbox(占位 [0,0,0,0],见下方 taskBbox 处理),
+      // 相机改用瓦片集自身包围盒定位(zoomTo 是异步,不阻塞后续初始化;
+      // 失败只告警,不让 unhandledrejection 冒出)
+      if (isModel3dProvider(task.provider)) {
+        viewer.zoomTo(tilesets.get('buildings'))
+          .catch((e) => console.warn('定位到瓦片集失败', e))
+      }
       // 底面高为 terrain 模式时,建筑高程已烘焙为真实海拔,须开地形才贴合;
       // 若本任务没有地形切片,提示用户成果可能悬空/沉底的原因。
       if (task.base_height_mode === 'terrain') {
@@ -385,12 +484,15 @@ async function init() {
           : '建筑底面按真实海拔烘焙,需加载地形才会贴地。本任务未导出地形切片,可勾选「全国 30 米地形」查看——但它与建筑采样所用的 Esri DEM 非同源,贴合会有偏差;要精确贴合请另建同范围的地形任务。'
       }
     } catch (e) {
-      console.warn('三维建筑加载失败', e)
+      console.warn('三维瓦片集加载失败', e)
     }
   }
 
   // 相机定位到成果范围
   taskBbox = Array.isArray(task.bbox) && task.bbox.length === 4 ? task.bbox : null
+  // 三维数据任务的真实范围 runner 阶段才解析,库里是占位 [0,0,0,0]:
+  // 四值全 0 视为无效(直飞会落到几内亚湾),相机已在瓦片集加载后 zoomTo
+  if (taskBbox && taskBbox.every((v) => v === 0)) taskBbox = null
 
   // 地形任务:同步绘制下载范围边框(贴地形起伏),并加一个可开关的图层行
   if (ready.terrain && taskBbox) {
@@ -402,8 +504,129 @@ async function init() {
   loading.value = false
 }
 
-onMounted(init)
-onBeforeUnmount(() => { if (viewer && !viewer.isDestroyed()) viewer.destroy() })
+// ---- 三维瓦片集 ----
+
+/** 加载并加入场景，登记到 tilesets（同一个 url 重复调用会各自建实例） */
+async function addTileset(key, url) {
+  const ts = await Cesium3DTileset.fromUrl(url, {
+    // 建筑量大时限制内存占用;maximumScreenSpaceError 越大越省、越粗
+    maximumScreenSpaceError: 16,
+    skipLevelOfDetail: true,
+  })
+  viewer.scene.primitives.add(ts)
+  tilesets.set(key, ts)
+  return ts
+}
+
+/** 移除并释放。**必须 remove**，否则 GPU 资源泄漏（早先只 add 从不 remove） */
+function removeTileset(key) {
+  const ts = tilesets.get(key)
+  if (!ts) return
+  try {
+    ts.show = false
+    viewer.scene.primitives.remove(ts)
+  } catch (e) {
+    console.warn('移除瓦片集失败', key, e)
+  }
+  tilesets.delete(key)
+}
+
+// ---- 服务图层 ----
+
+/** 把 bounds_wgs84 挂到图层项上，供 toggle 里的定位使用 */
+function withBbox(item, svc) {
+  return { ...item, bbox: svc.bounds_wgs84 || null }
+}
+
+/**
+ * 把一个服务加进场景。按 kind 分派到影像/地形/模型/矢量四条路径。
+ *
+ * 服务的 access_path 由后端给（不含主机名），这里补 location.origin——
+ * 后端只知道 server.host，实际访问者可能是局域网 IP 或域名。
+ */
+async function addServiceLayer(svc) {
+  const key = `svc-${svc.kind}:${svc.id}`
+  if (layers.value.some((it) => it.key === key
+      || it.key === `svc-terrain:${svc.id}`)) {
+    errorMsg.value = `「${svc.name}」已在场景中`
+    setTimeout(() => { errorMsg.value = '' }, 4000)
+    showServicePicker.value = false
+    return
+  }
+  const origin = (typeof location !== 'undefined' ? location.origin : '')
+  const url = origin + svc.access_path
+  const bbox = svc.bounds_wgs84 || null
+
+  try {
+    if (svc.kind === 'imagery') {
+      let p
+      // **必须用 UrlTemplateImageryProvider 而不是 TileMapServiceImageryProvider**：
+      // access_path 是瓦片模板（…/{z}/{x}/{y}.png），不是目录 URL。TMS 的
+      // fromUrl 会把模板当目录去请求 <root>/tilemapresource.xml 得到 404，
+      // 而且**它不抛异常**——静默降级成一个永远加载不出瓦片的 provider，
+      // 表现是"服务加进来了但地图上什么都没有"，极难排查。
+      //
+      // 网格由后端判定的 grid 决定：geodetic 是天地图那套经纬度网格，
+      // 需要显式声明 tilingScheme；mercator 与地图同投影，默认即可。
+      const geo = svc.overlay_desc?.grid === 'geodetic'
+      p = new UrlTemplateImageryProvider({
+        url,
+        minimumLevel: svc.minzoom ?? 0,
+        maximumLevel: svc.maxzoom ?? 18,
+        ...(geo ? { tilingScheme: new GeographicTilingScheme() } : {}),
+      })
+      const layer = viewer.imageryLayers.addImageryProvider(p)
+      layers.value.push(withBbox(
+        { key, label: svc.name, layer, show: true }, { bounds_wgs84: bbox }))
+    } else if (svc.kind === 'terrain') {
+      const tkey = `svc-terrain:${svc.id}`
+      layers.value.push(withBbox(
+        { key: tkey, label: svc.name, layer: null, show: false },
+        { bounds_wgs84: bbox }))
+      // 与其他地形互斥：挂上它即取消其他
+      await applyTerrain(tkey)
+    } else if (svc.kind === 'model') {
+      await addTileset(key, url)
+      layers.value.push(withBbox(
+        { key, label: svc.name, layer: null, show: true }, { bounds_wgs84: bbox }))
+      // 瓦片集自身包围盒定位最准，不依赖 bounds_wgs84
+      await viewer.zoomTo(tilesets.get(key))
+        .catch((e) => console.warn('定位到服务瓦片集失败', e))
+    } else if (svc.kind === 'vector') {
+      const resp = await fetch(url)
+      if (!resp.ok) throw new Error(`读取矢量失败（${resp.status}）`)
+      const geojson = await resp.json()
+      const handle = await addVectorGround(viewer, geojson)
+      vectorHandles.set(key, handle)
+      layers.value.push(withBbox(
+        { key, label: svc.name, layer: null, show: true }, { bounds_wgs84: bbox }))
+      if (handle?.pointsDowngraded) {
+        buildingHint.value = `「${svc.name}」点数超过 ${POINT_LIMIT}，`
+          + '已回退为不贴地的点渲染以保证流畅度。'
+      }
+    }
+    if (bbox) flyToBbox(bbox, svc.kind === 'model' || svc.kind === 'terrain')
+  } catch (e) {
+    console.warn('加载服务失败', svc, e)
+    errorMsg.value = `加载「${svc.name}」失败：${String(e?.message || e).slice(0, 120)}`
+    setTimeout(() => { errorMsg.value = '' }, 8000)
+  }
+  showServicePicker.value = false
+}
+
+onMounted(async () => {
+  await serviceStore.fetchAll()
+  await init()
+})
+onBeforeUnmount(() => {
+  // 释放瓦片集与矢量图元的 GPU 资源（viewer.destroy 之前）
+  for (const key of [...tilesets.keys()]) removeTileset(key)
+  for (const h of vectorHandles.values()) {
+    try { removeVectorGround(viewer, h) } catch (_) { /* viewer 可能已销毁 */ }
+  }
+  vectorHandles.clear()
+  if (viewer && !viewer.isDestroyed()) viewer.destroy()
+})
 </script>
 
 <template>
@@ -411,8 +634,21 @@ onBeforeUnmount(() => { if (viewer && !viewer.isDestroyed()) viewer.destroy() })
     <div id="cesium-container" class="globe"></div>
 
     <div class="topbar">
-      <span class="title">成果预览:{{ taskName || '—' }}</span>
+      <span class="title">
+        {{ taskName ? `成果预览：${taskName}` : '数据预览' }}
+      </span>
+      <!-- 按钮放左侧：右侧被「叠加图层」面板占着（它默认就停在右上角），
+           按钮放右边会与该面板挤在同一片区域 -->
+      <button class="svc-btn" @click="showServicePicker = !showServicePicker">
+        添加服务图层
+      </button>
       <span v-if="taskPath" class="path" :title="taskPath">📁 {{ taskPath }}</span>
+      <template v-if="showServicePicker">
+        <div class="svc-picker">
+          <ServiceLayerPicker @close="showServicePicker = false"
+            @pick="addServiceLayer" />
+        </div>
+      </template>
     </div>
 
     <div v-if="measure" class="mpanel" :class="{ collapsed: measureCollapsed }">
@@ -468,8 +704,10 @@ onBeforeUnmount(() => { if (viewer && !viewer.isDestroyed()) viewer.destroy() })
         <span>{{ it.label }}</span>
         <span v-if="it.key === 'terrain-national' && terrainLoading" class="loading-tag">加载中…</span>
       </label>
-      <div class="tip">层序(下→上):NaturalEarthII(离线) → 天地图 → 成果(TMS/OSM) → 三维建筑</div>
-      <div v-if="hasBothTerrain" class="tip">两个地形数据互斥,勾选其一会自动取消另一个。</div>
+      <div class="tip">层序(下→上):NaturalEarthII(离线) → 天地图 → 成果与服务图层 → 三维模型</div>
+      <div v-if="terrainCount > 1" class="tip">
+        地形数据互斥,勾选其一会自动取消其他。
+      </div>
       <div v-if="terrainError" class="warn">{{ terrainError }}</div>
       <div v-if="buildingHint" class="warn">{{ buildingHint }}</div>
     </div>
@@ -493,6 +731,18 @@ onBeforeUnmount(() => { if (viewer && !viewer.isDestroyed()) viewer.destroy() })
   font-size: 12px; color: rgba(255,255,255,.85); pointer-events: auto;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-family: Consolas, monospace;
+}
+/* 顶栏本身 pointer-events:none（不挡地图），交互元素要单独放行 */
+.svc-btn {
+  flex: 0 0 auto; pointer-events: auto;
+  border: 1px solid rgba(255,255,255,.4); background: rgba(255,255,255,.14);
+  color: #fff; border-radius: 6px; cursor: pointer;
+  font-size: 12px; font-family: inherit; padding: 4px 10px;
+}
+.svc-btn:hover { background: rgba(255,255,255,.26); }
+/* 弹层跟随按钮从左侧展开（按钮在左），右侧留给「叠加图层」面板 */
+.svc-picker {
+  position: fixed; top: 48px; left: 12px; z-index: 30; pointer-events: auto;
 }
 .panel {
   position: absolute; top: 56px; right: 12px; z-index: 10; min-width: 200px;

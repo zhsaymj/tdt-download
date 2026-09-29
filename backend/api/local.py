@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -43,45 +44,152 @@ async def api_dialog_available(request: Request):
 
 
 class PickReq(BaseModel):
-    kind: str = Field(default="raster", description="raster | vector")
+    kind: Literal["raster", "vector", "pointcloud", "dir"] = Field(
+        default="raster", description="raster | vector | pointcloud | dir")
     multiple: bool = Field(default=True)
     initial_dir: str = Field(default="", description="对话框初始目录")
 
 
 @router.post("/pick")
 async def api_pick(request: Request, data: PickReq):
-    """弹出系统文件对话框,返回选中文件的真实路径。
+    """弹出系统文件/目录对话框,返回选中路径的真实路径。
 
     POST 而非 GET:它有副作用(弹出一个模态窗口、阻塞等待用户操作),
-    不该被浏览器预取或缓存。
+    不该被浏览器预取或缓存。kind="dir" 用于 OSGB 模型目录这类
+    "输入是一个目录"的数据源;kind="pointcloud" 按 LAS/LAZ 过滤。
     """
     _require_local(request)
-    patterns = (file_dialog.VECTOR_PATTERNS if data.kind == "vector"
-                else file_dialog.RASTER_PATTERNS)
-    title = "选择矢量文件" if data.kind == "vector" else "选择栅格文件"
     try:
-        paths = await file_dialog.pick_files(
-            title=title, patterns=patterns, multiple=data.multiple,
-            initial_dir=data.initial_dir or None)
+        if data.kind == "dir":
+            paths = await file_dialog.pick(
+                kind="dir", title="选择数据目录",
+                initial_dir=data.initial_dir or None)
+        else:
+            patterns = {
+                "vector": file_dialog.VECTOR_PATTERNS,
+                "pointcloud": file_dialog.POINTCLOUD_PATTERNS,
+            }.get(data.kind, file_dialog.RASTER_PATTERNS)
+            title = {
+                "vector": "选择矢量文件",
+                "pointcloud": "选择点云文件",
+            }.get(data.kind, "选择栅格文件")
+            paths = await file_dialog.pick(
+                kind="file", title=title, patterns=patterns,
+                multiple=data.multiple,
+                initial_dir=data.initial_dir or None)
     except RuntimeError as e:
         raise HTTPException(500, str(e)) from e
     return {"paths": paths}
 
 
 class InspectReq(BaseModel):
-    path: str = Field(..., description="本地栅格文件的绝对路径")
+    path: str = Field(..., description="本地文件/目录的绝对路径")
 
 
-def _checked_path(raw: str) -> Path:
-    """校验并规整用户给的路径(粘贴时常带引号)。"""
+def _checked_existing(raw: str) -> Path:
+    """校验并规整用户给的路径(粘贴时常带引号),要求绝对且存在。"""
     p = Path((raw or "").strip().strip('"'))
     if not p.is_absolute():
         raise HTTPException(400, "请提供绝对路径")
     if not p.exists():
-        raise HTTPException(404, f"文件不存在:{p}")
+        raise HTTPException(404, f"路径不存在:{p}")
+    return p
+
+
+def _checked_file(raw: str) -> Path:
+    """在 _checked_existing 之上要求必须是文件。"""
+    p = _checked_existing(raw)
     if not p.is_file():
         raise HTTPException(400, f"不是文件:{p}")
     return p
+
+
+def _checked_dir(raw: str) -> Path:
+    """在 _checked_existing 之上要求必须是目录。"""
+    p = _checked_existing(raw)
+    if not p.is_dir():
+        raise HTTPException(400, f"不是目录:{p}")
+    return p
+
+
+def _inspect_osgb_dir(p: Path) -> dict:
+    """OSGB 目录提交前检查(同步,放线程里跑:rglob 大目录会阻塞事件循环)。
+
+    有效结构:目录内(递归)至少一个 .osgb;metadata.xml 缺失不致命,
+    但模型坐标参考可能不全,经 warning 字段提示用户。
+    """
+    has_osgb = any(f.suffix.lower() == ".osgb"
+                   for f in p.rglob("*") if f.is_file())
+    if not has_osgb:
+        raise HTTPException(400, f"目录下没有找到 .osgb 文件:{p}")
+    warning = None
+    if not (p / "metadata.xml").is_file():
+        warning = ("目录下缺少 metadata.xml:模型坐标参考可能缺失,"
+                   "转换后的 3D Tiles 可能无法正确落点。")
+    return {"path": str(p), "warning": warning}
+
+
+@router.post("/inspect_osgb")
+async def api_inspect_osgb(request: Request, data: InspectReq):
+    """检查 OSGB 倾斜模型目录:是否含 .osgb 数据,缺 metadata.xml 给 warning。"""
+    _require_local(request)
+    p = _checked_dir(data.path)
+    return await asyncio.to_thread(_inspect_osgb_dir, p)
+
+
+def _inspect_pointcloud(p: Path, cfg) -> dict:
+    """点云提交前预检(同步,放线程里跑:目录枚举与 pdal info 都是阻塞操作)。
+
+    目录输入时 files 给递归 LAS/LAZ 清单(相对路径,区分子目录同名文件);
+    一期只对排序后的第一个文件做 pdal 预检——每个文件一次 pdal 子进程,
+    大目录太慢;其余文件的问题在任务运行期才暴露。
+    「无 LAS 文件」「pdal 不可用」「preflight 失败」都不抛 HTTP 错,
+    经 error 字段返回中文原因(HTTP 仍 200),前端按 error 是否为空分支;
+    只有路径本身非法(非绝对/不存在)才在路由层 4xx。
+    """
+    from ..core.processors.base import ProcessorError
+    from ..core.processors.las_to_dem import LasToDem
+
+    result = {"files": [], "count": None, "bbox": None, "srs": None,
+              "error": None}
+    if p.is_dir():
+        files = sorted(f for f in p.rglob("*")
+                       if f.is_file() and f.suffix.lower() in (".las", ".laz"))
+        if not files:
+            result["error"] = f"目录下没有找到 las/laz 点云文件:{p}"
+            return result
+    elif p.suffix.lower() in (".las", ".laz"):
+        files = [p]
+    else:
+        result["error"] = f"点云数据源只支持 las/laz 文件:{p}"
+        return result
+
+    # 目录输入给相对路径(不同子目录的同名 LAS 可区分),单文件给文件名
+    result["files"] = ([str(f.relative_to(p)) for f in files]
+                       if p.is_dir() else [files[0].name])
+    try:
+        info = LasToDem().preflight(files[0], cfg)
+    except ProcessorError as e:
+        result["error"] = str(e)
+        return result
+    result["count"] = info["points"]
+    result["bbox"] = info["bbox"]
+    # srs 空串归一为 None:前端据 srs is null 提示用户手选 EPSG 或按本地坐标
+    result["srs"] = info["srs"] or None
+    return result
+
+
+@router.post("/inspect_pointcloud")
+async def api_inspect_pointcloud(request: Request, data: InspectReq):
+    """检查本地 LAS/LAZ 点云:文件清单、点数、范围与 CRS,供提交前确认。
+
+    pdal info 是子进程调用,放线程池执行避免阻塞事件循环。
+    """
+    _require_local(request)
+    from ..config import settings
+
+    p = _checked_existing(data.path)
+    return await asyncio.to_thread(_inspect_pointcloud, p, settings)
 
 
 @router.post("/inspect_vector")
@@ -94,7 +202,7 @@ async def api_inspect_vector(request: Request, data: InspectReq):
     _require_local(request)
     from ..core import local_vector_file
 
-    p = _checked_path(data.path)
+    p = _checked_file(data.path)
     try:
         return await asyncio.to_thread(local_vector_file.inspect_vector, p)
     except ValueError as e:
@@ -123,7 +231,7 @@ async def api_convert_vector(request: Request, data: ConvertVectorReq):
     from ..models import reserve_output_dir, safe_dirname
     from ..core.formats import CONTAINERS
 
-    p = _checked_path(data.path)
+    p = _checked_file(data.path)
     cont = CONTAINERS.get(data.container)
     if cont is None or cont.writer != "pyogrio":
         raise HTTPException(400, f"不支持的矢量容器格式:{data.container}")
@@ -153,7 +261,7 @@ async def api_inspect(request: Request, data: InspectReq):
     _require_local(request)
     from ..core import local_raster
 
-    p = _checked_path(data.path)
+    p = _checked_file(data.path)
     try:
         info = await asyncio.to_thread(local_raster.inspect_for_import, p)
     except ValueError as e:

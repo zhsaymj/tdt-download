@@ -157,8 +157,12 @@ class TaskCreate(BaseModel):
     bbox: list[float] = Field(..., description="[west, south, east, north] 经纬度")
     # 选中的级别列表(勾选模式)。为兼容旧客户端仍接受 z_min/z_max。
     levels: list[int] = Field(default_factory=list, description="选中的级别,如 [10,11,12]")
-    z_min: int = Field(default=0, ge=0, le=18)
-    z_max: int = Field(default=0, ge=0, le=18)
+    # 刻意不设 le=18:级别上限按数据源而异(Google 21 / Esri 影像 19 /
+    # 天地图 18 / DEM 16),由 core.formats.z_cap_of 单处判定、level_list
+    # 过滤。写死在这里会让用旧式 z_min/z_max 的客户端被 422 直接拒绝
+    # ("Input should be less than or equal to 18")。
+    z_min: int = Field(default=0, ge=0)
+    z_max: int = Field(default=0, ge=0)
     export: str = Field(default="geotiff", description="导出格式,逗号分隔:geotiff/tms/osm")
     geometry: Optional[dict] = Field(default=None, description="geojson 几何(矢量/多边形),WGS84")
     clip: bool = Field(default=False, description="是否裁剪 GeoTIFF 到 geometry 边界")
@@ -208,22 +212,30 @@ class TaskCreate(BaseModel):
     tms_source_strategy: str = Field(
         default="contiguous",
         description="本地影像出 TMS 的断层策略:contiguous/preserve_inputs")
+    pc_crs: str = Field(
+        default="",
+        description="点云任务 CRS 处理策略:''=自动读 LAS 头;'local'=本地坐标;否则为 EPSG 码(如 EPSG:4547)")
+    pc_resolution: float = Field(
+        default=0.0, ge=0.0, le=1000.0,
+        description="点云出 DEM/DSM 的栅格分辨率(米),0=按点云密度自动估算")
 
     def level_list(self) -> list[int]:
         """归一化出去重升序的级别列表:优先 levels,回退 z_min..z_max。
 
-        天地图级别 1-18;DEM(Esri Terrain3D)级别 0-16(允许 0 级)。
+        级别范围**按数据源**取(天地图 1-18、Google 1-21、Esri 影像 1-19、
+        DEM 0-16),由 core.formats.z_cap_of/z_floor_of 单处判定。
+
+        ⚠️ 这里曾经硬编码「非 DEM 一律 1-18」,与 api 层的按 provider 判定
+        矛盾 —— 后果是 Google 的 z21 / Esri 的 z19 实际下不到(请求 [20,21]
+        会被过滤成空列表,任务直接建不出来),且**不报错**。
         """
+        from .core.formats import z_cap_of, z_floor_of
         from .providers.buildings import is_building_provider
-        from .providers.terrain import DEM_LAYERS, is_dem_provider
         # 三维建筑无瓦片级别概念(数据是矢量要素集);返回合成级别让通用校验通过,
         # 底面高程 DEM 的级别由 runner 按范围自行决定。
         if is_building_provider(self.provider):
             return [0]
-        if is_dem_provider(self.provider):
-            z_floor, z_cap = 0, DEM_LAYERS[self.provider][2]
-        else:
-            z_floor, z_cap = 1, 18
+        z_floor, z_cap = z_floor_of(self.provider), z_cap_of(self.provider)
         if self.levels:
             return sorted({z for z in self.levels if z_floor <= z <= z_cap})
         if self.z_min is not None and self.z_max is not None and self.z_min <= self.z_max:
@@ -260,10 +272,10 @@ def create_task(data: TaskCreate, total: int, est_bytes: int = 0) -> str:
                 upload_id, height_field, height_mode, height_scale,
                 floor_height, name_field, keep_fields, dem_upload_id,
                 containers, contour_interval, keep_tiles_dir, source_path,
-                tms_source_strategy,
+                tms_source_strategy, pc_crs, pc_resolution,
                 created_at, updated_at)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-                       ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 task_id, data.name, data.provider, json.dumps(data.bbox),
                 z_min, z_max, data.export,
@@ -287,6 +299,8 @@ def create_task(data: TaskCreate, total: int, est_bytes: int = 0) -> str:
                 1 if data.keep_tiles_dir else 0,
                 (data.source_path or "").strip(),
                 normalize_tms_source_strategy(data.tms_source_strategy),
+                (data.pc_crs or "").strip(),
+                float(data.pc_resolution or 0.0),
                 now, now,
             ),
         )
@@ -390,6 +404,9 @@ def _row_to_dict(row) -> dict:
     d["source_path"] = d.get("source_path") or ""
     d["tms_source_strategy"] = normalize_tms_source_strategy(
         d.get("tms_source_strategy"))
+    # 点云字段:旧任务缺列时 get 返回 None → 回落默认('' 自动读 LAS 头 / 0 自动分辨率)
+    d["pc_crs"] = d.get("pc_crs") or ""
+    d["pc_resolution"] = float(d.get("pc_resolution") or 0.0)
     # 阶段化进度:优先存储的 stages;旧任务(空)按 export/status 合成兼容视图
     st = d.get("stages")
     stages = json.loads(st) if st else []
@@ -429,3 +446,24 @@ def _synth_stages(d: dict) -> list[dict]:
 def update_stages(task_id: str, stages: list[dict]) -> None:
     """把阶段进度数组落库(整体覆盖写)。"""
     update_task(task_id, stages=json.dumps(stages))
+
+
+def _service_row_to_dict(row) -> dict:
+    """services 表行 -> dict。
+
+    三个布尔列(SQLite 存 0/1)转成真正的 bool,一个 JSON 列转成数组——
+    前端拿到就能直接用,不必各自记得在哪儿转换。
+    """
+    d = dict(row)
+    raw = d.get("bounds_wgs84") or ""
+    if raw:
+        try:
+            d["bounds_wgs84"] = json.loads(raw)
+        except ValueError:
+            d["bounds_wgs84"] = None
+    else:
+        d["bounds_wgs84"] = None
+    d["flip_y"] = bool(d.get("flip_y"))
+    d["bounds_approx"] = bool(d.get("bounds_approx"))
+    d["enabled"] = bool(d.get("enabled"))
+    return d

@@ -81,7 +81,13 @@ def _geojson_geometries(geometry: dict) -> list[dict]:
 
 
 def clip_to_geometry(src_path: Path, geometry: dict) -> bool:
-    """把 EPSG:4326 的 GeoTIFF 原地裁剪到 geometry 边界并写显式 alpha 波段。
+    """把 GeoTIFF 原地裁剪到 geometry 边界并写显式 alpha 波段。
+
+    geometry 恒为 WGS84 GeoJSON(前端送来的就是这个)。源图坐标系可以是
+    EPSG:4326(天地图)或 EPSG:3857(Google/Esri 影像)—— 后者必须先把几何
+    转到源图坐标系,否则经纬度(±180)与米(±2e7)不在一个尺度上,rio_mask
+    会判成"无重叠"、**静默返回 False 而图一点没裁**。
+    做法与 core/tile_clip.py 的 prepare_geoms 一致。
 
     不用 nodata=0 表达"边界外":三波段 uint8 影像里 0 是合法像素值,深色植被的
     红波段经常正好取 0(实测 z13 有 6.5% 的有效像素至少有一个波段为 0)。一旦
@@ -97,6 +103,15 @@ def clip_to_geometry(src_path: Path, geometry: dict) -> bool:
     geoms = _geojson_geometries(geometry)
     if not geoms:
         return False
+
+    # 几何是 WGS84;源图可能是 3857。必须先转到源图坐标系 —— 否则
+    # rio_mask 判成无重叠,**静默返回 False**(图没裁,也没有任何报错)。
+    with rasterio.open(src_path) as _probe:
+        _src_crs = _probe.crs
+    if _src_crs is not None and _src_crs.to_string() != "EPSG:4326":
+        from rasterio.warp import transform_geom
+        geoms = [transform_geom("EPSG:4326", _src_crs.to_string(), g)
+                 for g in geoms]
 
     with rasterio.open(src_path) as src:
         try:
@@ -167,10 +182,16 @@ def clip_to_geometry(src_path: Path, geometry: dict) -> bool:
     return True
 
 
-def reproject_geotiff(src_path: Path, dst_crs: str) -> bool:
+def reproject_geotiff(src_path: Path, dst_crs: str,
+                      resampling: Resampling = Resampling.bilinear) -> bool:
     """把 GeoTIFF 原地重投影到 dst_crs(如 EPSG:4547)。
 
     dst_crs 与源相同或为空则跳过,返回 False。
+
+    resampling 只作用于**彩色波段**;alpha 与掩膜恒用 nearest(它们是有效性
+    边界,插值会把透明区扩成灰边)。默认 bilinear 是既有行为,不要随手改 ——
+    用户选的"输出坐标系"走的就是这条。TMS 的 4326 源另传 cubic,理由见
+    runner._mercator_raster_source。
     """
     if not dst_crs:
         return False
@@ -216,9 +237,9 @@ def reproject_geotiff(src_path: Path, dst_crs: str) -> bool:
                 dst_crs=dst_crs,
                 src_nodata=src_nodata,
                 dst_nodata=src_nodata,
-                # alpha 是有效性边界,避免双线性插值把透明边界扩大成灰边。
+                # alpha 是有效性边界,避免插值把透明边界扩大成灰边。
                 resampling=Resampling.nearest if i in alpha_indexes
-                else Resampling.bilinear,
+                else resampling,
             )
         if has_mask and not alpha_indexes:
             dst_mask = np.zeros((height, width), dtype=np.uint8)

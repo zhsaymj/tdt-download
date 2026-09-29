@@ -3,7 +3,9 @@ import proj4 from 'proj4'
 // shpjs v6:默认导出 = getShapefile(处理 zip);parseShp/parseDbf/combine 为具名导出
 import shp, { parseShp, parseDbf, combine } from 'shpjs'
 import { kml as kmlToGeoJSON } from '@tmcw/togeojson'
-import { GeoJSON, KML } from 'ol/format'
+// 写 'ol/format.js' 而非 'ol/format':ol 未声明 exports 字段,目录形式在 Node 里
+// 是 ERR_UNSUPPORTED_DIR_IMPORT,单元测试直接 import 本模块会挂(浏览器/Vite 两者都行)
+import { GeoJSON, KML } from 'ol/format.js'
 
 // GeoJSON 规范几何类型(首字母大写)。部分工具导出小写(如 "polygon"),
 // OpenLayers 按规范只认标准写法,故导入后统一规范化,避免静默读不出几何。
@@ -150,7 +152,49 @@ export function downloadText(filename, text,
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
-// 解析文件列表为 geojson,返回 { geojson, prjText }
+// geojson 深拷贝。GeoJSON 按规范就是纯 JSON,走 JSON 往返没有兼容性风险;
+// 用副本试转是为了让"转了但结果不可信"能干净回退(见 resolveVectorImport)。
+function cloneGeojson(g) {
+  return JSON.parse(JSON.stringify(g))
+}
+
+/**
+ * 把 parseVectorFiles 的结果收敛成「一个可直接用的 geojson + 要不要让用户手选源坐标系」。
+ *
+ * 返回值:{ geojson, needSrs }。needSrs 为 true 时 geojson 保持原坐标,调用方弹 SrsModal,
+ * 用户选完 EPSG 后自己 reprojectGeojson。解析不出内容返回 null。
+ *
+ * 入参两种形态都收:{ geojson, prjText } 包装,或裸 geojson。历史上调用方忘了拆包装,
+ * 直接把包装体喂给 OpenLayers,读不到 type 就抛 "Unsupported GeoJSON type: undefined"
+ * ——这里兜住,免得同一个坑再踩一次。
+ */
+export function resolveVectorImport(parsed) {
+  const raw = (Array.isArray(parsed) || (parsed && typeof parsed.type === 'string'))
+    ? parsed
+    : parsed?.geojson
+  if (!raw) return null
+
+  // shpjs 解含多个 shp 的压缩包时返回 FeatureCollection 数组,合并成一个再往下走
+  const geojson = Array.isArray(raw)
+    ? { type: 'FeatureCollection', features: raw.flatMap((g) => g?.features || []) }
+    : raw
+
+  if (looksLikeLonLat(geojson)) return { geojson, needSrs: false }
+
+  // 不像经纬度但带了 .prj:先按 .prj 试转一次,能落到经纬度范围就直接用。
+  // 试转必须走副本——reprojectGeojson 是原地改的,若转完仍越界(说明 .prj 与数据
+  // 对不上),留着被改坏的坐标再让用户手选一次坐标系就成了二次投影。
+  if (parsed.prjText) {
+    try {
+      const trial = reprojectGeojson(cloneGeojson(geojson), parsed.prjText)
+      if (looksLikeLonLat(trial)) return { geojson: trial, needSrs: false }
+    } catch (_) { /* .prj 解不了,落到手选坐标系 */ }
+  }
+  return { geojson, needSrs: true }
+}
+
+// 解析文件列表为 geojson,返回 { geojson, prjText }。
+// geojson 可能是数组(多图层 zip),交给 resolveVectorImport 收敛后再用。
 export async function parseVectorFiles(fileList) {
   const files = Array.from(fileList || [])
   if (!files.length) return null

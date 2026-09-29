@@ -1,0 +1,143 @@
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import assert from 'node:assert/strict'
+import test from 'node:test'
+
+const componentDir = dirname(fileURLToPath(import.meta.url))
+const frontendRoot = resolve(componentDir, '../..')
+const taskQueueSource = readFileSync(resolve(componentDir, 'TaskQueue.vue'), 'utf8')
+const dataDialogSource = readFileSync(resolve(componentDir, 'DataDialog.vue'), 'utf8')
+const previewSource = readFileSync(resolve(frontendRoot, 'src/preview/PreviewApp.vue'), 'utf8')
+
+test('任务卡片:三维数据任务显示第四种类型标签与青色配色', () => {
+  // 集中判定复用 provider.js,不在组件里再做字符串匹配
+  assert.ok(taskQueueSource.includes('isModel3dProvider'), '缺少 isModel3dProvider 引入')
+  assert.ok(taskQueueSource.includes("'三维数据'"), '缺少三维数据类型文案')
+  assert.ok(taskQueueSource.includes("'kind-m3d'"), 'kindClass 缺少 kind-m3d 分支')
+  assert.ok(taskQueueSource.includes("'m3d'"), 'kindTagClass 缺少 m3d 分支')
+  assert.ok(taskQueueSource.includes('.kind-tag.m3d'), '缺少 kind-tag.m3d 配色')
+  assert.ok(taskQueueSource.includes('.task.kind-m3d'), '缺少 kind-m3d 卡片色条')
+  // 与既有三色明显区分的青色
+  assert.ok(taskQueueSource.includes('#0d9488'), '三维数据配色应为青色 #0d9488')
+})
+
+test('任务卡片:三维数据 meta 行显示数据类型与源路径末段', () => {
+  // 三维任务无级别/瓦片计数(total 恒 0),沿用栅格行会显示「级别 — · 0/0」
+  assert.ok(taskQueueSource.includes('OSGB 倾斜模型'), '缺少 OSGB 数据类型文案')
+  // 源路径可能以 \ 或 / 分隔、可能带尾部分隔符,取最后非空段
+  assert.ok(taskQueueSource.includes('source_path'), 'meta 行应展示 source_path 末段')
+  assert.match(taskQueueSource, /split\(\/\[\\\\\/\]\/\)/, '源路径末段应同时按 \\ 与 / 切分')
+  assert.ok(taskQueueSource.includes('.filter(Boolean)'), '应过滤空段以容忍尾部分隔符')
+})
+
+test('任务卡片:previewable 白名单复用 provider.js 集中常量(不再裸写数组)', () => {
+  const start = taskQueueSource.indexOf('function previewable')
+  assert.notEqual(start, -1)
+  const body = taskQueueSource.slice(start, taskQueueSource.indexOf('function openPreview', start))
+  assert.ok(body.includes('PREVIEWABLE_STAGE_KEYS.includes(s.key)'),
+    'previewable 应引用 PREVIEWABLE_STAGE_KEYS,阶段名单只在 provider.js 维护')
+  assert.ok(taskQueueSource.includes("PREVIEWABLE_STAGE_KEYS } from '../utils/provider'"),
+    '缺少 PREVIEWABLE_STAGE_KEYS 引入')
+})
+
+test('任务卡片:「重新下载」对三维数据任务隐藏(本地源没有重新下载语义)', () => {
+  // RedownloadDialog 是影像/建筑语义,对占位 bbox 估算只会报困惑错误;
+  // 三维任务整体重跑走逐阶段「删除并重试」
+  assert.ok(taskQueueSource.includes("includes(t.status) && !isModel3d(t)"),
+    '重新下载按钮未排除 model3d')
+})
+
+test('任务卡片:三维四阶段无增量续传语义,隐藏「续切」只留「删除并重试」', () => {
+  assert.ok(taskQueueSource.includes('NO_RESUME_STAGES'), '缺少 NO_RESUME_STAGES 常量')
+  for (const key of ["'convert_3d'", "'pc_dsm'", "'pc_dem'", "'pc_tile_3d'"]) {
+    assert.ok(taskQueueSource.includes(key), 'NO_RESUME_STAGES 缺少: ' + key)
+  }
+  // 「续切」按钮追加排除条件;「删除并重试」不动(仍是 canRetryStage 单条件)
+  assert.ok(taskQueueSource.includes('!NO_RESUME_STAGES.has(s.key)'), '续切按钮未排除三维阶段')
+  const resumeIdx = taskQueueSource.indexOf('!NO_RESUME_STAGES.has(s.key)')
+  // 注意匹配模板里的点击绑定:脚本段的函数定义同样含 onPurgeRetryStage(t, s) 字样
+  const purgeIdx = taskQueueSource.indexOf('@click.stop="onPurgeRetryStage(t, s)"')
+  assert.ok(resumeIdx !== -1 && purgeIdx !== -1 && resumeIdx < purgeIdx, '续切应排在删除并重试之前')
+})
+
+test('成果面板:类型筛选与标签文本覆盖 model3d,buildings 的「三维」文案不动', () => {
+  assert.ok(dataDialogSource.includes("{ value: 'model3d', label: '三维数据' }"),
+    'KIND_FILTER 缺少 model3d 项')
+  assert.ok(dataDialogSource.includes("model3d: '三维数据'"), 'KIND_TEXT 缺少 model3d')
+  assert.ok(dataDialogSource.includes("buildings: '三维'"), 'buildings 文案被改动')
+  assert.ok(dataDialogSource.includes('.tag.model3d'), '缺少 .tag.model3d 配色')
+})
+
+test('成果面板:previewable 复用集中常量,修复白点对 model3d 任务隐藏', () => {
+  const start = dataDialogSource.indexOf('function previewable')
+  assert.notEqual(start, -1)
+  const body = dataDialogSource.slice(start, dataDialogSource.indexOf('function openPreview', start))
+  assert.ok(body.includes('PREVIEWABLE_STAGE_KEYS.includes(s.key)'),
+    'previewable 应引用 PREVIEWABLE_STAGE_KEYS,阶段名单只在 provider.js 维护')
+  // 修复针对旧版 RGB 裁剪影像:点云 DEM/DSM 是单波段浮点、OSGB 任务无 tif,按钮只会误导
+  assert.ok(dataDialogSource.includes("!['buildings', 'model3d'].includes(taskKindOf(t))"),
+    'canRepairNodata 未排除 model3d')
+})
+
+test('成果面板:model3d 成果行的 export 串映射为中文显示', () => {
+  // model3d 的 export 是 tile_3d/dsm/dem 组合,原始串对用户无意义
+  assert.ok(dataDialogSource.includes('EXPORT_TEXT_M3D'), '缺少 EXPORT_TEXT_M3D 映射')
+  assert.ok(dataDialogSource.includes("tile_3d: '3D Tiles'"), '缺少 tile_3d 中文映射')
+  assert.ok(dataDialogSource.includes("dsm: 'DSM'"), '缺少 dsm 中文映射')
+  assert.ok(dataDialogSource.includes("dem: 'DEM'"), '缺少 dem 中文映射')
+  assert.ok(dataDialogSource.includes('isModel3dProvider'), '缺少 isModel3dProvider 引入')
+  assert.ok(dataDialogSource.includes('{{ fmtExportMeta(t) }}'), 'meta 行未改用 fmtExportMeta')
+})
+
+test('预览页:瓦片集就绪判定复用 provider.js 的 TILESET_STAGE_KEYS', () => {
+  // 哪些阶段产出 3dtiles/ 瓦片集,名单集中在 provider.js,不在预览页裸写
+  assert.ok(previewSource.includes('TILESET_STAGE_KEYS.some(stageDone)'),
+    'ready.buildings 应改为 TILESET_STAGE_KEYS.some(stageDone)')
+  assert.ok(previewSource.includes("TILESET_STAGE_KEYS } from '../utils/provider'"),
+    '缺少 TILESET_STAGE_KEYS 引入')
+})
+
+test('预览页:三维任务从 layers 接口取 tileset url,标签按 provider 区分', () => {
+  // 多文件点云的主 tileset.json 在 3dtiles/001_<文件名>/ 子目录,由后端 layers 接口给出
+  assert.ok(previewSource.includes('/api/tasks/${task.id}/layers'), '缺少 layers 接口请求')
+  assert.ok(previewSource.includes("L.kind === 'preview3d' && L.url"), '缺少 preview3d+url 选取')
+  // 取不到时回落根路径(OSGB/单文件点云约定)
+  assert.ok(previewSource.includes('/3dtiles/tileset.json'), '缺少 tileset.json 回落路径')
+  assert.ok(previewSource.includes('倾斜模型 3D Tiles'), '缺少 OSGB 标签')
+  assert.ok(previewSource.includes('点云 3D Tiles'), '缺少点云标签')
+  assert.ok(previewSource.includes('三维建筑白模'), '建筑白模标签被改动')
+})
+
+test('预览页:全零占位 bbox 视为无效,三维任务改用 zoomTo 瓦片集定位', () => {
+  // 三维任务的真实范围 runner 阶段才解析,库里是占位 [0,0,0,0],直飞会落到几内亚湾
+  assert.ok(previewSource.includes('taskBbox.every((v) => v === 0)'), '缺少全零 bbox 守卫')
+  // 瓦片集改为 Map 管理（key -> Cesium3DTileset）：多个瓦片集并存时单变量
+  // 只能控制最后一个，先加载的关不掉、也无法释放
+  assert.ok(previewSource.includes("viewer.zoomTo(tilesets.get('buildings'))"),
+    '缺少 zoomTo 瓦片集定位')
+})
+
+test('★ 任务卡片:Esri 影像不得被判为地形(字符串前缀匹配误伤)', () => {
+  // 原实现: String(t.provider).startsWith('esri') || includes('terrain')
+  // 写上它时 esri_terrain 是唯一的 esri 源,前缀匹配尚可;
+  // 新增 esri_imagery 后 'esri_imagery'.startsWith('esri') 为真,
+  // 影像任务被标成「地形」并配琥珀色(实测截图)。
+  //
+  // 这与本文件既有注释的原则一致:"集中判定复用 provider.js,
+  // 不在组件里再做字符串匹配" —— 也正 provider.js 文件头警告过的同类坑。
+  // 先剥掉注释(说明性文字里出现这些字样是正常的),再**只看 isDem 函数体**。
+  // 不能对全文断言 includes('terrain'):文件里另有一处判**导出格式**的
+  // `e.includes('terrain')`(e 是 "geotiff,tms,terrain" 这类格式串),
+  // 那是另一个领域、且是合法的 —— 全文断言会误伤它(实测踩到)。
+  const code = taskQueueSource.replace(/\/\/[^\n]*/g, '')
+  const i = code.indexOf('function isDem')
+  assert.notEqual(i, -1, '未找到 isDem 函数')
+  const body = code.slice(i, i + 200)
+  assert.ok(!body.includes("startsWith('esri')"),
+    "isDem 里仍有 startsWith('esri') —— esri_imagery 会被误判为地形")
+  assert.ok(!body.includes("includes('terrain')"),
+    "isDem 里仍有 includes('terrain') 的 provider 判定")
+  assert.ok(body.includes('isDemProvider'),
+    'isDem 应复用 utils/provider 的 isDemProvider')
+})

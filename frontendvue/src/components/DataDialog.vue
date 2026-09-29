@@ -16,9 +16,9 @@ import { computed, ref, watch } from 'vue'
 import { DialogPlugin, MessagePlugin } from 'tdesign-vue-next'
 import { useDrawStore } from '../stores/draw'
 import { useTaskStore } from '../stores/task'
-import { useOverlayStore, overlayKey } from '../stores/overlay'
+import { useOverlayStore, taskOverlayKey } from '../stores/overlay'
 import { fmtSize } from '../utils/format'
-import { taskKindOf, isBuildingProvider } from '../utils/provider'
+import { taskKindOf, isBuildingProvider, isModel3dProvider, PREVIEWABLE_STAGE_KEYS } from '../utils/provider'
 import { mapController } from '../composables/mapController'
 import { api } from '../api'
 import SidePanel from './SidePanel.vue'
@@ -52,10 +52,11 @@ const KIND_FILTER = [
   { value: 'image', label: '影像' },
   { value: 'dem', label: '地形' },
   { value: 'buildings', label: '三维' },
+  { value: 'model3d', label: '三维数据' },
 ]
 const kindFilter = ref('all')
 
-const KIND_TEXT = { image: '影像', dem: '地形', buildings: '三维' }
+const KIND_TEXT = { image: '影像', dem: '地形', buildings: '三维', model3d: '三维数据' }
 
 /** 有成果的任务:失败任务也可能有部分成果,一并列出 */
 const results = computed(() => {
@@ -114,14 +115,14 @@ function overlayable(L) { return L.kind !== 'preview3d' }
 function overlayDisabled(L) {
   return L.kind === 'raster_only_bbox' && !L.bounds_wgs84
 }
-function layerOn(t, L) { return overlayStore.has(overlayKey(t.id, L.id)) }
+function layerOn(t, L) { return overlayStore.has(taskOverlayKey(t.id, L.id)) }
 function toggleLayer(t, L, on) {
   if (on) {
-    if (!overlayStore.add(t.id, t.name, L)) {
+    if (!overlayStore.add({ taskId: t.id, taskName: t.name }, L)) {
       MessagePlugin.warning('该图层无法叠加显示')
     }
   } else {
-    overlayStore.remove(overlayKey(t.id, L.id))
+    overlayStore.remove(taskOverlayKey(t.id, L.id))
   }
 }
 
@@ -142,11 +143,22 @@ function fmtLevels(t) {
   return continuous && lv.length > 1 ? `${lv[0]}-${lv[lv.length - 1]} 级` : `${lv.join(',')} 级`
 }
 
-/** 该任务是否有可三维预览的成果(瓦片化数据才有意义) */
+/** 该任务是否有可三维预览的成果(瓦片化数据才有意义)。
+ *  白名单集中在 provider.js 的 PREVIEWABLE_STAGE_KEYS,新增阶段只改那里。 */
 function previewable(t) {
   return (t.stages || []).some(
-    (s) => ['tms', 'osm', 'terrain', 'tile_3d'].includes(s.key)
+    (s) => PREVIEWABLE_STAGE_KEYS.includes(s.key)
       && ['done', 'skipped'].includes(s.status))
+}
+
+// model3d 任务的 export 串(tile_3d/dsm/dem)映射为中文再显示,原始串对用户无意义。
+// 与 TaskDetail.vue 的 FORMAT_TEXT 保持一致——两处各几行,不抽共享模块。
+const EXPORT_TEXT_M3D = { tile_3d: '3D Tiles', dsm: 'DSM', dem: 'DEM' }
+function fmtExportMeta(t) {
+  const raw = String(t.export || '')
+  if (!isModel3dProvider(t.provider)) return raw || '—'
+  return raw.split(',').map((p) => EXPORT_TEXT_M3D[p.trim()] || p.trim())
+    .filter(Boolean).join(' + ') || '—'
 }
 function openPreview(t) { window.open(`/preview.html?id=${t.id}`, '_blank') }
 
@@ -201,8 +213,10 @@ function openAddExport(t) {
 // 修复是原地改元数据 + 写掩膜,放在成果动作里手动触发。
 const repairing = ref({})
 function canRepairNodata(t) {
+  // 修复针对旧版 RGB 裁剪影像:三维建筑无 tif;三维数据的点云 DEM/DSM 是
+  // 单波段浮点、OSGB 任务没有 tif,按钮出现只会误导,一并排除。
   return ['done', 'failed'].includes(t.status)
-    && taskKindOf(t) !== 'buildings'
+    && !['buildings', 'model3d'].includes(taskKindOf(t))
     && !!t.output_path
 }
 function onRepairNodata(t) {
@@ -332,7 +346,7 @@ watch(() => props.visible, (v) => { if (v) taskStore.load().catch(() => {}) })
         </div>
         <div class="dim meta">
           <span v-if="fmtLevels(t)">{{ fmtLevels(t) }}</span>
-          <span>{{ t.export || '—' }}</span>
+          <span>{{ fmtExportMeta(t) }}</span>
           <span>{{ (t.created_at || '').replace('T', ' ').slice(0, 16) }}</span>
         </div>
 
@@ -446,6 +460,7 @@ watch(() => props.visible, (v) => { if (v) taskStore.load().catch(() => {}) })
 }
 .tag.dem { color: #b45309; background: #fef3c7; }
 .tag.buildings { color: #7c3aed; background: #ede9fe; }
+.tag.model3d { color: #0f766e; background: #ccfbf1; }   /* 三维数据:青,呼应任务卡片 */
 .tag.bad { color: #b91c1c; background: #fee2e2; }
 .tag.rt { color: #0369a1; background: #dbeafe; }
 .dim { color: #64748b; font-size: 12px; }

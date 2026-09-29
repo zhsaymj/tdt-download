@@ -44,3 +44,40 @@ buildings:
   release: ""
   # HTTP 代理,如 "127.0.0.1:7890"
   proxy: ""
+
+tools:
+  # 外部三维处理器路径。留空表示未配置;三维任务提交前可访问 /api/tools/diagnose 自检。
+  tiles3d_exe: ""        # 例如 tools/3dtiles/3dtiles.exe
+  pdal_exe: ""           # 例如 tools/pdal/bin/pdal.exe
+  py3dtiles_python: ""   # 例如 tools/py3dtiles-venv/Scripts/python.exe
+
+# worker 进程池:能同时执行的任务数。
+# 单个任务内部已有瓦片级并发,默认 2 可并行跑两个任务;
+# 代价是内存(每个常驻 worker 约 60MB)与磁盘 I/O 竞争 ——
+# 大范围任务同时跑会加速磁盘消耗。
+worker:
+  num_workers: 2
+
+google:
+  # Google 影像(非官方瓦片端点)。实测直连不通,必须配代理。
+  enabled: false
+  # 代理地址。可写 "127.0.0.1:6789" 或带 scheme 的完整 URL,两种都行。
+  # 注意:不支持 socks5(aiohttp 不内置 SOCKS 支持)。
+  proxy: ""
+  # 端点会变更,失效时先改这里。不设 key 字段:该端点忽略 key 参数。
+  url_template: "https://mt{s}.google.com/vt/lyrs={lyrs}&x={x}&y={y}&z={z}"
+  subdomains: "0,1,2,3"
+  max_zoom: 21          # 实测陆地处处可用到 21;22 级仅部分地区有
+
+esri_imagery:
+  # Esri World Imagery。与现用的 Esri Terrain3D(DEM)是不同服务:
+  # Terrain3D 直连可用,World Imagery 实测直连不通,必须配代理。
+  enabled: false
+  proxy: ""
+  url_template: "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+  # 服务级天花板。实测 z19 是亚欧城市上限(z20 仅美国境内有)。
+  max_zoom: 19
+  # 按选区探测该地区实际最高级别。实测西部无人区最高仅 z17,
+  # 关掉后用户选 z18 会下到一整片灰色占位图。
+  probe_max_zoom: true
+  probe_cache_hours: 24

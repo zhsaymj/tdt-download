@@ -1,5 +1,39 @@
+// 数据源判定统一从 provider.js 取 —— 本文件原先自己抄了一份 isDemProvider
+// (还含 local_dem,与 provider.js 那份不一致,见那边的注释)。名单抄多份必然
+// 漂移,本项目已踩过三次;新增数据源只改 provider.js 一处。
+import { canAnnotate, isDemProvider } from './provider.js'
+
 export const IMG_LEVELS = Array.from({ length: 18 }, (_, i) => i + 1)
 export const DEM_LEVELS = Array.from({ length: 17 }, (_, i) => i)
+
+// Google 影像级别。实测陆地处处可到 z21(含拉萨/乌鲁木齐等西部城市),
+// z22 仅部分地区有 —— 21 是全球陆地可用的临界值。
+export const GOOGLE_LEVELS = Array.from({ length: 21 }, (_, i) => i + 1)
+
+// Esri World Imagery 级别。19 是服务级天花板(亚欧城市实际上限;
+// z20 仅美国境内有)。注意**实际可用级别随地区变化**:西藏/青海/新疆
+// 无人区最高仅 z17,由后端 /api/tasks/imagery_max_level 按选区探测,
+// 前端据结果禁用超限级别(见 needsRegionProbe)。
+export const ESRI_IMAGERY_LEVELS = Array.from({ length: 19 }, (_, i) => i + 1)
+
+/** 按数据源给出可选级别列表。 */
+export function levelsForProvider(provider) {
+  if (provider === 'esri_terrain' || provider === 'aws_terrain') return DEM_LEVELS
+  if (provider === 'esri_imagery') return ESRI_IMAGERY_LEVELS
+  if (typeof provider === 'string' && provider.startsWith('google_')) return GOOGLE_LEVELS
+  return IMG_LEVELS
+}
+
+/**
+ * 该数据源是否需要按选区探测最高可用级别。
+ *
+ * 只有 Esri World Imagery 需要:实测它各区域最高级别不同(城市 z19、
+ * 喀什/漠河 z18、西部无人区仅 z17),不探测的话用户选 z18 在西部会下到
+ * 一整片灰色占位图。Google 实测无地区性降级,不必探测。
+ */
+export function needsRegionProbe(provider) {
+  return provider === 'esri_imagery'
+}
 
 const WEB_MERCATOR_EQUATOR_RESOLUTION_M = 156543.03392804097
 const WEB_MERCATOR_LAT_LIMIT = 85.05112878
@@ -8,19 +42,18 @@ const PROVIDER_LABELS = {
   tianditu_img: '天地图影像',
   tianditu_vec: '天地图矢量底图',
   tianditu_ter: '天地图地形晕渲',
+  google_img: 'Google卫星影像',
+  google_hybrid: 'Google影像含路网',
+  google_road: 'Google路线图',
+  google_terrain: 'Google地形',
+  esri_imagery: 'EsriWorldImagery',
   esri_terrain: '全国地形DEM',
   osm_buildings: '三维建筑白模',
   local_vector: '本地矢量白模',
   local_image: '本地影像',
   local_dem: '本地地形',
-}
-
-export function isDemProvider(provider) {
-  return provider === 'esri_terrain' || provider === 'local_dem'
-}
-
-export function isTiandituRasterProvider(provider) {
-  return ['tianditu_img', 'tianditu_vec', 'tianditu_ter'].includes(provider)
+  local_osgb: '本地 OSGB',
+  local_pointcloud: '本地点云',
 }
 
 function pad2(v) { return String(v).padStart(2, '0') }
@@ -92,8 +125,19 @@ export function defaultCrsForProvider() {
   return 'EPSG:4326'
 }
 
+/**
+ * 高级选项里「叠加路网注记」的默认勾选状态。
+ *
+ * **所有支持注记的影像源都默认勾上**(天地图影像/矢量/地形、Google、Esri)。
+ * 原实现是 `isTiandituRasterProvider(provider)` —— 需求13-5 写"影像数据默认勾选"
+ * 时只有天地图,Google/Esri 加进来后判据没跟上,这两个源一直默认不勾。
+ *
+ * 判据直接用 `canAnnotate` 而不是另写一份名单:两者语义本就重合
+ * ("这个源能叠注记吗" / "默认要不要叠"),分头维护必然漂移。
+ * 测试锁了 `defaultAnnotateForProvider(p) === canAnnotate(p)` 恒等。
+ */
 export function defaultAnnotateForProvider(provider) {
-  return isTiandituRasterProvider(provider)
+  return canAnnotate(provider)
 }
 
 export function downloadDefaultsForProvider(provider, stages = [], date = new Date()) {

@@ -39,9 +39,15 @@ class DataKind:
     TILES_RASTER = "tiles_raster"    # 已切好的栅格瓦片目录(TMS/OSM)
     TILES_3D = "tiles_3d"            # 3D Tiles(b3dm)
     TILES_TERRAIN = "tiles_terrain"  # Cesium quantized-mesh 地形切片
+    # 三维数据处理(本地文件源):输入为 osgb 模型/点云,产出细分的 3D Tiles 类型
+    MESH_OSGB = "mesh_osgb"          # OSGB 倾斜摄影模型(本地目录)
+    POINT_CLOUD = "point_cloud"      # 点云(las/laz 等本地文件)
+    TILES_3D_MODEL = "tiles_3d_model"  # 3D Tiles 模型(由 osgb 转换)
+    TILES_3D_POINT = "tiles_3d_point"  # 3D Tiles 点云(pnts)
 
     ALL = (RASTER_IMAGE, RASTER_DEM, VECTOR_POLYGON, VECTOR_LINE,
-           TILES_RASTER, TILES_3D, TILES_TERRAIN)
+           TILES_RASTER, TILES_3D, TILES_TERRAIN,
+           MESH_OSGB, POINT_CLOUD, TILES_3D_MODEL, TILES_3D_POINT)
 
 
 # ---------- 容器格式(同一份成果的不同写出方式)----------
@@ -77,6 +83,8 @@ _VECTOR = (DataKind.VECTOR_POLYGON, DataKind.VECTOR_LINE)
 # runner_buildings.py),用于区分同类型数据在不同管线里的归属。
 PIPE_RASTER = "raster"
 PIPE_BUILDING = "building"
+# 三维数据处理管线(本地 osgb/点云输入,走 runner_3d)
+PIPE_3D = "3d"
 
 CONTAINERS: dict[str, Container] = {c.key: c for c in (
     # 栅格容器
@@ -232,6 +240,26 @@ STAGES: dict[str, ExportStage] = {s.key: s for s in (
                 DataKind.TILES_3D, outputs=("3dtiles/",), default_on=True,
                 order=40, pipeline=PIPE_BUILDING,
                 note="GPU 批渲染,不受 Cesium Entity 数量限制"),
+    # ---- 三维数据处理管线 ----
+    # dem/tile_3d 的 key 已被栅格/建筑管线占用(ExportStage 单实例、pipeline
+    # 互斥),三维阶段一律另起 key:convert_3d/pc_*(点云前缀)。输入均为本地
+    # 文件,无瓦片缓存、不逐级别产出(needs_tile_cache/needs_levels 取默认 False)。
+    ExportStage("convert_3d", "转换 3D Tiles", (DataKind.MESH_OSGB,),
+                DataKind.TILES_3D_MODEL, outputs=("3dtiles/",),
+                default_on=True, order=10, pipeline=PIPE_3D,
+                note="osgb 倾斜摄影模型原样转为 3D Tiles,配 tileset.json"),
+    ExportStage("pc_dsm", "生成 DSM", (DataKind.POINT_CLOUD,),
+                DataKind.RASTER_DEM, outputs=("{name}_dsm.tif",),
+                default_on=True, order=10, pipeline=PIPE_3D,
+                note="数字表面模型:取首回波/全部点,含地表附着物"),
+    ExportStage("pc_dem", "生成 DEM", (DataKind.POINT_CLOUD,),
+                DataKind.RASTER_DEM, outputs=("{name}_dem.tif",),
+                default_on=True, order=20, pipeline=PIPE_3D,
+                note="数字高程模型:仅地面点,裸地高程"),
+    ExportStage("pc_tile_3d", "切 3D Tiles(pnts)", (DataKind.POINT_CLOUD,),
+                DataKind.TILES_3D_POINT, outputs=("3dtiles/",),
+                default_on=True, order=30, pipeline=PIPE_3D,
+                note="点云切为 pnts 瓦片,浏览器端可漫游"),
 )}
 
 
@@ -248,6 +276,11 @@ _FORMAT_TO_STAGE: dict[str, dict[str, str]] = {
     DataKind.RASTER_IMAGE: {
         "geotiff": "geotiff", "tms": "tms", "osm": "osm",
     },
+    # 三维管线:"tile_3d" 格式名在建筑管线指 b3dm 阶段,在三维管线是另起的
+    # 转换/切片阶段,按 kind 区分不会串;"dsm"/"dem" 为点云专有格式名
+    DataKind.MESH_OSGB: {"tile_3d": "convert_3d"},
+    DataKind.POINT_CLOUD: {"dsm": "pc_dsm", "dem": "pc_dem",
+                           "tile_3d": "pc_tile_3d"},
 }
 
 
@@ -352,12 +385,185 @@ def chain_to(kind: str) -> list[ExportStage]:
 # 这张表取代散落在 api/tasks.py、core/runner.py、models.py 的十余处
 # is_dem_provider()/is_building_provider() 分支。新增数据源只在此登记一行。
 
+# ---------- 数据源 → 网格类型 ----------
+# 坐标系不是"数据语义"而是"网格约定",故不新开 DataKind —— 那要改 DataKind.ALL
+# 及所有 (RASTER_IMAGE,) 元组,侵入面大。这里单独一张表,与 PROVIDER_KIND 并列。
+# 术语沿用项目服务层已有的说法(core/service_scan.py、core/service_bounds.py)。
+
+#: 网格类型
+GEO_GEODETIC = "geodetic"   # EPSG:4326 经纬度瓦片(天地图 TileMatrixSet=c)
+GEO_MERCATOR = "mercator"   # EPSG:3857 Web 墨卡托 XYZ
+
+#: provider key -> 网格类型。未登记者回落 geodetic(与旧行为一致:
+#: 旧代码没有网格概念,影像一律按 4326 处理)。
+PROVIDER_GRID: dict[str, str] = {
+    # 天地图:EPSG:4326 经纬度瓦片
+    "tianditu_img": GEO_GEODETIC,
+    "tianditu_vec": GEO_GEODETIC,
+    "tianditu_ter": GEO_GEODETIC,
+    # Google 影像:EPSG:3857 墨卡托 XYZ
+    "google_img": GEO_MERCATOR,
+    "google_hybrid": GEO_MERCATOR,
+    "google_road": GEO_MERCATOR,
+    "google_terrain": GEO_MERCATOR,
+    # Esri World Imagery:同为墨卡托 XYZ,与 Google 网格完全同构
+    # (实测 165 张瓦片 9 窗口互相关,偏移 ≤4m 且不随位置变化)
+    "esri_imagery": GEO_MERCATOR,
+    # 现有 DEM 本来就是墨卡托网格,登记后可统一分流
+    "esri_terrain": GEO_MERCATOR,
+    "aws_terrain": GEO_MERCATOR,
+}
+
+
+def grid_of(provider: str) -> str:
+    """取数据源的网格类型。提交前即可调用,无需构造 provider 实例。"""
+    if provider == "img":          # 兼容早期落库的短 key
+        provider = "tianditu_img"
+    return PROVIDER_GRID.get(provider, GEO_GEODETIC)
+
+
+#: 各导出格式的**原生网格**。未列出者不限(用源自己的默认网格)。
+#:
+#: tms 是 gdal2tiles geodetic(4326);osm 是 Web 墨卡托 XYZ(3857)。
+#: 两种格式的网格不同构,所以"跨网格"的那一种必然要重投影。
+_FORMAT_GRID: dict[str, str] = {
+    "osm": GEO_MERCATOR,
+    "tms": GEO_GEODETIC,
+}
+
+#: 数据源**原生提供**哪些网格(未登记者只有自己的默认网格)。
+#:
+#: 目前只有天地图两套都有:同一份影像提供 `img_c/vec_c/ter_c`(TileMatrixSet=c,
+#: EPSG:4326)与 `img_w/vec_w/ter_w`(TileMatrixSet=w,EPSG:3857)两组服务。
+#: Google/Esri 没有 geodetic 那套,故不登记 —— 它们出 tms 只能重投影(由需求37
+#: 的 cubic 核兜着质量)。
+#:
+#: 注记(cia/cva/cta)不在这里:它们不直接作为下载目标,网格跟随调用方。
+PROVIDER_GRIDS: dict[str, tuple[str, ...]] = {
+    "tianditu_img": (GEO_GEODETIC, GEO_MERCATOR),
+    "tianditu_vec": (GEO_GEODETIC, GEO_MERCATOR),
+    "tianditu_ter": (GEO_GEODETIC, GEO_MERCATOR),
+}
+
+
+def download_grids_of(provider: str, export_formats) -> list[str]:
+    """该任务实际要下载哪些网格(稳定顺序,geodetic 在前)。
+
+    规则:从源自己的默认网格出发;对每个请求格式,若它需要另一种网格**且源确实
+    提供那种网格**,就一并下载。于是:
+
+        天地图 + tms          → [geodetic]        同构、无损直映射
+        天地图 + osm          → [mercator]        3857→3857、不重投影
+        天地图 + tms,osm      → [geodetic,mercator]  两套都下,各自无损
+        Google + tms,osm      → [mercator]        只有 3857,tms 仍重投影
+
+    **不落库**:纯函数,预估接口与 worker 调同一个即可保持一致 —— 若某一方自己
+    再写一遍判定,两处必然漂移(本项目已踩过多次"名单抄多份")。
+    """
+    default = grid_of(provider)
+    avail = PROVIDER_GRIDS.get(provider, ())
+    required: set[str] = set()
+    for fmt in (export_formats or []):
+        need = _FORMAT_GRID.get(fmt)
+        # 不限网格的格式(geotiff/dem/terrain/contour),或源没有那种原生网格
+        # (只能重投影) → 都落到源自己的默认网格上。
+        #
+        # ⚠️ 默认网格**不是无条件要的**:天地图只勾 osm 时不需要 `_c` 那套
+        # (没有 COG 要出),下了就是白下(下载量与 tk 配额都翻倍)。
+        if need is None or need not in avail:
+            required.add(default)
+        else:
+            required.add(need)
+    if not required:
+        # 空格式列表(提交侧会拦,这里兜底):至少把默认网格下了
+        required.add(default)
+    return sorted(required, key=lambda g: (g != GEO_GEODETIC, g))
+
+
+def default_on_stage_keys(provider: str,
+                          stages: list[ExportStage] | None = None) -> set[str]:
+    """该数据源默认勾选的导出阶段 key。
+
+    在注册表的静态 `default_on` 之上,**按源自身的网格**改写瓦片格式:
+
+      天地图(EPSG:4326)        → tms(gdal2tiles geodetic),与源同构、无损直映射
+      Google/Esri(EPSG:3857)  → osm(Web 墨卡托 XYZ),3857→3857 无损
+
+    为什么不能只靠 `default_on`:那个标志是静态的,而"哪个瓦片网格无损"取决于
+    源自己的网格。对墨卡托源出 geodetic TMS 必须先重投影 —— 实测高频能量只剩
+    68%(bilinear),而前端显示 geodetic TMS 时 OL 还要再转一次 3857,端到端约
+    44%,细笔画的文字标注明显发虚(需求37)。OSM 那条路文件无损,且前端按 3857
+    渲染、不再重投影。
+
+    stages 传该数据源**实际可用**的阶段(来自 stages_for);不传则按默认参数取。
+    前端读 /api/capabilities 的 default_on 决定默认勾选,故 main.py 必须用本函数。
+    """
+    if stages is None:
+        stages = stages_for(kind_of(provider))
+    keys = {s.key for s in stages if s.default_on}
+    avail = {s.key for s in stages}
+    want = "osm" if grid_of(provider) == GEO_MERCATOR else "tms"
+    drop = "tms" if want == "osm" else "osm"
+    if want in avail:
+        keys.add(want)
+    if drop in avail:
+        keys.discard(drop)
+    return keys
+
+
+#: 未登记数据源的级别回落(与旧行为一致:影像 1~18)
+_DEFAULT_Z_CAP = 18
+
+
+def z_cap_of(provider: str) -> int:
+    """数据源的**服务级**最高级别。
+
+    ⚠️ 这是级别范围的唯一判定处。此前 api/tasks.py 按 provider 配置判定、
+    models.level_list 却硬编码 18,两者矛盾且 create_task 走后者 ——
+    导致 Google 的 z21 与 Esri 的 z19 实际下不到(请求 [20,21] 会被过滤成
+    空列表,任务直接建不出来),且不报错。
+
+    注意这只是**服务级天花板**。Esri 影像的实际可用级别随地区变化,
+    由 /api/tasks/imagery_max_level 按选区探测(见设计 §3.11)。
+    """
+    from ..config import settings
+    from ..providers.terrain import DEM_LAYERS, is_dem_provider
+
+    if provider == "img":
+        provider = "tianditu_img"
+    if is_dem_provider(provider):
+        return DEM_LAYERS[provider][2]
+    from ..providers.esri_imagery import is_esri_imagery_provider
+    from ..providers.google import is_google_provider
+    if is_google_provider(provider):
+        return int(settings.google.max_zoom)
+    if is_esri_imagery_provider(provider):
+        return int(settings.esri_imagery.max_zoom)
+    return _DEFAULT_Z_CAP
+
+
+def z_floor_of(provider: str) -> int:
+    """数据源的最低级别。DEM 从 0 起,影像从 1 起(z0 盖全球,对影像无意义)。"""
+    from ..providers.terrain import is_dem_provider
+    return 0 if is_dem_provider(provider) else 1
+
+
 #: provider key -> DataKind
 PROVIDER_KIND: dict[str, str] = {
     # 天地图影像/底图(EPSG:4326 经纬度瓦片)
     "tianditu_img": DataKind.RASTER_IMAGE,
     "tianditu_vec": DataKind.RASTER_IMAGE,
     "tianditu_ter": DataKind.RASTER_IMAGE,
+    # Google 影像 4 图层与 Esri World Imagery(EPSG:3857 墨卡托 XYZ)。
+    # kind 与天地图同为 RASTER_IMAGE —— 这是有意的:网格差异由 PROVIDER_GRID
+    # 表达,kind 只管"数据是什么"。因此新数据源自动获得 geotiff/tms/osm
+    # 三个阶段,且 worker 的 _resolve_runner 会自然路由到 runner.run_task,
+    # 无需改动进程隔离层。
+    "google_img": DataKind.RASTER_IMAGE,
+    "google_hybrid": DataKind.RASTER_IMAGE,
+    "google_road": DataKind.RASTER_IMAGE,
+    "google_terrain": DataKind.RASTER_IMAGE,
+    "esri_imagery": DataKind.RASTER_IMAGE,
     # 高程(Esri Terrain3D,LERC 编码,EPSG:3857)
     "esri_terrain": DataKind.RASTER_DEM,
     # 早期改用 Esri 前的 key,库里仍有 1 条存量任务(2026-07 实测),
@@ -374,10 +580,14 @@ PROVIDER_KIND: dict[str, str] = {
     # 已判定好(见 core/local_raster.guess_kind),分成两个 key 即可复用整套逻辑。
     "local_image": DataKind.RASTER_IMAGE,
     "local_dem": DataKind.RASTER_DEM,
+    # 本地三维数据(osgb 目录/点云文件),同理静态登记即可复用整套推导
+    "local_osgb": DataKind.MESH_OSGB,
+    "local_pointcloud": DataKind.POINT_CLOUD,
 }
 
 #: 本地文件输入源:无瓦片缓存、无下载阶段
-LOCAL_PROVIDERS = frozenset({"local_image", "local_dem"})
+LOCAL_PROVIDERS = frozenset({"local_image", "local_dem",
+                             "local_osgb", "local_pointcloud"})
 
 
 def is_local_source(provider: str) -> bool:
@@ -391,6 +601,13 @@ def kind_of(provider: str) -> str:
     if provider == "img":          # 兼容早期落库的短 key
         provider = "tianditu_img"
     return PROVIDER_KIND.get(provider, DataKind.RASTER_IMAGE)
+
+
+#: 走三维管线(OSGB / 点云)的 provider:没有瓦片行列号,必须走 runner_3d。
+#: 集中定义,避免在 worker / queue 各自硬编码一份而漂移(漂移后果是静默错路由)。
+def is_3d_provider(provider: str) -> bool:
+    """该数据源是否走三维管线(runner_3d)。"""
+    return kind_of(provider) in (DataKind.MESH_OSGB, DataKind.POINT_CLOUD)
 
 
 def default_containers(kind: str) -> dict[str, str]:

@@ -21,6 +21,12 @@ cd frontendvue && npm run dev        # http://localhost:5173
 # 前端构建（产物落到 frontendvue/dist，后端会自动挂载它）
 cd frontendvue && npm run build
 
+# 后端测试（标准库 unittest，约 160+ 用例）
+.venv/Scripts/python.exe -m unittest discover tests
+
+# 前端测试（Node 内置 runner；必须 glob 直参，Node 24 下 `node --test src/` 目录直参会误报）
+cd frontendvue && node --test "src/**/*.test.js"
+
 # 重建 Python 虚拟环境（新机器）
 python -m venv .venv
 .venv/Scripts/python.exe -m pip install -r requirements.txt
@@ -28,7 +34,7 @@ python -m venv .venv
 
 访问入口:后端运行后打开 http://127.0.0.1:8000（生产/自用），或前端 dev 时用 5173 端口（带热更新）。
 
-> 项目当前没有测试套件，也未配置 lint 工具。
+> 未配置 lint 工具。
 
 ## 架构要点
 
@@ -37,9 +43,15 @@ python -m venv .venv
 任务生命周期串联在 `backend/core/` 下，理解这条链路是理解全项目的关键:
 
 1. **提交**(`api/tasks.py` → `models.create_task`):校验密钥/级别/范围 → `tiling.estimate_total_tiles` 预估瓦片数 → 按任务名 `reserve_output_dir` 锁定唯一输出目录 → 写库 → `task_queue.enqueue`。
-2. **排队**(`core/queue.py`):进程内单 worker 顺序消费任务队列，`TaskQueue` 是全局单例；任务内部再做瓦片级并发。暂停/取消通过 `_control` dict 协作式控制（`request_pause`/`request_cancel`/`control_of`）。
-3. **执行**(`core/runner.py::run_task`):逐级 `range_for_bbox` 计算瓦片区间 → `downloader.download_range` 并发下载 → `mosaic_to_geotiff` 拼接最大级别为 GeoTIFF → 可选 `clip_to_geometry` 裁剪、`reproject_geotiff` 重投影 → 可选 `export_tms` 导出 TMS 瓦片包。进度通过 `emit` 回调经队列广播给 WebSocket，限流 0.5s 落库一次。
-4. **进度推送**(`api/ws.py`):前端连 `/ws/progress`，订阅队列广播，收 `progress`/`task` 消息。
+2. **排队**(`core/queue.py` → `core/scheduler.py`):**任务在独立子进程中执行**，主进程只做调度。`queue.py` 现在只是兼容 shim，`task_queue` 是 `Scheduler` 单例；`Scheduler` 管 N 个常驻 worker 子进程（`worker.num_workers`，默认 1），无空闲 worker 时任务进 `_pending` 等待。暂停/取消走**每 worker 独立的信号队列**，精确投给跑该任务的 worker。
+3. **执行**(`core/worker.py::worker_main` → `core/runner.py::run_task`):worker 收到 `run` 消息 → `_resolve_runner` 按 provider 分发（`local_osgb`/`local_pointcloud` 走 `runner_3d`）→ 逐级 `range_for_bbox` 计算瓦片区间 → `downloader.download_range` 并发下载 → `mosaic_to_geotiff` 拼接最大级别为 GeoTIFF → 可选 `clip_to_geometry` 裁剪、`reproject_geotiff` 重投影 → 可选 `export_tms` 导出 TMS 瓦片包。进度通过 `emit` 回调投 `event_queue` 回传主进程广播，限流 0.5s 落库一次。
+4. **进度推送**(`api/ws.py`):前端连 `/ws/progress`，订阅 `Scheduler` 广播，收 `progress`/`task` 消息。
+
+> **为什么分进程**（勿轻易改回同进程）:GDAL 的 `build_overviews`/`reproject`/`clip` 会长时间持有 GIL（实测单次最长 9.5s），同进程内会饿死事件循环，导致任务运行期间**所有** HTTP 请求与 WebSocket 一起挂起。
+>
+> 两条硬约束:① 每个 worker 有 **control/signal 两条队列**，共用一个会让两个消费线程互相抢消息；② 信号必须由**独立线程**接收，任务线程阻塞在 `run_until_complete` 上时收不到。
+>
+> 相关测试:`tests/test_scheduler.py`、`tests/test_worker_dispatch.py`（含暂停生效的回归护栏）。
 
 ### 天地图瓦片坐标方案（易错点）
 
@@ -56,6 +68,17 @@ python -m venv .venv
 ### 数据源抽象
 
 `providers/base.py::TileProvider` 是抽象基类（`key`/`ext`/`bands`/`tile_url`）。当前只实现 `providers/tianditu.py`（img/vec/ter 三图层，t0~t7 子域名轮询）。下载器与拼接管线只依赖抽象接口，新增 DEM 等数据源时实现同一接口并在 `build_provider` 登记即可，无需改上层。
+
+### 三维处理管线（OSGB/点云）
+
+独立于下载管线的第二条执行链路，处理本地三维数据（需求27）:
+
+- **入口**:`api/tasks.py::_create_local_3d_task`，provider 为 `local_osgb`（OSGB 倾斜模型目录）/`local_pointcloud`（LAS/LAZ 文件或目录）。任务不带 bbox 与级别（占位 `[0,0,0,0]`、`total=0`），真实范围转换阶段才解析；点云任务另有 `pc_crs`/`pc_resolution` 字段。
+- **执行**:`core/runner_3d.py::run_3d_task`（`queue.py` 按 pipeline=`PIPE_3D` 分发，与下载任务同队列同 worker）。阶段 key 四个、全部 default_on:`convert_3d`(OSGB→3D Tiles)、`pc_dsm`/`pc_dem`(点云→DSM/DEM GeoTIFF)、`pc_tile_3d`(点云→pnts 瓦片）。
+- **适配层**:`core/processors/` 每个外部工具一个 adapter（CLI 调用，非源码集成）:OSGB→3D Tiles 用 fanvanzh/3dtiles exe；点云→DEM/DSM 用 PDAL；点云→3D Tiles 用 py3dtiles（独立 venv)。新增/替换工具时实现同一 adapter 接口即可。
+- **工具配置**:`config.yaml` 的 `tools:` 节（`ToolsConfig`）指向 `tools/3dtiles/`、`tools/pdal/`、`tools/py3dtiles-venv/`（该目录已 gitignore，体积大不进库）;`/api/tools/diagnose` 可探测各工具是否就绪。
+- **产物约定**:3D Tiles → `{output}/3dtiles/`；点云栅格 → `{任务名}_dsm.tif`/`{任务名}_dem.tif`。多文件点云的主 tileset 在 `3dtiles/001_{首个文件名去扩展}/tileset.json`（零填充序号子目录，字典序首个恒为 001_*）;layers 接口的 `preview3d` 项经 `url` 字段下发该地址。
+- **无续切语义**：四个阶段都不支持增量续传（fanvanzh 整目录转换、py3dtiles 遇非空目录报错、PDAL 逐文件覆盖），前端对这些阶段只提供「删除并重试」；purge 重跑时由 runner_3d 清对应产物目录。
 
 ### 配置
 

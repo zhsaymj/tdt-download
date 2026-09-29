@@ -28,7 +28,7 @@ watch(() => taskStore.logs.length, () => {
 
 <template>
   <t-drawer v-model:visible="visible" header="运行日志" size="520px" :footer="false">
-    <div class="log-tip">实时显示后端处理过程(下载/合并/切片)。也可在后端目录 data/logs/app.log 查看完整日志。</div>
+    <div class="log-tip">实时显示后端处理过程(下载/合并/切片)。也可在后端目录 data/logs/ 查看完整日志(按日期分文件)。</div>
     <div ref="logBox" class="log-box">
       <div v-for="(l, i) in taskStore.logs" :key="i" :class="['log-line', l.level]">
         <span class="log-ts">{{ l.ts }}</span>

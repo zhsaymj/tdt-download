@@ -48,4 +48,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    import multiprocessing as mp
+    # Windows spawn 模式下子进程会重新执行主模块;不调 freeze_support()
+    # 会无限递归创建子进程(打包成 exe 后必现)。
+    mp.freeze_support()
     main()

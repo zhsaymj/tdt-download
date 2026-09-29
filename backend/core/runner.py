@@ -1,7 +1,11 @@
 """任务执行:阶段化管线(下载 → 合并 → 各切片格式),逐阶段上报进度。
 
-被 TaskQueue 调用:async run_task(task_id, emit)。
-emit(msg: dict) 把进度同步广播给 WebSocket 订阅者。
+被 worker 进程(进程隔离后)或 TaskQueue(过渡期,见 queue.py 的临时兼容)调用:
+    async run_task(task_id, emit, should_stop)。
+emit(msg: dict) 把进度上报给 worker(再经队列回传主进程广播)。
+should_stop() -> "pause" | "cancel" | None:协作式停止检查,由调用方注入。
+返回真值即停止;"cancel" 表示取消,其余真值(含 bool-only 闭包)按暂停处理。
+不读 task_queue 单例:子进程里它是另一份副本,读不到主进程的控制状态。
 
 阶段模型(见 models.build_stage_defs 与 core.formats 注册表):
   影像:download → geotiff → tms → osm
@@ -16,29 +20,34 @@ _executors_for 按数据类型组装执行器表,两者的一致性在模块导�
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 from ..config import settings
 from ..models import get_task, parse_export, update_task
 from ..providers.buildings import is_building_provider
 from ..providers.local_file import LocalFileProvider
+from ..providers.esri_imagery import (build_esri_imagery_provider,
+                                      is_esri_imagery_provider)
+from ..providers.google import build_google_provider, is_google_provider
 from ..providers.terrain import build_terrain_provider, is_dem_provider
 from ..providers.tianditu import build_annotation_provider, build_provider
+from .annotate import ANNOTATION_MAX_Z
 from .containers import container_of, convert_raster
 from .contour import DEFAULT_INTERVAL, extract_contours, write_contours
 from .mbtiles import pack_mbtiles
 from .dem import hillshade_from_dem, mosaic_dem_geotiff
 from .dem_tiling import mercator_range_for_bbox, mosaic_bounds_3857
 from .downloader import TileDownloader
-from .formats import (CONTAINERS, DataKind, STAGES, is_local_source, kind_of,
-                      resolve_outputs)
+from .formats import (CONTAINERS, GEO_GEODETIC, GEO_MERCATOR, PROVIDER_GRIDS,
+                      DataKind, STAGES, download_grids_of, grid_of,
+                      is_local_source, kind_of, resolve_outputs)
 from .logs import logger
 from .metadata import write_metadata
 from .mosaic import mosaic_to_geotiff
 from .osm import export_osm
 from .postprocess import clip_to_geometry, crop_to_bbox, reproject_geotiff
 from .progress import StageTracker
-from .queue import task_queue
 from .terrain_tiles import export_terrain, level_for_resolution, write_layer_json
 from .token_pool import token_pool
 from .tms import (export_tms, export_tms_from_source, source_tms_level_plan,
@@ -71,7 +80,196 @@ def _safe_unlink(p: Path, retries: int = 5, delay: float = 0.3) -> None:
     logger.warning("临时文件暂时无法删除(将于下次清理):%s", p)
 
 
-async def run_task(task_id: str, emit) -> None:
+
+
+def _anno_levels_for(levels: list[int]) -> list[int]:
+    """注记实际要下载的级别:裁掉超过 ANNOTATION_MAX_Z 的部分。
+
+    底图仍下全部选中级别(它没有级别上限),只有注记受 z18 限制。
+    """
+    return sorted({int(z) for z in levels if int(z) <= ANNOTATION_MAX_Z})
+
+
+def _range_fn_for(provider: str, grid: str | None = None):
+    """按网格返回瓦片区间函数。
+
+    geodetic 用 4326 的 range_for_bbox;mercator(Google/Esri 影像、Esri DEM)用
+    墨卡托 XYZ 的 mercator_range_for_bbox。两者不能混用 —— 混了会按错误的网格
+    取瓦片,下出来的图整体错位。
+
+    grid 显式给出时以它为准(天地图两套网格都要下,同一个 provider 名会用到两套);
+    不传则回落到按 provider 推断(与改动前一致,现有调用点都只传 provider)。
+    """
+    if grid is None:
+        grid = grid_of(provider)
+    return mercator_range_for_bbox if grid == GEO_MERCATOR else range_for_bbox
+
+
+def _crs_for_grid(grid: str) -> str:
+    """网格对应的拼接坐标系。"""
+    return "EPSG:3857" if grid == GEO_MERCATOR else "EPSG:4326"
+
+
+def _tms_needs_resample(grid: str) -> bool:
+    """TMS 导出是否需要重采样(而非无损直映射)。
+
+    TMS 用的是 gdal2tiles geodetic 网格(EPSG:4326):
+      - geodetic 源(天地图):与之同构,可无损直映射(export_tms)
+      - mercator 源(Google/Esri):网格不同构,必须重采样
+        (export_tms_from_source,以拼接图为源逐瓦片 reproject)
+    走错会把 3857 瓦片当 4326 瓦片摆放,产出整体错位的瓦片包。
+    """
+    return grid == GEO_MERCATOR
+
+
+def _ctx_grid(ctx) -> str:
+    """取导出上下文的网格;缺失时回落 geodetic。
+
+    用 getattr 而非 ctx.grid:`_ExportCtx` 是 **kw 容器,真实上下文都有该字段,
+    但测试替身与旧构造不一定带 —— 而"没有网格"正等价于旧的全局 4326 行为,
+    故回落到 geodetic 既向后兼容又语义正确。
+    """
+    return getattr(ctx, "grid", GEO_GEODETIC)
+
+
+def _mbtiles_scheme_for(grid: str, stage_key: str) -> str:
+    """打包 MBTiles 时的行号约定。
+
+    取决于**瓦片目录本身**的约定,与源网格无关:
+      - tms/ 目录:行号自南向北 => "tms"
+      - osm/ 目录:行号自北向南 => "xyz"
+    grid 参数保留是为了让调用点显式表明"已考虑过网格",避免后人误以为漏了。
+    """
+    return "xyz" if stage_key == "osm" else "tms"
+
+
+def _build_provider_for(task, grid: str | None = None):
+    """按 provider key 构造数据源实例(分发即守卫)。
+
+    分支顺序无所谓(各 is_xxx 互斥),但必须都在 —— 漏一个会静默回落到
+    build_provider 并报"暂不支持的数据源"。
+
+    grid 只在天地图上起作用:同一个图层有两套网格(`_c`/`_w`),靠 matrix_set
+    切换,而 key 会带上网格后缀(缓存路径按它分流,见 providers/tianditu.py)。
+    其余数据源只有一套网格,忽略该参数。
+    """
+    key = task["provider"]
+    if is_dem_provider(key):
+        return build_terrain_provider(key)
+    if is_google_provider(key):
+        return build_google_provider(key, settings.google)
+    if is_esri_imagery_provider(key):
+        return build_esri_imagery_provider(settings.esri_imagery)
+    token_src = (token_pool.use_token if token_pool.has_any()
+                 else settings.tianditu.token)
+    if grid is not None and key in PROVIDER_GRIDS:
+        return build_provider(key, token_src, matrix_set=_matrix_set_of(grid))
+    return build_provider(key, token_src)
+
+
+def _matrix_set_of(grid: str) -> str:
+    """网格 → 天地图 TILEMATRIXSET(`c` = EPSG:4326,`w` = EPSG:3857)。"""
+    return "w" if grid == GEO_MERCATOR else "c"
+
+
+def _mk_downloader(task, prov) -> TileDownloader:
+    """按 provider 造一个瓦片下载器。
+
+    抽出来是因为"某个网格的缓存路径怎么拼"只该有一处实现
+    (`TileDownloader.tile_path` 用 `provider.key`,而 key 带网格后缀);
+    OSM 自拼源时也要按网格读缓存,不能再抄一份路径规则(本项目为此栽过多次)。
+    """
+    return TileDownloader(
+        prov, cache_dir=settings.cache_dir,
+        concurrency=settings.download.concurrency,
+        max_retries=settings.download.max_retries,
+        timeout=settings.download.timeout,
+        use_cache=task.get("use_cache", True))
+
+
+def _grids_missing_cache(cache_dir: Path, provider_key: str, grids,
+                         levels) -> list[str]:
+    """缓存里**完全没有数据**的网格。
+
+    用途:"download 阶段已完成、但要求的网格集变了"的情形。升级前建的任务只下过
+    `_c`;升级后重跑 osm(或恢复一个在 osm 阶段停下的任务)时 download 已是 done,
+    若不补下 `_w`,OSM 会从空缓存拼出**全零源 → 空成果 → 却报成功**
+    (见 `_build_osm_source` 的护栏与最终审查的 Critical 1)。
+
+    判据只看"该网格的最高级别目录下有没有文件",与扩展名无关 —— 不复制缓存路径
+    规则(那条规则只在 `TileDownloader.tile_path` 一处)。
+    """
+    missing = []
+    for g in grids:
+        base = cache_dir / f"{provider_key}_{_matrix_set_of(g)}"
+        found = False
+        for z in levels:
+            try:
+                if next(iter(os.scandir(base / str(z))), None) is not None:
+                    found = True
+                    break
+            except OSError:
+                continue
+        if not found:
+            missing.append(g)
+    return missing
+
+
+def _osm_uses_mercator_cache(ctx) -> bool:
+    """OSM 是否需要另用 `_w` 缓存拼 3857 源(而不是复用 geotiff 成果)。
+
+    成立条件:源**两套网格都有**(天地图),而任务主网格不是 mercator ——
+    此时 geotiff 成果是 4326 的,对 OSM(3857 输出)没用:
+
+    * 拿它当源 → `export_osm` 得逐瓦片重投影,有损(设计 D4 要消除的正是这个)
+    * geotiff 阶段也不必为 OSM 留存未裁剪副本(那份同样是主网格的,白占磁盘)
+    """
+    return (GEO_MERCATOR in PROVIDER_GRIDS.get(ctx.task["provider"], ())
+            and _ctx_grid(ctx) != GEO_MERCATOR)
+
+
+async def _download_all_grids(*, provider_key: str, grids, levels, bbox,
+                              anno_levels, downloader_for, anno_for,
+                              on_progress, should_stop) -> bool:
+    """按网格逐级下载原始瓦片(与注记);返回是否被停止。
+
+    抽成独立函数是为了**可测**:它埋在 run_task 里时没法用假下载器验证
+    "每个网格各用各的区间函数"。
+
+    每个网格配自己的区间函数与下载器 —— `_c` 与 `_w` 的行号语义不同
+    (第 z 级 2^(z-1) vs 2^z 行),混用会按错误网格取瓦片、下出来的图整体错位,
+    而且**不报错**。
+
+    注记复用同网格底图算出的那个 `tr`:这是"天然对齐"的实现点,两者行列号同源。
+    ⚠️ 所以注记 provider 也必须按**同一个 grid** 构造,网格选错会请求到别处的
+    注记(不报错,只是路网对不上影像)。
+    """
+    for grid in grids:
+        range_fn = _range_fn_for(provider_key, grid)
+        dl = downloader_for(grid)
+        anno = anno_for(grid) if anno_for is not None else None
+        for z in levels:
+            tr = range_fn(*bbox, z)
+            _ok, _fail, stopped = await dl.download_range(
+                tr, on_progress, should_stop)
+            if stopped:
+                return True
+            if anno is not None and z in anno_levels:
+                _ok, _fail, stopped = await anno.download_range(
+                    tr, on_progress, should_stop)
+                if stopped:
+                    return True
+    return False
+
+
+async def run_task(task_id: str, emit, should_stop) -> None:
+    """执行任务。
+
+    should_stop():协作式停止检查,由调用方注入(worker 进程传入本地控制镜像;
+    测试可传 lambda: False)。返回**真值**即需停止(所有下游消费点都按真值判断),
+    其中返回 "cancel" 表示取消,其余真值(如 "pause"、True)一律按暂停处理
+    —— 见 _handle_stop 的说明。
+    """
     task = get_task(task_id)
     if not task:
         return
@@ -79,7 +277,7 @@ async def run_task(task_id: str, emit) -> None:
     # 三维建筑白模走独立管线(数据是矢量要素集,无瓦片行列号,不复用下载器/拼接)
     if is_building_provider(task["provider"]):
         from .runner_buildings import run_buildings_task
-        return await run_buildings_task(task_id, emit)
+        return await run_buildings_task(task_id, emit, should_stop)
 
     # 本地文件源:不联网、不需要密钥,数据已在用户磁盘上
     local_src = None
@@ -98,11 +296,8 @@ async def run_task(task_id: str, emit) -> None:
         # 与 metadata),不做任何下载。这样 write_tilemapresource、_write_metadata
         # 等无需到处判空。
         provider = LocalFileProvider(task["provider"], local_src)
-    elif is_dem:
-        provider = build_terrain_provider(task["provider"])
     else:
-        token_src = token_pool.use_token if token_pool.has_any() else settings.tianditu.token
-        provider = build_provider(task["provider"], token_src)
+        provider = _build_provider_for(task)
     downloader = None if local_src is not None else TileDownloader(
         provider,
         cache_dir=settings.cache_dir,
@@ -113,10 +308,18 @@ async def run_task(task_id: str, emit) -> None:
     )
 
     # 注记要联网下载同网格的注记瓦片,本地文件源没有这个概念
+    # 注记是天地图提供的透明覆盖层(cia/cva/cta),按底图类型配对。
+    # DEM 无此概念、本地文件源不联网,两者都不带注记。
+    # Google/Esri 支持:它们走 3857,而天地图注记有 3857 版本(cia_w),
+    # 同格可直接对取(见 build_annotation_provider 的 grid 参数)。
     annotate = (task.get("annotate", False) and not is_dem
                 and local_src is None)
     anno_token_src = token_pool.use_token if token_pool.has_any() else settings.tianditu.token
-    anno_provider = build_annotation_provider(task["provider"], anno_token_src) if annotate else None
+    # 注记的网格必须跟底图一致:行列号由底图的 range_fn 算出,网格选错会
+    # 请求到另一个地方的注记(不报错,只是路网对不上影像)。
+    anno_provider = (build_annotation_provider(
+        task["provider"], anno_token_src, grid=grid_of(task["provider"]))
+        if annotate else None)
     anno_downloader = TileDownloader(
         anno_provider,
         cache_dir=settings.cache_dir,
@@ -148,14 +351,36 @@ async def run_task(task_id: str, emit) -> None:
     downloaded = task.get("downloaded", 0)
     failed = task.get("failed", 0)
 
-    def should_stop() -> bool:
-        return task_queue.control_of(task_id) in ("pause", "cancel")
-
     # ---------- 阶段 1:下载原始瓦片 ----------
     # 本地文件源没有 download 阶段(见 models.build_stage_defs);is_done() 对
     # 不存在的阶段返回 False,故要先确认该阶段确实在阶段表里,否则会误入下载分支。
     has_download = any(s["key"] == "download" for s in tracker.stages)
-    if has_download and not tracker.is_done("download"):
+    # download 阶段已 done、但**要求的网格集变了**时也要补下:升级前建的任务只下过
+    # `_c`,升级后重跑 osm 时若不补下 `_w`,OSM 会从空缓存拼出空成果(最终审查
+    # Critical 1)。此时把整个下载阶段重跑一遍即可 —— 已在缓存里的瓦片会被跳过,
+    # 实际只补下缺的那套。
+    _missing_grids = (_grids_missing_cache(settings.cache_dir, task["provider"],
+                                           download_grids_of(task["provider"],
+                                                             formats), levels)
+                      if has_download else [])
+    if has_download and (not tracker.is_done("download") or _missing_grids):
+        if _missing_grids:
+            logger.info("任务[%s] 缓存缺网格 %s,补下下载阶段", task["name"],
+                        ",".join(_missing_grids))
+        # 进度分母必须与**本次实际要下的量**一致。分母是建任务时算好落库的,而
+        # 运行期实际量可能更大(最典型:补下另一个网格时那套瓦片没算进去)——
+        # 不重算就会出现"进度到 100% 却还在下载、且下载数大于总数"(需求39)。
+        # 用与建任务同一个函数(core.tile_estimate 是唯一判定处),两处不会再漂。
+        from .tile_estimate import tile_total
+        _want_total = tile_total(task["provider"], formats, bbox, levels,
+                                 annotate=annotate)
+        if _want_total != total:
+            logger.info("任务[%s] 下载量按当前网格重算:%d → %d 张",
+                        task["name"], total, _want_total)
+            total = _want_total
+            # 计数也要清零:本阶段会重跑一遍(已缓存的瓦片按 ok 计入),从 0 起算
+            # 才与新的分母同步;否则界面会在下一次限流落库前一直显示旧的大数字。
+            update_task(task_id, total=total, downloaded=0, failed=0)
         import time as _time
         downloaded = 0
         failed = 0
@@ -179,20 +404,37 @@ async def run_task(task_id: str, emit) -> None:
 
         tracker.start("download", total=total, message="下载原始瓦片")
         logger.info("任务[%s] 阶段[下载] 开始,共 %d 张瓦片", task["name"], total)
-        range_fn = mercator_range_for_bbox if is_dem else range_for_bbox
-        stopped = False
-        for z in levels:
-            tr = range_fn(west, south, east, north, z)
-            _ok, _fail, stopped = await downloader.download_range(tr, on_progress, should_stop)
-            if stopped:
-                break
+        # 注记只下 ≤ z18 的级别(底图不受此限)
+        anno_levels = _anno_levels_for(levels)
+
+        # 按网格下载(设计 D3):天地图两套网格都要下时(tms+osm 同选),每个网格
+        # 配自己的 provider / 区间函数 / 下载器 —— `_c` 与 `_w` 的行号语义不同,
+        # 混用会按错误网格取瓦片、下出来的图整体错位,而且不报错。
+        # 其余数据源只有一套网格,grids 就一项,行为与改动前完全一致。
+        default_grid = grid_of(task["provider"])
+        grids = download_grids_of(task["provider"], formats)
+
+        dl_by_grid = {default_grid: downloader}
+        anno_by_grid = {default_grid: anno_downloader}
+        for g in grids:
+            if g == default_grid:
+                continue
+            dl_by_grid[g] = _mk_downloader(task, _build_provider_for(task, g))
             if anno_downloader is not None:
-                _ok, _fail, stopped = await anno_downloader.download_range(tr, on_progress, should_stop)
-                if stopped:
-                    break
+                anno_prov = build_annotation_provider(
+                    task["provider"], anno_token_src, grid=g)
+                anno_by_grid[g] = _mk_downloader(task, anno_prov) if anno_prov else None
+
+        stopped = await _download_all_grids(
+            provider_key=task["provider"], grids=grids, levels=levels, bbox=bbox,
+            anno_levels=anno_levels,
+            downloader_for=lambda g: dl_by_grid[g],
+            anno_for=(lambda g: anno_by_grid.get(g)) if anno_downloader else None,
+            on_progress=on_progress, should_stop=should_stop)
 
         if stopped:
-            return _handle_stop(task_id, tracker, "download", downloaded, failed, total, emit)
+            return _handle_stop(task_id, tracker, "download", downloaded,
+                                failed, total, emit, should_stop)
 
         update_task(task_id, downloaded=downloaded, failed=failed)
         tracker.finish("download", message=f"{downloaded}/{total}"
@@ -209,6 +451,8 @@ async def run_task(task_id: str, emit) -> None:
         task=task, provider=provider, downloader=downloader,
         anno_downloader=anno_downloader, out_dir=out_dir, bbox=bbox,
         levels=levels, geom=geom, target_crs=target_crs, is_dem=is_dem,
+        # 数据源网格("geodetic" / "mercator")。各导出阶段据此选瓦片数学与拼接 crs。
+        grid=grid_of(task["provider"]),
         tracker=tracker, should_stop=should_stop, cur_stage="",
         # 延后到全部阶段结束后再做的容器转换(见 _stage_geotiff 的说明)
         deferred_convert=[],
@@ -253,7 +497,8 @@ async def run_task(task_id: str, emit) -> None:
                         [Path(p).name for p in (produced or [])])
         except _Stopped:
             logger.info("任务[%s] 阶段[%s] 被暂停/取消", task["name"], label)
-            return _handle_stop(task_id, tracker, key, downloaded, failed, total, emit)
+            return _handle_stop(task_id, tracker, key, downloaded, failed,
+                                total, emit, should_stop)
         except Exception as e:  # 单阶段失败不阻断其他独立阶段
             any_failed = True
             tracker.fail(key, message=str(e)[:200])
@@ -299,9 +544,17 @@ async def run_task(task_id: str, emit) -> None:
               "message": msg, "output_path": str(out_dir), "outputs": outputs})
 
 
-def _handle_stop(task_id, tracker, key, downloaded, failed, total, emit):
-    """暂停/取消:把当前阶段标记为对应状态,落库任务状态后返回。"""
-    ctrl = task_queue.control_of(task_id)
+def _handle_stop(task_id, tracker, key, downloaded, failed, total, emit,
+                 should_stop):
+    """暂停/取消:把当前阶段标记为对应状态,落库任务状态后返回。
+
+    停止原因取自 should_stop() 的**返回值**:返回 "cancel" 才是取消,返回
+    "pause" 或纯 True(bool-only 闭包区分不了两者)一律按暂停落库。不能只看
+    真假——暂停与取消都会让 should_stop() 为真,一律按取消落库会让用户点了
+    「暂停」(接口已回「已暂停」)却看到「已取消」,误以为任务被丢弃。
+    暂停是可恢复的一侧,拿不准时按它落库更安全。
+    """
+    ctrl = "cancel" if should_stop() == "cancel" else "pause"
     if ctrl == "cancel":
         tracker.pause(key, message="已取消")
         update_task(task_id, downloaded=downloaded, failed=failed,
@@ -450,8 +703,21 @@ def _stage_geotiff(ctx) -> list[str]:
     task = ctx.task
     anno_path_fn = ctx.anno_downloader.tile_path if ctx.anno_downloader is not None else None
     levels = ctx.levels
-    trs = {z: range_for_bbox(*ctx.bbox, z) for z in levels}
+    # 按网格取区间与拼接坐标系:天地图出 4326,Google/Esri 出 3857
+    range_fn = _range_fn_for(task["provider"])
+    mosaic_crs = _crs_for_grid(_ctx_grid(ctx))
+    trs = {z: range_fn(*ctx.bbox, z) for z in levels}
     total_rows = sum(trs[z].rows for z in levels)
+    # 裁剪 + 要出 OSM 时,需在裁剪**前**把 OSM 要用到的那几级留存一份未裁剪源
+    # (OSM 自带几何遮罩、需要未裁剪源才能精确切边;用裁过的源会在几何边缘产生暗边)。
+    # 要哪几级由 OSM 的断层策略决定 —— 与 TMS 同一套计划,不再只留最高级(需求38-2)。
+    _need_osm = "osm" in parse_export(task.get("export", "geotiff"))
+    _clipping = bool(task.get("clip") and ctx.geom)
+    # 但两套网格都有的源(天地图)是例外:它的 OSM 源要另用 _w 缓存拼 3857 的,
+    # 这里留存的主网格副本对它没用 —— 白占磁盘与时间,故不留。
+    _osm_keep = ({sz for sz, _ in _source_tms_plan_for_task(ctx)}
+                 if (_need_osm and _clipping and ctx.local_src is None
+                     and not _osm_uses_mercator_cache(ctx)) else set())
     ctx.tracker.start("geotiff", total=total_rows, message="合并 GeoTIFF")
     outputs = []
     base_done = 0
@@ -464,8 +730,10 @@ def _stage_geotiff(ctx) -> list[str]:
             ctx.tracker.update("geotiff", done=_base + done_rows,
                                message=f"拼接第 {_z} 级({done_rows}/{total_r} 行)")
 
-        # 主文件恒为 EPSG:4326(供 OSM/TMS 切片复用,不必再自拼源)。
-        # 裁剪在 4326 下做(几何本身即 WGS84,直接匹配)。
+        # 主文件的坐标系跟随数据源网格:天地图出 4326,Google/Esri 出 3857。
+        # 下游 tms/osm 会据此决定是否需要重投影。
+        # 裁剪在主文件坐标系下做;几何是 WGS84,3857 主文件需先转换
+        # (见 postprocess.clip_to_geometry)。
         geotiff = ctx.out_dir / f"{task['name']}_z{z}.tif"
         if ctx.local_src is not None:
             # 本地源:没有瓦片可拼,直接由源文件重采样出该级别的图。
@@ -474,14 +742,11 @@ def _stage_geotiff(ctx) -> list[str]:
             _resample_to_level(ctx, ctx.local_src, geotiff, tr, on_row)
         else:
             mosaic_to_geotiff(ctx.provider, settings.cache_dir, tr, geotiff,
-                              ctx.downloader.tile_path, anno_path_fn, on_row=on_row)
+                              ctx.downloader.tile_path, anno_path_fn,
+                              on_row=on_row, crs=mosaic_crs)
 
-        # 裁剪 + 需要 OSM 时:裁剪前把最高级那张未裁剪 4326 图留一份给 OSM 复用。
-        # OSM 需未裁剪源(自带几何遮罩精确切边),裁过的源会在几何边缘产生暗边。
-        # 这样 OSM 阶段直接捡起此源,彻底不必自拼(裁剪场景也免重拼)。
-        _need_osm = "osm" in parse_export(task.get("export", "geotiff"))
-        _clipping = bool(task.get("clip") and ctx.geom)
-        if z == max(levels) and _need_osm and _clipping:
+        # 裁剪前把 OSM 要用的那几级未裁剪图留一份(见上面 _osm_keep 的说明)。
+        if z in _osm_keep:
             import shutil as _shutil
             osm_src = ctx.out_dir / f".osm_src_z{z}.tif"
             _shutil.copyfile(geotiff, osm_src)
@@ -551,6 +816,42 @@ def _convert_stage_outputs(outputs: list[str], container: str) -> list[str]:
     return converted
 
 
+def _count_tiles(root: Path) -> int:
+    """数一个瓦片目录下的瓦片文件数(不存在则 0)。"""
+    if not root.exists():
+        return 0
+    return sum(1 for p in root.rglob("*") if p.is_file())
+
+
+def _tms_output_looks_empty(expected: int, after: int) -> bool:
+    """TMS 阶段是否"本该有产出,结束时目录却是空的"。
+
+    抽成纯函数以便单测:实测踩到的坑是墨卡托源(3857)被直接喂给
+    export_tms_from_source —— 它用 4326 网格枚举瓦片再与源图 bounds 求交,
+    源是米制时交集恒为空,一张都没切出来,阶段却报 "8/8 张"、状态 done,
+    成果目录全空。用户要到打开目录才发现,属于最难排查的一类问题。
+
+    判据是"结束时目录为空"而非"本次没新增":断点续切/重试时瓦片已存在,
+    重切会原地覆盖、文件数不增,按"没新增"判会**误报失败**。
+    """
+    return expected > 0 and after == 0
+
+
+def _tms_from_planned_sources_guarded(ctx, tms_dir: Path, clip_geom, plan,
+                                      source_for_level) -> list[str]:
+    """包一层:产出为空时报错而不是静默成功(判据见 _tms_output_looks_empty)。"""
+    out = _tms_from_planned_sources(ctx, tms_dir, clip_geom, plan,
+                                    source_for_level)
+    after = _count_tiles(tms_dir)
+    expected = sum(_tms_tile_count(ctx.bbox, lv) for _, lv in plan)
+    if _tms_output_looks_empty(expected, after):
+        raise RuntimeError(
+            f"TMS 切片产出为空:计划 {expected} 张瓦片,结束时目录里没有任何文件。"
+            f"常见原因是源图坐标系与 geodetic(4326)网格不匹配 —— "
+            f"源图必须是 EPSG:4326。")
+    return out
+
+
 def _stage_tms(ctx) -> list[str]:
     """输出 gdal2tiles geodetic TMS 瓦片包 + tilemapresource.xml。
 
@@ -574,6 +875,20 @@ def _stage_tms(ctx) -> list[str]:
     if ctx.local_src is not None:
         return _tms_from_source_file(ctx, tms_dir, clip_geom)
 
+    # 墨卡托源(Google/Esri 影像):瓦片是 3857,与 TMS 的 geodetic 网格不同构,
+    # 不能用 export_tms 的无损直映射 —— 那会把 3857 瓦片当 4326 瓦片摆放,
+    # 产出整体错位的瓦片包。必须以拼接图为源逐瓦片重采样。
+    #
+    # 计划用"每级各自为源、不向下补级":用户明确选择"只出已下载级别"
+    # (设计 §1 非目标),故不给墨卡托源补金字塔。
+    if _tms_needs_resample(_ctx_grid(ctx)):
+        plan = [(z, [z])
+                for z in sorted({int(v) for v in levels}, reverse=True)]
+        # 源要先转 4326(export_tms_from_source 的硬要求,见该函数说明)
+        return _tms_from_planned_sources_guarded(
+            ctx, tms_dir, clip_geom, plan,
+            lambda source_z: _mercator_raster_source(ctx, source_z))
+
     plan = _source_tms_plan_for_task(ctx)
     if _tms_plan_requires_source(plan):
         return _tms_from_downloaded_sources(ctx, tms_dir, clip_geom, plan)
@@ -589,7 +904,8 @@ def _stage_tms(ctx) -> list[str]:
     if stopped:
         raise _Stopped()
     write_tilemapresource(tms_dir, ctx.provider, task["name"], ctx.bbox, levels, ext=tms_ext)
-    return _maybe_mbtiles(ctx, "tms", tms_dir, "tms", tms_ext)
+    return _maybe_mbtiles(ctx, "tms", tms_dir,
+                    _mbtiles_scheme_for(_ctx_grid(ctx), "tms"), tms_ext)
 
 
 def _maybe_mbtiles(ctx, stage_key: str, tiles_dir: Path, scheme: str,
@@ -689,11 +1005,18 @@ def _tms_from_planned_sources(ctx, tms_dir: Path, clip_geom,
             raise _Stopped()
     write_tilemapresource(tms_dir, ctx.provider, ctx.task["name"],
                           ctx.bbox, sorted(exported_levels), ext=tms_ext)
-    return _maybe_mbtiles(ctx, "tms", tms_dir, "tms", tms_ext)
+    return _maybe_mbtiles(ctx, "tms", tms_dir,
+                    _mbtiles_scheme_for(_ctx_grid(ctx), "tms"), tms_ext)
 
 
 def _downloaded_raster_source(ctx, source_z: int) -> Path:
-    """在线影像任务里,供补金字塔用的指定级别 4326 GeoTIFF 源图。"""
+    """在线影像任务里,供补金字塔用的指定级别源图(网格跟随**任务主网格**)。
+
+    ⚠️ 范围与 crs 都必须按任务主网格取:缓存路径用的是主网格的 key
+    (`ctx.downloader.tile_path`),按 4326 行号去读 3857 命名的缓存会**不报错、
+    静默拼出别处的像素**(两套网格列号相同、行号不同,文件都存在)—— 最终审查
+    Important 5。墨卡托任务拼出的 3857 源,由调用方负责重投影成 4326。
+    """
     task = ctx.task
     done = ctx.out_dir / f"{task['name']}_z{source_z}.tif"
     if done.exists() and done.stat().st_size > 0:
@@ -704,7 +1027,8 @@ def _downloaded_raster_source(ctx, source_z: int) -> Path:
 
     anno_path_fn = (ctx.anno_downloader.tile_path
                     if ctx.anno_downloader is not None else None)
-    tr = range_for_bbox(*ctx.bbox, source_z)
+    grid = _ctx_grid(ctx)
+    tr = _range_fn_for(task["provider"], grid)(*ctx.bbox, source_z)
 
     def on_row(done_rows, total_r):
         _check_stop(ctx)
@@ -712,7 +1036,8 @@ def _downloaded_raster_source(ctx, source_z: int) -> Path:
                            message=f"准备切片源({source_z}级 {done_rows}/{total_r}行)")
 
     mosaic_to_geotiff(ctx.provider, settings.cache_dir, tr, tmp,
-                      ctx.downloader.tile_path, anno_path_fn, on_row=on_row)
+                      ctx.downloader.tile_path, anno_path_fn,
+                      on_row=on_row, crs=_crs_for_grid(grid))
     return tmp
 
 
@@ -722,6 +1047,36 @@ def _tms_from_downloaded_sources(ctx, tms_dir: Path, clip_geom,
     return _tms_from_planned_sources(
         ctx, tms_dir, clip_geom, plan,
         lambda source_z: _downloaded_raster_source(ctx, source_z))
+
+
+def _mercator_raster_source(ctx, source_z: int) -> Path:
+    """墨卡托源任务里,供 TMS 切片用的 **4326** 源图。
+
+    ⚠️ 必须先转 4326,不能把 3857 拼接图直接喂给 export_tms_from_source:
+    那个函数用 range_for_bbox(4326 网格)枚举输出瓦片,再与源图 bounds 求交集。
+    源若是 3857(bounds 是米,±2e7 量级),而瓦片四至是经纬度(±180 量级),
+    交集**恒为空** —— 一张都切不出来,却仍然返回成功(实测 TMS 阶段报
+    "8/8 张"、状态 done,而 tms/ 目录是空的)。
+
+    这与 DEM 的处理同源(_tms_from_dem 也是先渲染 4326 可视化源再切)。
+    """
+    task = ctx.task
+    src = ctx.out_dir / f"{task['name']}_z{source_z}.tif"
+    if not (src.exists() and src.stat().st_size > 0):
+        src = _downloaded_raster_source(ctx, source_z)
+    dst = ctx.out_dir / f".tms_src4326_z{source_z}.tif"
+    if dst.exists() and dst.stat().st_size > 0:
+        return dst
+    import shutil as _shutil
+    from rasterio.enums import Resampling
+    _shutil.copyfile(src, dst)
+    # ⚠️ 用 cubic 而非 reproject_geotiff 的默认 bilinear。这一步是墨卡托源出
+    # TMS 的**必经重投影**(见上),而 TMS 是唯一能出文字标注的瓦片格式 ——
+    # 双线性把细笔画抹得最狠:实测高频能量只剩 68%,用户看到"下载切片后的
+    # 文字标注比原始模糊很多"(需求37)。cubic 约 80%。
+    # 不用 lanczos(90%):它在高对比边缘产生振铃,文字上比略软更显眼。
+    reproject_geotiff(dst, "EPSG:4326", resampling=Resampling.cubic)
+    return dst
 
 
 def _tms_from_source_file(ctx, tms_dir: Path, clip_geom) -> list[str]:
@@ -748,7 +1103,8 @@ def _tms_from_dem(ctx, tms_dir: Path, clip_geom) -> list[str]:
     write_tilemapresource(tms_dir, ctx.provider, ctx.task["name"],
                           ctx.bbox, tms_levels, ext=tms_ext)
     _safe_unlink(src)
-    return _maybe_mbtiles(ctx, "tms", tms_dir, "tms", tms_ext)
+    return _maybe_mbtiles(ctx, "tms", tms_dir,
+                    _mbtiles_scheme_for(_ctx_grid(ctx), "tms"), tms_ext)
 
 
 def _stage_osm(ctx) -> list[str]:
@@ -765,25 +1121,6 @@ def _stage_osm(ctx) -> list[str]:
     # 进度直接用真实瓦片数上报(切片阶段),不再用 0-1000 虚拟刻度——虚拟刻度让
     # tracker 拿到的增量极小且不均匀,速率/ETA 计算会失真(速率显示 0、剩余时间乱跳)。
     ctx.tracker.start("osm", total=1, message="准备 OSM 源")
-
-    tr_max = range_for_bbox(*ctx.bbox, z_max)
-    osm_src = ctx.out_dir / f".osm_src_z{z_max}.tif"
-
-    # OSM 源必须是 EPSG:4326 未裁剪 RGB 图。geotiff 阶段的主文件 {name}_z{z}.tif
-    # 恒为 4326 版(目标投影另存 _{epsg}.tif),故只要 geotiff 阶段完成即可复用,
-    # 不再受输出坐标系限制,省掉一次最高级重复拼接。
-    # 裁剪时不复用裁过的主文件(边界外 nodata 会与 OSM 自带遮罩重复处理、产生暗边),
-    # 但 geotiff 阶段已在裁剪前把最高级未裁剪源留到 .osm_src_z{z}.tif,
-    # 下面的 elif 分支会捡起它——裁剪场景同样免自拼。
-    formats = parse_export(task.get("export", "geotiff"))
-    clipped = bool(task.get("clip") and ctx.geom)
-    geotiff_src = ctx.out_dir / f"{task['name']}_z{z_max}.tif"
-    can_reuse_geotiff = (
-        "geotiff" in formats
-        and not clipped
-        and ctx.tracker.is_done("geotiff")
-        and geotiff_src.exists() and geotiff_src.stat().st_size > 0
-    )
 
     # 本地影像源:用已重采样对齐的源图切片(复用 geotiff 阶段成果或临时生成)
     if ctx.local_src is not None and not ctx.is_dem:
@@ -802,7 +1139,8 @@ def _stage_osm(ctx) -> list[str]:
                                    should_stop=ctx.should_stop)
         if stopped:
             raise _Stopped()
-        return _maybe_mbtiles(ctx, "osm", osm_dir, "xyz", "png")
+        return _maybe_mbtiles(ctx, "osm", osm_dir,
+                    _mbtiles_scheme_for(_ctx_grid(ctx), "osm"), "png")
 
     # DEM 的源不是影像 geotiff,而是渲染出的 4326 可视化图。切完由本分支自己清理:
     # 它可能同时被 tms 阶段用到,故不走下面 reused 的删除逻辑。
@@ -823,51 +1161,144 @@ def _stage_osm(ctx) -> list[str]:
         if stopped:
             raise _Stopped()      # 保留可视化源,恢复时复用
         _safe_unlink(src_path)
-        return _maybe_mbtiles(ctx, "osm", osm_dir, "xyz", "png")
+        return _maybe_mbtiles(ctx, "osm", osm_dir,
+                    _mbtiles_scheme_for(_ctx_grid(ctx), "osm"), "png")
 
-    reused = False
-    if can_reuse_geotiff:
-        src_path = geotiff_src
-        reused = True
-        ctx.tracker.update("osm", message="复用合并的 GeoTIFF 作为 OSM 源")
-        logger.info("任务[%s] 阶段[OSM] 复用合并 GeoTIFF(%s)作源,跳过重拼",
-                    task["name"], geotiff_src.name)
-    elif osm_src.exists() and osm_src.stat().st_size > 0:
-        # 断点续切:上次拼好并保留的自拼源,跳过重拼直接切片。
-        src_path = osm_src
-        ctx.tracker.update("osm", message="复用已拼 OSM 源,继续切片")
-        logger.info("任务[%s] 阶段[OSM] 复用已拼源图,跳过重拼", task["name"])
-    else:
-        def on_row(done_rows, total_r):
-            _check_stop(ctx)
-            ctx.tracker.update("osm", message=f"拼接 OSM 源({done_rows}/{total_r} 行)")
-
-        # 拼源用临时文件 + 原子改名,中途暂停留下的是 .tmp(不会被误当完整源)。
-        tmp_src = ctx.out_dir / f".osm_src_z{z_max}.tmp.tif"
-        mosaic_to_geotiff(ctx.provider, settings.cache_dir, tr_max, tmp_src,
-                          ctx.downloader.tile_path, anno_path_fn, on_row=on_row)
-        tmp_src.replace(osm_src)   # 完整拼好才改名为正式源
-        src_path = osm_src
-        ctx.tracker.update("osm", message="切 OSM 瓦片")
-
-    # 切片阶段进度:直接上报真实瓦片数(export_osm 给的 done/total 即真实瓦片计数),
-    # 速率就是真实"张/秒",ETA 基于真实量、平滑有意义。切片开始时把 total 校正为真实值。
-    def on_progress(done, total):
-        _check_stop(ctx)
-        ctx.tracker.update("osm", done=done, total=total,
-                           message=f"切 OSM 瓦片({done}/{total} 张)")
-
+    # ---- 在线影像:按与 TMS **相同的断层策略**分段切片(需求38-2)----
+    # 原先一律从最高级降采样("只切最高级")。改为按 task.tms_source_strategy 规划
+    # "源层级 → 输出层级",每个源层级用**自己那一级**的拼接图 —— 与 TMS 同一套策略、
+    # 同一个字段(用户明确选择复用 TMS 的选项,不另开一个)。
+    #
+    # 分组数取决于级别是否连续(实测):
+    #   级别 1..12(连续)      → 12 组,每级各用自己的源
+    #   级别 18/17/16/13        → 连续高层兜底 3 组:z16 源出 z1..z16、z17/z18 各出自己
+    #                             保留输入层级 4 组:z16 源出 z14..z16、z13 源出 z1..z13
+    # 故它**不是**"和原先完全一致":常规的连续级别也改成了逐级取源,这正是需求38-2
+    # 要的"不再只切最高级"。
     osm_dir = ctx.out_dir / "osm"
-    _, _, stopped = export_osm(src_path, osm_levels, ctx.bbox, osm_dir,
-                               on_progress=on_progress, clip_geom=clip_geom,
-                               should_stop=ctx.should_stop)
+    plan = _source_tms_plan_for_task(ctx)
+    floor = min(OSM_MIN_LEVEL, z_max)
+    groups = [(sz, [z for z in lv if z >= floor]) for sz, lv in plan]
+    groups = [(sz, lv) for sz, lv in groups if lv]
+    # 进度按**全部分组**累计:分组数可能不少(级别连续时每级一组,见计划说明),
+    # 逐组重置的话进度条会来回跳。总瓦片数用墨卡托 XYZ 计数 —— OSM 恒是 3857 网格,
+    # 与源数据源的网格无关。
+    group_totals = [sum(mercator_range_for_bbox(*ctx.bbox, z).count for z in lv)
+                    for _, lv in groups]
+    grand_total = max(sum(group_totals), 1)
+    base_done = 0
+    built: list[Path] = []          # 本次自拼的源,切完删掉
+    stopped = False
+    try:
+        for (source_z, levels_here), total_here in zip(groups, group_totals):
+            src_path, reusable = _osm_source_for_level(ctx, source_z)
+            if not reusable:
+                built.append(src_path)
+
+            # 切片阶段进度:直接上报真实瓦片数(export_osm 给的 done/total 即真实
+            # 瓦片计数),速率就是真实"张/秒",ETA 才有意义。
+            def on_progress(done, total, _base=base_done, _z=source_z):
+                _check_stop(ctx)
+                ctx.tracker.update("osm", done=_base + done, total=grand_total,
+                                   message=f"切 OSM 瓦片(源 z{_z},{_base + done}/{grand_total} 张)")
+
+            _, _, stopped = export_osm(
+                src_path, levels_here, ctx.bbox, osm_dir,
+                on_progress=on_progress, clip_geom=clip_geom,
+                should_stop=ctx.should_stop)
+            if stopped:
+                break
+            base_done += total_here
+    finally:
+        # 暂停/取消时**保留**源,恢复时免重拼;正常结束才删自拼的那几份。
+        # 用安全删除:删不掉不影响已切好的成果(阶段仍算成功)。
+        if not stopped:
+            for p in built:
+                _safe_unlink(p)
     if stopped:
-        raise _Stopped()          # 保留源,供恢复时复用、不重拼
-    # 只删自拼的临时源;复用的 geotiff 是正式成果,保留。
-    # 用安全删除:删不掉不影响已切好的成果(阶段仍算成功)。
-    if not reused:
-        _safe_unlink(osm_src)
-    return _maybe_mbtiles(ctx, "osm", osm_dir, "xyz", "png")
+        raise _Stopped()
+    return _maybe_mbtiles(ctx, "osm", osm_dir,
+                    _mbtiles_scheme_for(_ctx_grid(ctx), "osm"), "png")
+
+
+def _osm_source_for_level(ctx, z: int) -> tuple[Path, bool]:
+    """OSM 切 z 这一层要用的源;返回 (路径, 是否切完保留)。
+
+    优先用 geotiff 阶段**裁剪前**留存的未裁剪源(`.osm_src_z{z}.tif`)——OSM 需要
+    未裁剪源(它自带几何遮罩、能精确切边;用裁过的源会在几何边缘产生暗边)。
+    未裁剪任务下 geotiff 成果本身就是未裁剪源,直接复用。两者都没有(裁剪任务
+    且没勾 geotiff)时才自拼一份。
+    """
+    task = ctx.task
+    if _osm_uses_mercator_cache(ctx):
+        # 天地图:geotiff 成果与留存副本都是**任务主网格(4326)**的,对 OSM 没用。
+        # 另用 `_w` 缓存拼 3857 源 —— 于是 export_osm 的 WarpedVRT 是 3857→3857
+        # 的空操作,零重投影(设计 D4)。文件名带 w 以示区分。
+        mkept = ctx.out_dir / f".osm_src_w_z{z}.tif"
+        if mkept.exists() and mkept.stat().st_size > 0:
+            return mkept, True
+        prov_w = _build_provider_for(task, GEO_MERCATOR)
+        dl_w = _mk_downloader(task, prov_w)
+        anno_w = None
+        if ctx.anno_downloader is not None:
+            tok = (token_pool.use_token if token_pool.has_any()
+                   else settings.tianditu.token)
+            ap = build_annotation_provider(task["provider"], tok,
+                                           grid=GEO_MERCATOR)
+            anno_w = _mk_downloader(task, ap) if ap else None
+        return _build_osm_source(ctx, z, prov_w, dl_w.tile_path,
+                                 GEO_MERCATOR, mkept, anno_w)
+
+    kept = ctx.out_dir / f".osm_src_z{z}.tif"
+    if kept.exists() and kept.stat().st_size > 0:
+        return kept, True
+    done = ctx.out_dir / f"{task['name']}_z{z}.tif"
+    clipped = bool(task.get("clip") and ctx.geom)
+    if not clipped and done.exists() and done.stat().st_size > 0:
+        return done, True
+    return _build_osm_source(ctx, z, ctx.provider, ctx.downloader.tile_path,
+                             _ctx_grid(ctx), kept, ctx.anno_downloader)
+
+
+def _build_osm_source(ctx, z: int, provider, tile_path_fn, grid: str,
+                      dst: Path, anno_downloader) -> tuple[Path, bool]:
+    """按指定网格拼一份 OSM 源(临时文件 + 原子改名,中途暂停留下的是 .tmp)。"""
+    def on_row(done_rows, total_r):
+        _check_stop(ctx)
+        ctx.tracker.update("osm", message=f"拼接 OSM 源 z{z}({done_rows}/{total_r} 行)")
+
+    # ⚠️ 范围与坐标系都要按**指定的网格**取。原先写死 range_for_bbox(4326)
+    # 且不传 crs,对墨卡托源会按 4326 的行列号去读按 3857 命名的缓存 —— 整幅拼空。
+    range_fn = _range_fn_for(ctx.task["provider"], grid)
+    tr = range_fn(*ctx.bbox, z)
+    anno_path_fn = (anno_downloader.tile_path
+                    if anno_downloader is not None else None)
+    tmp = dst.with_suffix(".tmp.tif")
+    mosaic_to_geotiff(provider, settings.cache_dir, tr, tmp,
+                      tile_path_fn, anno_path_fn,
+                      on_row=on_row, crs=_crs_for_grid(grid))
+    _assert_source_has_data(tmp, grid)
+    tmp.replace(dst)   # 完整拼好才改名为正式源
+    return dst, False
+
+
+def _assert_source_has_data(path: Path, grid: str) -> None:
+    """拼出来的源必须有数据 —— 全零说明该网格的缓存里一张瓦片都没有。
+
+    **为什么必须拦**:源全零时 `export_osm` 把每张瓦片判成"无覆盖"直接跳过,
+    于是产出**空目录却报成功**(最终审查 Critical 1)。触发路径很现实:升级前建的
+    任务只下过 `_c`,升级后重跑 osm 阶段时 download 已是 done —— 若没补下 `_w`,
+    用户拿到空目录且零报错。与需求38-2 是同一个失败形状,故改成明确失败。
+    """
+    import rasterio as _rio
+    with _rio.open(path) as s:
+        # 抽样读即可(全零判断不需要全图)
+        data = s.read(1, out_shape=(min(s.height, 512), min(s.width, 512)))
+    if not data.any():
+        raise RuntimeError(
+            f"OSM 源为空:{path.name} 拼出来全是 0 —— "
+            f"{_matrix_set_of(grid)} 网格的缓存里没有瓦片。"
+            f"通常是因为只重跑了 osm 阶段而没补下下载阶段(见 _grids_missing_cache)。")
 
 
 # ============ DEM → 可视化 RGB 源(供复用影像切片器)============

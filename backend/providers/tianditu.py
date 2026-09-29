@@ -39,22 +39,40 @@ ANNOTATION_OF = {
     "tianditu_img": "tianditu_cia",
     "tianditu_vec": "tianditu_cva",
     "tianditu_ter": "tianditu_cta",
+    # Google/Esri 是影像源 → 配影像注记。
+    # 它们的注记走 3857(见 build_annotation_provider 的 grid 参数)。
+    "google_img": "tianditu_cia",
+    "google_hybrid": "tianditu_cia",
+    "google_road": "tianditu_cia",
+    "google_terrain": "tianditu_cia",
+    "esri_imagery": "tianditu_cia",
 }
 
 
 class TiandituProvider(TileProvider):
     """天地图 EPSG:4326 瓦片数据源(可切换 img/vec/ter 图层)。"""
 
-    def __init__(self, key: str, token: TokenSource):
+    def __init__(self, key: str, token: TokenSource, matrix_set: str = "c"):
         if key not in LAYERS:
             raise ValueError(f"暂不支持的天地图图层:{key}")
         # token 可为字符串或可调用(动态取密钥);字符串为空时报错,可调用留待运行时解析
         if not callable(token) and not token:
             raise ValueError("天地图密钥(token)为空,请在 config.yaml 或密钥管理中填写。")
+        if matrix_set not in ("c", "w"):
+            raise ValueError(f"未知的 TILEMATRIXSET:{matrix_set}(只支持 c/w)")
         layer_type, layer_name, ext, bands, _cn = LAYERS[key]
-        self.key = key
+        # key 带上网格后缀(`tianditu_img_c` / `tianditu_img_w`)。
+        #
+        # 为什么:同一个天地图图层有两套网格,而 `_c`(geodetic)与 `_w`(mercator)
+        # 的**行号语义不同**(第 z 级分别 2^(z-1) 与 2^z 行),同一 (col,row) 不是
+        # 同一地点。缓存路径是 {cache}/{key}/{z}/{col}_{row}.{ext},key 不带网格
+        # 两套会互相覆盖、断点续传时静默错乱(设计 D2)。
+        #
+        # 旧缓存由 core/cache_migrate.migrate_cache_grids 在启动时改名接上。
+        self.key = f"{key}_{matrix_set}"
         self.layer_type = layer_type
         self.layer_name = layer_name
+        self.matrix_set = matrix_set
         self.ext = ext
         self.bands = bands
         self._token = token
@@ -66,10 +84,15 @@ class TiandituProvider(TileProvider):
 
     def tile_url(self, col: int, row: int, z: int) -> str:
         sub = next(self._sub)
+        # LAYERS 里存的是 "c" 形式(如 "cia_c")。matrix_set 只换末位后缀:
+        # "cia_c"→"cia_w"。断言后缀,避免哪天 LAYERS 格式变了却静默拼出错 URL
+        # (错 URL 会返回 404,而下载器把 404 当失败重试,表现为慢而非报错)。
+        assert self.layer_type.endswith("_c"), self.layer_type
+        layer_type = self.layer_type[:-1] + self.matrix_set
         return (
-            f"https://{sub}.tianditu.gov.cn/{self.layer_type}/wmts?"
+            f"https://{sub}.tianditu.gov.cn/{layer_type}/wmts?"
             f"SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER={self.layer_name}"
-            f"&STYLE=default&TILEMATRIXSET=c&FORMAT=tiles"
+            f"&STYLE=default&TILEMATRIXSET={self.matrix_set}&FORMAT=tiles"
             f"&TILEMATRIX={z}&TILEROW={row}&TILECOL={col}&tk={self._resolve_token()}"
         )
 
@@ -80,21 +103,39 @@ class TiandituProvider(TileProvider):
         return 18
 
 
-def build_provider(key: str, token: TokenSource) -> TileProvider:
+def build_provider(key: str, token: TokenSource,
+                   matrix_set: str = "c") -> TileProvider:
     """按数据源标识构造 provider。后续 DEM 等在此登记。
 
     token 可为固定字符串或可调用(tk 使用池:每次取 URL 时动态取密钥并计数)。
+
+    matrix_set 只对天地图有意义:`c`(EPSG:4326)/ `w`(EPSG:3857)是**同一份影像
+    的两套网格**(见 core/formats.PROVIDER_GRIDS)。默认 `c` 与改动前一致。
     """
     if key in ("img",):
         key = "tianditu_img"
     if key in LAYERS:
-        return TiandituProvider(key, token)
+        return TiandituProvider(key, token, matrix_set=matrix_set)
     raise ValueError(f"暂不支持的数据源:{key}")
 
 
-def build_annotation_provider(base_key: str, token: TokenSource) -> TiandituProvider | None:
-    """按底图数据源构造对应的注记 provider;无对应注记时返回 None。"""
+def build_annotation_provider(base_key: str, token: TokenSource,
+                              grid: str = "geodetic") -> TiandituProvider | None:
+    """按底图数据源构造对应的注记 provider;无对应注记时返回 None。
+
+    grid 决定注记走哪套瓦片网格:
+      - geodetic(天地图源,默认)= `_c` + TILEMATRIXSET=c,与下载网格同构
+      - mercator(Google/Esri)  = `_w` + TILEMATRIXSET=w
+
+    ⚠️ 必须与底图网格一致。行列号由底图的 range_fn 算出,网格选错会请求到
+    **另一个地方**的注记 —— 不报错,只是路网与影像对不上,很难发现。
+    """
+    from ..core.formats import GEO_MERCATOR
+
     if base_key in ("img",):
         base_key = "tianditu_img"
     anno_key = ANNOTATION_OF.get(base_key)
-    return TiandituProvider(anno_key, token) if anno_key else None
+    if not anno_key:
+        return None
+    matrix = "w" if grid == GEO_MERCATOR else "c"
+    return TiandituProvider(anno_key, token, matrix_set=matrix)

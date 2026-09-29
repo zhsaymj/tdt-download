@@ -18,10 +18,13 @@ import { useOverlayStore } from '../stores/overlay'
 import { mapController } from '../composables/mapController'
 import { useBasemapStore } from '../stores/basemap'
 import { BASEMAP_OPTIONS } from '../utils/basemap'
+import ServiceLayerPicker from './ServiceLayerPicker.vue'
+import InfoTip from './InfoTip.vue'
 
 const emit = defineEmits(['open-data'])
 const overlayStore = useOverlayStore()
 const basemapStore = useBasemapStore()
+const showServicePicker = ref(false)
 
 const collapsed = ref(true)
 const basemapSelectOptions = BASEMAP_OPTIONS.map((x) => ({ value: x.value, label: x.label }))
@@ -59,6 +62,26 @@ function openData() {
   collapsed.value = true
   emit('open-data')
 }
+
+function openServices() { showServicePicker.value = true }
+
+/**
+ * 服务图层走与任务图层**完全相同的 add 入口**，因此透明度、上下移层、定位
+ * 三项自动可用（都由 overlays.js 的通用实现提供，与来源无关）。
+ *
+ * 服务记录里的 overlay_desc 由后端生成，字段结构与 core/overlay.py 的输出
+ * 逐字段对齐——这是"两条来源、一个渲染出口"的关键。
+ */
+function onPickService(svc) {
+  const ok = overlayStore.add(
+    { serviceId: svc.id, serviceName: svc.name }, svc.overlay_desc)
+  if (!ok) {
+    MessagePlugin.warning('该服务无法叠加显示（三维与地形只画范围框）')
+  } else {
+    MessagePlugin.success(`已添加：${svc.name}`)
+  }
+  showServicePicker.value = false
+}
 </script>
 
 <template>
@@ -81,6 +104,15 @@ function openData() {
             @click="basemapStore.move(1)">⤒</button>
           <button class="mini" title="底图下移一层" :disabled="basemapStore.level === 0"
             @click="basemapStore.move(-1)">⤓</button>
+        </div>
+        <div class="r2 anno-row">
+          <t-checkbox :checked="basemapStore.annotationVisible"
+            @change="(v) => basemapStore.setAnnotationVisible(v)">
+            路网注记
+          </t-checkbox>
+          <InfoTip
+            content="叠加天地图路网注记(含地名、行政界等),始终位于底图的最上层。注记最高 18 级,更高层级不会有注记。"
+            max-width="320px" />
         </div>
         <div class="base-note">底图不可移除和定位，可切换、调透明度并调整与成果图层的上下关系。</div>
       </div>
@@ -116,10 +148,18 @@ function openData() {
       <div v-if="!rows.length" class="empty">
         地图上还没有叠加图层。
         <button class="link" @click="openData">从「数据」面板添加</button>
+        <button class="link" @click="openServices">或从「服务」列表添加</button>
       </div>
       <div v-else class="foot">
-        <button class="link" @click="openData">＋ 添加图层</button>
+        <button class="link" @click="openData">＋ 从「数据」面板添加</button>
+        <button class="link" @click="openServices">＋ 从「服务」列表添加</button>
         <button class="link danger" @click="overlayStore.clear()">全部移除</button>
+      </div>
+
+      <!-- 弹层朝上展开：面板本身停在地图左下角，往下弹会超出视口 -->
+      <div v-if="showServicePicker" class="picker-wrap">
+        <ServiceLayerPicker @close="showServicePicker = false"
+          @pick="onPickService" />
       </div>
     </div>
   </div>
@@ -198,4 +238,9 @@ function openData() {
 }
 .link:hover { text-decoration: underline; }
 .link.danger { color: #b91c1c; }
+/* 面板停在地图左下角，服务选择器朝上展开，否则会超出视口 */
+.picker-wrap {
+  position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 30;
+}
+.anno-row { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
 </style>

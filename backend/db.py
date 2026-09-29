@@ -66,6 +66,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- 本地影像 tif 出 TMS 时的断层补齐策略:
     -- contiguous=只用连续高层级兜底;preserve_inputs=保留每个输入层级并分段补齐。
     tms_source_strategy TEXT DEFAULT 'contiguous',
+    -- 点云任务的 CRS 处理策略:''=自动读 LAS 头;'local'=按本地坐标;否则为 EPSG 码(如 EPSG:4547)。
+    pc_crs       TEXT NOT NULL DEFAULT '',
+    -- 点云出 DEM/DSM 的栅格分辨率(米),0=按点云密度自动估算。
+    pc_resolution REAL NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
@@ -81,6 +85,27 @@ CREATE TABLE IF NOT EXISTS tokens (
     enabled       INTEGER NOT NULL DEFAULT 1,  -- 是否启用(停用则跳过)
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
+);
+
+-- 本地数据服务:把本地目录发布成带稳定地址的数据服务。
+-- 与 tasks 表的区别:服务指向**目录**,任务产出**成果**;任务记录删了成果就打不开,
+-- 而服务长期有效,其他服务可以拿它的地址当地图数据源用。
+CREATE TABLE IF NOT EXISTS services (
+    id            TEXT PRIMARY KEY,            -- 8 位十六进制短 id,用作 URL 段
+    name          TEXT NOT NULL,               -- 显示名(可改)
+    kind          TEXT NOT NULL,               -- model / imagery / vector / terrain
+    root          TEXT NOT NULL,               -- 服务根目录绝对路径(已 resolve)
+    entry         TEXT NOT NULL DEFAULT '',    -- 相对 root 的入口;瓦片/地形为空
+    grid          TEXT NOT NULL DEFAULT '',    -- geodetic / mercator / ''(非瓦片)
+    flip_y        INTEGER NOT NULL DEFAULT 0,  -- 行号是否自南向北(TMS 为 1)
+    minzoom       INTEGER NOT NULL DEFAULT 0,
+    maxzoom       INTEGER NOT NULL DEFAULT 18,
+    bounds_wgs84  TEXT NOT NULL DEFAULT '',    -- JSON 数组 [w,s,e,n],供定位
+    bounds_approx INTEGER NOT NULL DEFAULT 0,  -- 范围是否为估算值
+    tile_ext      TEXT NOT NULL DEFAULT 'png', -- 瓦片扩展名(拼访问地址用)
+    enabled       INTEGER NOT NULL DEFAULT 0,  -- 是否对外提供;**默认关**
+    source        TEXT NOT NULL DEFAULT 'manual',  -- output_scan / manual
+    created_at    TEXT NOT NULL
 );
 """
 
@@ -117,6 +142,10 @@ _MIGRATIONS = {
     # 本地文件输入源(不下载,直接读用户磁盘上的文件)
     "source_path": "ALTER TABLE tasks ADD COLUMN source_path TEXT DEFAULT ''",
     "tms_source_strategy": "ALTER TABLE tasks ADD COLUMN tms_source_strategy TEXT DEFAULT 'contiguous'",
+    # 点云任务:CRS 处理策略(''=自动读 LAS 头;'local'=本地坐标;否则为 EPSG 码)
+    "pc_crs": "ALTER TABLE tasks ADD COLUMN pc_crs TEXT NOT NULL DEFAULT ''",
+    # 点云出 DEM/DSM 的栅格分辨率(米),0=自动
+    "pc_resolution": "ALTER TABLE tasks ADD COLUMN pc_resolution REAL NOT NULL DEFAULT 0",
 }
 
 
@@ -135,4 +164,7 @@ def get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
+    # 多进程(主进程 + N 个 worker)并发写时,WAL 允许并发读写但写之间仍互斥;
+    # 不设超时会直接抛 "database is locked",设了则排队等待。
+    conn.execute("PRAGMA busy_timeout=5000;")
     return conn

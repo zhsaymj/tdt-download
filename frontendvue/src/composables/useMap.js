@@ -16,7 +16,11 @@ import { never } from 'ol/events/condition'
 import { unByKey } from 'ol/Observable'
 import { DRAW_Z } from './overlays'
 import { createMeasureTool } from './measure'
-import { basemapTypesFor, basemapZIndexForLevel } from '../utils/basemap'
+import {
+  annotationLayerOf, basemapMaxZoom, basemapTileUrl, basemapTypesFor,
+  basemapZIndexForLevel,
+} from '../utils/basemap'
+import { ANNOTATION_MAX_Z } from '../utils/provider'
 
 const geojsonFmt = new GeoJSON()
 
@@ -84,6 +88,18 @@ export function createMapController(target, hooks = {}) {
     })
   }
 
+  // 经后端转发的底图(Google / Esri)。走 /api/tiles/...,
+  // 因此浏览器不直接接触这些站点,前端无需任何代理配置。
+  function backendXyzLayer(providerKey) {
+    return new TileLayer({
+      source: new XYZ({
+        url: basemapTileUrl(providerKey),
+        crossOrigin: 'anonymous',
+        maxZoom: basemapMaxZoom(providerKey),
+      }),
+    })
+  }
+
   let baseLayers = []   // 当前底图图层组(供切换时移除)
   let baseToken = null
   let baseKey = 'tianditu_img'
@@ -96,6 +112,56 @@ export function createMapController(target, hooks = {}) {
       l.setOpacity(baseOpacity)
       l.setZIndex(z)
     }
+    // 注记跟随底基层级(底图 zIndex + 1)
+    if (annoLayer) annoLayer.setZIndex(annoLayerZ())
+  }
+
+  // ---- 天地图路网注记(独立于底图,永远在底图的最上层)----
+  // 从底图图层组里摘出来的原因:用户要能单独开关注记,而不是"影像+注记"
+  // 一起显示(见 utils/basemap.js 的 ANNOTATION_OF_BASEMAP)。
+  let annoLayer = null
+  let annoVisible = true          // 默认开启:保持与原"影像+注记"一致的观感
+
+  function annoLayerZ() {
+    // 跟随底基层级:底图 zIndex + 1 —— 始终"在底图的最上层"。
+    // 底图被调到成果图层之上时,注记也跟着上去。
+    return basemapZIndexForLevel(baseLevel) + 1
+  }
+
+  function tiandituAnnoLayer(layerType, token) {
+    const layerName = layerType.split('_')[0]
+    return new TileLayer({
+      source: new XYZ({
+        url:
+          `https://t{0-7}.tianditu.gov.cn/${layerType}/wmts?` +
+          `SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=${layerName}` +
+          `&STYLE=default&TILEMATRIXSET=w&FORMAT=tiles` +
+          `&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&tk=${token}`,
+        crossOrigin: 'anonymous',
+        maxZoom: ANNOTATION_MAX_Z,   // source 级:注记瓦片只到 z18
+      }),
+      // layer 级:视图缩放超过 z18 就整个不渲染。
+      // 与上面 source 级那个是两回事 —— source 级只限瓦片网格,超过之后 OL 会
+      // 继续用 z18 瓦片并**拉伸显示**:糊掉的路名压在清晰的影像上,观感就是
+      // "放大后底图没变清晰"(用户反馈:切到 Google/Esri 放大到 18 级以上时)。
+      // 判定见 ol/layer/Layer.js::inView() 的 `zoom <= layerState.maxZoom`。
+      maxZoom: ANNOTATION_MAX_Z,
+      zIndex: annoLayerZ(),
+    })
+  }
+
+  function applyAnnotation() {
+    // 底图切换时注记类型要跟着换(cia↔cva↔cta),故每次都重建
+    if (annoLayer) { map.removeLayer(annoLayer); annoLayer = null }
+    const layerType = annotationLayerOf(baseKey)
+    if (!annoVisible || !layerType || !baseToken) return
+    annoLayer = tiandituAnnoLayer(layerType, baseToken)
+    map.addLayer(annoLayer)
+  }
+
+  function setAnnotationVisible(on) {
+    annoVisible = !!on
+    applyAnnotation()
   }
 
   function setupBasemap(token) {
@@ -107,14 +173,24 @@ export function createMapController(target, hooks = {}) {
   // 按用户选择/下载数据类型切换中间地图底图(底图 + 对应注记)
   function setBasemap(providerKey) {
     baseKey = providerKey || 'tianditu_img'
-    if (!baseToken) { applyBasemapStyle(); return }
-    const types = basemapTypesFor(baseKey)
+    const backendUrl = basemapTileUrl(baseKey)
     // 移除旧底图组
     baseLayers.forEach((l) => map.removeLayer(l))
-    baseLayers = types.map((t) => tiandituLayer(t, baseToken))
+    if (backendUrl) {
+      // Google / Esri:经后端转发(浏览器用不了后端的代理配置),
+      // 因此不需要天地图 token,也不能在缺 token 时直接返回。
+      baseLayers = [backendXyzLayer(baseKey)]
+    } else {
+      // 天地图:需 token(未配置时只应用样式,保持原行为)
+      if (!baseToken) { baseLayers = []; applyBasemapStyle(); return }
+      const types = basemapTypesFor(baseKey)
+      baseLayers = types.map((t) => tiandituLayer(t, baseToken))
+    }
     applyBasemapStyle()
     // 插到最底层(矢量/预览层之下)
     baseLayers.forEach((l, i) => map.getLayers().insertAt(i, l))
+    // 注记类型随底图变化(cia↔cva↔cta),层级也要重算
+    applyAnnotation()
   }
 
   // 兼容旧调用名:下载数据源切换时仍能同步底图
@@ -337,6 +413,11 @@ export function createMapController(target, hooks = {}) {
 
   // ---- 加载 geojson(WGS84)为下载范围 ----
   function loadGeojson(geojson) {
+    // 调用方漏拆包装体(如 { geojson, prjText })时,OpenLayers 只会抛
+    // "Unsupported GeoJSON type: undefined"——那句话看不出问题出在哪,这里先挡住
+    if (!geojson || typeof geojson.type !== 'string') {
+      throw new Error('矢量数据格式不正确:缺少 type,可能不是有效的 GeoJSON')
+    }
     const features = geojsonFmt.readFeatures(geojson, {
       dataProjection: 'EPSG:4326', featureProjection: 'EPSG:3857',
     })
@@ -403,7 +484,7 @@ export function createMapController(target, hooks = {}) {
 
   return {
     map, setupBasemap, setOverlayByProvider, setBasemap,
-    setBasemapOpacity, setBasemapLevel,
+    setBasemapOpacity, setBasemapLevel, setAnnotationVisible,
     startDrawRect, startDrawPolygon, toggleEdit, clearDraw, loadGeojson,
     showPreview, clearPreview, zoomTo, measure,
     hasFeature: () => !!state.feature,

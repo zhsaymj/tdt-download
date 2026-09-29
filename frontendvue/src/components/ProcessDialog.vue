@@ -1,6 +1,6 @@
 <script setup>
 /**
- * 统一的「处理」对话框:下载 / 本地栅格 / 本地矢量三种来源共用一套表单。
+ * 统一的「处理」对话框:下载 / 本地栅格 / 本地矢量 / 本地三维四种来源共用一套表单。
  *
  * 取代原先 1476 行、104 个表单项、4 个 tab 的 ParamsPanel。旧版四个 tab 的表单
  * 高度重叠——「任务名称」写了 4 遍、「导出格式」3 遍、「下载级别」「等高距」各 2 遍,
@@ -14,13 +14,19 @@ import { useDrawStore } from '../stores/draw'
 import { useTaskStore } from '../stores/task'
 import { useBasemapStore } from '../stores/basemap'
 import { crsOptions } from '../utils/crs'
+import { isBasemapKey } from '../utils/basemap'
 import { fmtNum, fmtSize } from '../utils/format'
 import {
-  DEM_CRS_HINT, DEM_LEVELS, IMG_LEVELS,
+  ANNOTATION_MAX_Z, MERCATOR_IMAGE_PROVIDERS,
+  annotationExcessLevels, annotationUsable, canAnnotate,
+  fmtNameOf,
+} from '../utils/provider'
+import {
+  DEM_CRS_HINT, IMG_LEVELS,
   defaultContainersForStages, defaultTaskName,
   downloadDefaultsForProvider, ensureImageTmsLevels,
   formatPixelResolution, formatPixelSize, formatSampleSpacing, formatScale72Dpi,
-  normalizeContainerMap,
+  levelsForProvider, needsRegionProbe, normalizeContainerMap,
 } from '../utils/taskDefaults'
 import { api } from '../api'
 import InfoTip from './InfoTip.vue'
@@ -30,7 +36,7 @@ import SidePanel from './SidePanel.vue'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
-  /** { kind: 'download' | 'local_raster' | 'local_vector' } */
+  /** { kind: 'download' | 'local_raster' | 'local_vector' | 'local_3d' } */
   source: { type: Object, default: null },
 })
 const emit = defineEmits(['update:visible', 'created'])
@@ -45,10 +51,16 @@ const providerOptions = [
   { value: 'tianditu_img', label: '天地图影像', group: '影像' },
   { value: 'tianditu_vec', label: '天地图矢量底图', group: '影像' },
   { value: 'tianditu_ter', label: '天地图地形晕渲', group: '影像' },
+  { value: 'google_img', label: 'Google 卫星影像', group: '影像' },
+  { value: 'esri_imagery', label: 'Esri World Imagery', group: '影像' },
   { value: 'esri_terrain', label: '全国地形 DEM(Esri Terrain3D)', group: '地形' },
   { value: 'osm_buildings', label: '三维建筑白模(OSM)', group: '三维建筑' },
   { value: 'local_vector', label: '三维建筑白模(本地矢量面)', group: '三维建筑' },
 ]
+
+// 本对话框可下载的数据源集合。用于「底图 → 数据源」的成员判定 ——
+// 从 providerOptions 派生而不是另抄一份,列表增删时不会漂移。
+const DOWNLOAD_KEYS = new Set(providerOptions.map((o) => o.value))
 
 // 单一表单模型:字段是四个旧 form 的并集,显示与否由数据类型决定
 const form = reactive({
@@ -69,6 +81,11 @@ const form = reactive({
   vecContainer: 'gpkg',
   // 建筑轮廓矢量的成果格式(建筑任务的 fetch_buildings 阶段)
   bldVecContainer: 'gpkg',
+  // 三维(local_3d):数据类型(osgb/pointcloud)与点云坐标系、采样分辨率
+  d3Type: 'osgb',
+  pcCrsEpsg: '',
+  pcCrsLocal: false,
+  pcResolution: 0,
 })
 
 // ---- 后端能力表:各 provider 可用的阶段与容器 ----
@@ -83,10 +100,19 @@ const kind = computed(() => props.source?.kind || 'download')
 const isDownload = computed(() => kind.value === 'download')
 const isLocalRaster = computed(() => kind.value === 'local_raster')
 const isLocalVector = computed(() => kind.value === 'local_vector')
+const isLocal3D = computed(() => kind.value === 'local_3d')
+
+/** 三维来源内的数据类型:OSGB 目录 / 点云(LAS/LAZ 文件或目录) */
+const d3TypeOptions = [
+  { value: 'osgb', label: 'OSGB 倾斜模型(目录)' },
+  { value: 'pointcloud', label: '点云(LAS/LAZ 文件或目录)' },
+]
 
 // ---- 本地文件检查结果 ----
 const fileInfo = ref(null)      // 栅格 inspect
 const vecInfo = ref(null)       // 矢量 inspect
+const osgbInfo = ref(null)      // OSGB 目录 inspect({path, warning})
+const pcInfo = ref(null)        // 点云 inspect({files, count, bbox, srs, error})
 const busy = ref(false)
 const errText = ref('')
 const dialogOk = ref(false)
@@ -96,6 +122,9 @@ const lastAutoName = ref('')
 const activeProvider = computed(() => {
   if (isLocalRaster.value) {
     return fileInfo.value?.kind === 'raster_dem' ? 'local_dem' : 'local_image'
+  }
+  if (isLocal3D.value) {
+    return form.d3Type === 'osgb' ? 'local_osgb' : 'local_pointcloud'
   }
   return form.provider
 })
@@ -111,12 +140,6 @@ const crsHint = computed(() => isDem.value
 /** 该 provider 可用的阶段(后端驱动) */
 const stages = computed(() => caps.value[activeProvider.value]?.stages || [])
 
-/**
- * 阶段 key → 提交用的格式名。DEM 的整幅高程图阶段 key 是历史遗留的 `dem`,
- * 而 export 字段里的格式名是 `geotiff`(后端 _FORMAT_TO_STAGE 做映射)。
- */
-function fmtNameOf(stageKey) { return stageKey === 'dem' ? 'geotiff' : stageKey }
-
 /** 格式勾选项:label 用更贴合语境的中文,后端 label 兜底 */
 const FMT_LABELS = {
   geotiff: '带坐标 GeoTIFF(每级一张)',
@@ -125,6 +148,9 @@ const FMT_LABELS = {
   tiles: '保留原始 LERC 瓦片',
   terrain: 'Cesium 地形切片',
   contour: '等高线(矢量)',
+  tile_3d: '3D Tiles',
+  dsm: 'DSM(数字表面模型)',
+  dem: 'DEM(数字高程模型,仅地面点)',
 }
 const exportOptions = computed(() => stages.value.map((s) => {
   const v = fmtNameOf(s.key)
@@ -140,15 +166,37 @@ const bldVecOptions = computed(() => {
   return (s?.containers || []).map((c) => ({ value: c.key, label: c.label }))
 })
 
-const levelList = computed(() => (isDem.value ? DEM_LEVELS : IMG_LEVELS))
+// 级别列表按数据源取:Google 到 21、Esri 影像到 19、天地图 18、DEM 0-16
+const levelList = computed(() => levelsForProvider(form.provider))
 const picksMbtiles = computed(() => ['tms', 'osm'].some(
   (k) => form.export.includes(k) && form.containers[k] === 'mbtiles'))
+
+/**
+ * 勾了 TMS、但数据源是 Web 墨卡托时的提示。
+ *
+ * TMS 是 gdal2tiles **geodetic(EPSG:4326)** 网格,与 3857 源不同构,导出必须先
+ * 重投影 —— 实测高频能量只剩 68%,而前端显示 geodetic TMS 时 OL 还要再转一次
+ * 3857,端到端约 44%,细笔画的文字标注明显发虚(需求37)。OSM 是 3857→3857,
+ * 文件无损且前端不再重投影,故默认已改成 OSM;这条只在用户手动勾回 TMS 时提醒。
+ *
+ * 不含 DEM:它没有文字标注,且默认同样已翻成 OSM(后端按网格判定)。
+ */
+const tmsReprojectWarn = computed(() => {
+  if (!isDownload.value || !form.export.includes('tms')) return ''
+  if (!MERCATOR_IMAGE_PROVIDERS.includes(form.provider)) return ''
+  return '该数据源是 Web 墨卡托(3857),TMS 走 geodetic(4326)网格需要重投影,'
+    + '文字与细线条会比原图软一些。要无损请改勾「切 OSM 瓦片」。'
+})
+// 断层策略:TMS 与 OSM **共用同一套**(后端同一个 task 字段 tms_source_strategy,
+// 见 runner._source_tms_plan_for_task)。故勾了任一瓦片格式都要显示 ——
+// 原先只判 'tms',只勾 OSM 时用户看不到、也就改不了策略(需求38-2)。
 const tmsSourceStrategyOptions = [
   { value: 'contiguous', label: '连续高层兜底(默认)' },
   { value: 'preserve_inputs', label: '保留每个输入层级并分段补齐' },
 ]
 const showTmsSourceStrategy = computed(() =>
-  !isBuildings.value && !isDem.value && form.export.includes('tms'))
+  !isBuildings.value && !isDem.value
+  && ['tms', 'osm'].some((k) => form.export.includes(k)))
 
 function applyAutoName(force = false) {
   const next = defaultTaskName(form.provider)
@@ -169,26 +217,70 @@ function applyDownloadDefaults(forceName = false) {
 }
 
 // ---- 选文件 ----
-async function browse() {
+async function browse(pickKind) {
   errText.value = ''
   try {
-    const d = await api.localPick({
-      kind: isLocalVector.value ? 'vector' : 'raster', multiple: false,
-    })
-    if (d.paths?.length) { form.path = d.paths[0]; await inspect() }
+    // 三维:OSGB 只能选目录;点云可选 LAS/LAZ 文件(多选)或整个目录
+    const pick = isLocal3D.value
+      ? ((form.d3Type === 'osgb' || pickKind === 'dir')
+        ? { kind: 'dir', multiple: false }
+        : { kind: 'pointcloud', multiple: true })
+      : { kind: isLocalVector.value ? 'vector' : 'raster', multiple: false }
+    const d = await api.localPick(pick)
+    if (d.paths?.length) { form.path = pick3dPath(d.paths); await inspect() }
   } catch (e) {
     errText.value = '打开文件对话框失败:' + (e?.message || e)
   }
+}
+
+/**
+ * 点云多选文件 → 共同父目录。系统文件对话框的多选必在同一目录,而后端
+ * source_path 只收单个文件或目录——多选时退成按目录处理,由后端递归收集。
+ */
+function pick3dPath(paths) {
+  if (!isLocal3D.value || paths.length <= 1) return paths[0]
+  return String(paths[0]).replace(/[\\/][^\\/]+$/, '')
+}
+
+/** 三维成果默认名:目录名 / 去扩展名的 LAS 文件名 */
+function autoName3d(p) {
+  const seg = String(p).replace(/[\\/]+$/, '').split(/[\\/]/).pop() || ''
+  return seg.replace(/\.(las|laz)$/i, '')
 }
 
 async function inspect() {
   const p = (form.path || '').trim()
   fileInfo.value = null
   vecInfo.value = null
+  osgbInfo.value = null
+  pcInfo.value = null
   errText.value = ''
   if (!p) return
   busy.value = true
   try {
+    if (isLocal3D.value) {
+      if (form.d3Type === 'osgb') {
+        // inspect_osgb:路径非法/目录无 .osgb 走 HTTP 400,由 catch 进 errText
+        const d = await api.localInspectOsgb(p)
+        osgbInfo.value = d
+        form.export = ['tile_3d']
+      } else {
+        // inspect_pointcloud 风格不同:「无 LAS」「pdal 不可用」等经 200 响应的
+        // error 字段返回(不抛异常),必须显式按 error 分支,不能当成功往下走
+        const d = await api.localInspectPointCloud(p)
+        pcInfo.value = d
+        if (d.error) { errText.value = d.error; return }
+        // 换文件后清空旧 CRS 输入:新文件自带 SRS 时必填块隐藏(pcCrsMissing=false),
+        // 残留值会被 buildPayload 静默带上,覆盖文件自带的坐标系
+        form.pcCrsEpsg = ''
+        form.pcCrsLocal = false
+        // 默认全选 default_on 的阶段(dsm/dem/tile_3d)
+        form.export = stages.value.filter((s) => s.default_on)
+          .map((s) => fmtNameOf(s.key))
+      }
+      if (!form.name) form.name = autoName3d(p)
+      return
+    }
     if (isLocalVector.value) {
       const d = await api.localInspectVector(p)
       vecInfo.value = d
@@ -207,6 +299,26 @@ async function inspect() {
   } finally {
     busy.value = false
   }
+}
+
+/** 点云检查通过(error 为空)才展示信息面板与后续表单项 */
+const pcInfoOk = computed(() => !!(pcInfo.value && !pcInfo.value.error))
+
+/** LAS 头无 CRS(srs === null)→ 必须由用户指定:EPSG 代码或按本地坐标 */
+const pcCrsMissing = computed(() => isLocal3D.value
+  && form.d3Type === 'pointcloud'
+  && pcInfoOk.value && pcInfo.value.srs === null)
+
+/** 允许填 4547 或 EPSG:4547,统一剥前缀,提交时再拼 EPSG: */
+function pcEpsgOf() {
+  return String(form.pcCrsEpsg || '').replace(/^\s*epsg[::]?\s*/i, '').trim()
+}
+
+/** 点云 bbox 摘要:pdal 给 {minx..maxz},两位小数够核对量级了 */
+function pcBboxText(b) {
+  if (!b) return ''
+  const f = (v) => Number(v).toFixed(2)
+  return `X ${f(b.minx)} ~ ${f(b.maxx)},Y ${f(b.miny)} ~ ${f(b.maxy)},Z ${f(b.minz)} ~ ${f(b.maxz)}`
 }
 
 // ---- 级别建议(仅下载)----
@@ -249,14 +361,53 @@ async function loadDemMaxLevel() {
     if (kept.length !== form.levels.length) form.levels = kept
   }
 }
+// ---- Esri 影像可用最高级别(仅 esri_imagery)----
+// (声明与 demMaxLevel 并列放在这里,供下方 reset 提前引用)
+// 实测 Esri World Imagery 各区域最高级别不同:城市(含拉萨/乌鲁木齐)到 19、
+// 喀什/漠河 18、西藏青海新疆无人区仅 17。超限时返回 200 + 占位图,拼出来是
+// 一整片灰色。这里探测后置灰超限级别。
+// null = 探测失败(网络/代理问题),此时不禁用任何级别 —— 与 DEM 的约定一致。
+const imgMaxLevel = ref(null)
+async function loadImgMaxLevel() {
+  imgMaxLevel.value = null
+  const b = drawStore.bbox
+  if (!b || !isDownload.value || !needsRegionProbe(form.provider)) return
+  try {
+    const d = await api.imageryMaxLevel({
+      west: b[0], south: b[1], east: b[2], north: b[3], provider: form.provider,
+    })
+    imgMaxLevel.value = d?.max_level ?? null
+  } catch (_) { imgMaxLevel.value = null }
+  // 已勾上的超限级别要摘掉:留着提交也会被后端剔除,不如当场如实反映
+  if (imgMaxLevel.value != null) {
+    const kept = form.levels.filter((z) => z <= imgMaxLevel.value)
+    if (kept.length !== form.levels.length) form.levels = kept
+  }
+}
+
 function levelUnavailable(z) {
-  return demMaxLevel.value != null && z > demMaxLevel.value
+  if (demMaxLevel.value != null && z > demMaxLevel.value) return true
+  return imgMaxLevel.value != null && z > imgMaxLevel.value
 }
 
 // ---- 各级瓦片数/大小预估 ----
 // 每级都要标出大小:级别每加一级瓦片数翻四倍,不显示的话用户很难预判
 // 勾到 18 级会下多久、占多大。只按选区算,与勾选无关,故一次取全级别。
 const est = ref(null)
+// 后端按 provider+格式推导出的、本次实际要下载的网格(见 loadEstimate 的 export 参数)
+const estGrids = ref([])
+/**
+ * 双网格提示:天地的图同时勾 tms+osm 时会下两套原生瓦片。
+ *
+ * 这样做是为了**两种格式都不用重投影**(各自拿原生网格);代价是下载量约 2×,
+ * 且两套瓦片数不同,不是简单翻倍。预估数已由后端按两套算好,这里只是让用户
+ * 知道"为什么比我以为的多"。
+ */
+const twoGridNote = computed(() => {
+  if (!isDownload.value || estGrids.value.length < 2) return ''
+  return '已按 tms 与 osm 各自的原生网格下载两套数据:两者都不会有重投影损失,'
+    + '代价是下载量约 2×(下面的瓦片数与体积已按两套计)。'
+})
 async function loadEstimate() {
   const b = drawStore.bbox
   if (!b || !isDownload.value || isBuildings.value) { est.value = null; return }
@@ -264,11 +415,18 @@ async function loadEstimate() {
     const d = await api.estimate({
       west: b[0], south: b[1], east: b[2], north: b[3],
       levels: levelList.value.join(','), provider: form.provider,
+      // 注记增量由后端按 ≤z18 逐级别算 —— 前端不再自己乘,
+      // 否则对 z19+ 会虚高一倍(天地图注记只到 z18)
+      annotate: form.annotate && canAnnotate(form.provider),
+      // 要下载哪些网格由后端按 provider+格式推导(天地图 tms+osm 同选时两套),
+      // 前端只如实传格式 —— 判定只该有一处,否则预估与实际下载量会对不上
+      export: form.export.join(','),
     })
     const m = {}
     for (const r of d.levels || []) m[r.z] = r
     est.value = m
-  } catch (_) { est.value = null }
+    estGrids.value = d.grids || []
+  } catch (_) { est.value = null; estGrids.value = [] }
 }
 function tilesOf(z) { return est.value?.[z]?.tiles ?? null }
 function sizeOf(z) {
@@ -299,6 +457,9 @@ const levelColumns = computed(() => (isDem.value
   : ['影像级别', '像素分辨率', '比例尺(72DPI)', '总大小']))
 function levelTitle(z) {
   if (levelUnavailable(z)) {
+    if (imgMaxLevel.value != null && z > imgMaxLevel.value) {
+      return `${z} 级:该范围 Esri 影像最高只到 ${imgMaxLevel.value} 级，此级别没有影像数据`
+    }
     return `${z} 级:该范围的地形数据源最高只到 ${demMaxLevel.value} 级，此级别没有高程数据`
   }
   const cols = levelColumns.value
@@ -323,8 +484,23 @@ const estTotal = computed(() => {
     tiles += r.tiles || 0
     bytes += r.bytes || 0
   }
-  const mul = form.annotate && !isDem.value ? 2 : 1
-  return { tiles: tiles * mul, bytes: bytes * mul }
+  // 注记最高 18 级:全部超限时置灰并说明,部分超限则提示影响哪些级别。
+  // 不让它变成"勾了没效果"。
+  const annotationTip = computed(() => {
+    if (!annotationUsable(form.levels)) {
+      return `所选级别均高于 ${ANNOTATION_MAX_Z} 级,该范围没有注记数据。`
+    }
+    const excess = annotationExcessLevels(form.levels)
+    if (excess.length) {
+      return `注记最高 ${ANNOTATION_MAX_Z} 级,${excess.map((z) => 'z' + z).join('、')} 不会有注记。`
+    }
+    return '同步下载天地图注记图层并烘焙进成果。'
+  })
+
+  // 注记增量已由后端算进 est(见 loadEstimate 的 annotate 参数),
+  // 这里不再乘 —— 前后端各算一遍必然漂移,而且前端的"整体 ×2"
+  // 对 z19+ 是错的(天地图注记只到 z18)。
+  return { tiles, bytes }
 })
 
 // ---- 级别勾选 ----
@@ -342,7 +518,16 @@ function toggleAll(on) { form.levels = on ? [...availableLevels.value] : [] }
 
 function resetFormState() {
   form.name = ''
-  form.provider = 'tianditu_img'
+  // 数据源默认跟随当前底图(仅当该底图可下载),否则回落天地图影像。
+  // 原实现写死 'tianditu_img' —— 每次打开对话框都执行,导致切了底图
+  // 再打开又被重置,"默认选择跟随底图"的诉求落空。
+  //
+  // 只需 DOWNLOAD_KEYS.has 一个条件:basemapStore.key 只可能取自
+  // BASEMAP_OPTIONS,故它必然是底图键,于是这个判定恰好等价于两个列表
+  // 的交集(google_road 这类只在底图的键自然为假)。
+  form.provider = DOWNLOAD_KEYS.has(basemapStore.key)
+    ? basemapStore.key
+    : 'tianditu_img'
   form.levels = [...IMG_LEVELS]
   form.export = []
   form.containers = {}
@@ -356,14 +541,22 @@ function resetFormState() {
   form.useRange = false
   form.vecContainer = 'gpkg'
   form.bldVecContainer = 'gpkg'
+  form.d3Type = 'osgb'
+  form.pcCrsEpsg = ''
+  form.pcCrsLocal = false
+  form.pcResolution = 0
   fileInfo.value = null
   vecInfo.value = null
+  osgbInfo.value = null
+  pcInfo.value = null
   busy.value = false
   errText.value = ''
   lastAutoName.value = ''
   suggest.value = null
   est.value = null
+  estGrids.value = []
   demMaxLevel.value = null
+  imgMaxLevel.value = null
   bldParams.value = null
   bldBbox.value = null
   submitting.value = false
@@ -379,6 +572,7 @@ async function initForCurrentSource() {
     await loadSuggest()
     await loadEstimate()
     await loadDemMaxLevel()
+    await loadImgMaxLevel()
     return
   }
 
@@ -407,23 +601,54 @@ watch(
 watch(() => form.provider, async () => {
   if (!isDownload.value) return
   applyDownloadDefaults()
-  if (['tianditu_img', 'tianditu_vec', 'tianditu_ter'].includes(form.provider)) {
+  // 仅当该数据源在底图列表里存在时才切底图。
+  // 原实现写死三个天地图键,切到 Google/Esri 时底图不动;
+  // 而 esri_terrain / 三维建筑 / 本地矢量面 不在底图列表,不该动底图。
+  if (isBasemapKey(form.provider) && basemapStore.key !== form.provider) {
     basemapStore.setKey(form.provider)
   }
   await loadSuggest()
   await loadEstimate()
   await loadDemMaxLevel()
+  await loadImgMaxLevel()
+})
+
+// 底图切换 → 同步数据源。仅当该底图在本对话框可下载时才改:
+// 如 Google 路线图只在底图列表里,切到它不动数据源。
+//
+// 这个 watch 会通过上面的 watch 回写底图,形成一次往返;因为设同值不触发
+// Vue watcher,且这里有同值守卫,一轮即收敛。守卫不可省 ——
+// basemapStore.setKey 会 apply()(移除并重建底图图层),不守卫会闪屏。
+watch(() => basemapStore.key, (k) => {
+  if (!isDownload.value) return
+  if (!DOWNLOAD_KEYS.has(k)) return      // 不在下载列表 → 不动
+  if (form.provider === k) return        // 已是它 → 不动
+  form.provider = k
+})
+
+// 三维来源内切换数据类型:路径与检查结果全部作废,导出勾选待重新检查
+watch(() => form.d3Type, () => {
+  if (!isLocal3D.value) return
+  form.path = ''
+  osgbInfo.value = null
+  pcInfo.value = null
+  form.export = []
+  form.pcCrsEpsg = ''
+  form.pcCrsLocal = false
+  form.name = ''
+  errText.value = ''
 })
 
 watch(() => drawStore.bbox, async () => {
   await loadSuggest()
   await loadEstimate()
   await loadDemMaxLevel()
+    await loadImgMaxLevel()
 }, { deep: true })
 
 /** 勾 OSM 自动带上 GeoTIFF:OSM 切片以最高级拼接图作源,后端会直接复用 */
 watch(() => form.export, (exp) => {
-  if (isDem.value || isBuildings.value) return
+  if (isDem.value || isBuildings.value || isLocal3D.value) return
   if (exp.includes('osm') && !exp.includes('geotiff')) {
     form.export = ['geotiff', ...exp]
     return
@@ -432,6 +657,29 @@ watch(() => form.export, (exp) => {
   if (!form.levels.length && levels.length) {
     form.levels = levels
   }
+})
+
+/**
+ * 勾选/取消「叠加路网注记」后必须重新估算。
+ *
+ * 注记增量由**后端**按 ≤z18 逐级算(见 loadEstimate 的 annotate 参数),
+ * 前端不自己乘 —— 但这也意味着换一次勾选就得重拉一次,否则数字会停在
+ * 上一次的结果上:默认勾上时打开、再取消,总数仍是含注记的 2 倍(实测)。
+ *
+ * 需求35-2 把注记改成所有影像源默认勾选后,"默认勾上 → 用户取消"成了常态。
+ */
+watch(() => form.annotate, () => {
+  if (isDownload.value) loadEstimate()
+})
+
+/** ③区(名称+格式)的显示条件:下载始终显示;本地来源要等检查通过 */
+const mainReady = computed(() => {
+  if (isDownload.value) return true
+  if (isLocalRaster.value) return !!fileInfo.value
+  if (isLocal3D.value) {
+    return form.d3Type === 'osgb' ? !!osgbInfo.value : pcInfoOk.value
+  }
+  return false
 })
 
 // ---- 提交 ----
@@ -464,6 +712,22 @@ function buildPayload() {
       clip: !!(form.clip && form.useRange && drawStore.bbox),
     }
   }
+  if (isLocal3D.value) {
+    // 三维:选区/级别/裁切都不适用,后端按 source_path 直接处理
+    return {
+      ...base,
+      provider: activeProvider.value,
+      source_path: form.path,
+      bbox: [],
+      levels: [],
+      geometry: null,
+      clip: false,
+      // 点云坐标系:'' = LAS 头自带;'local' = 按本地坐标;'EPSG:xxxx' = 指定
+      pc_crs: form.d3Type === 'osgb' ? ''
+        : (form.pcCrsLocal ? 'local' : (pcEpsgOf() ? `EPSG:${pcEpsgOf()}` : '')),
+      pc_resolution: Number(form.pcResolution) || 0,
+    }
+  }
   if (isBuildings.value) {
     return {
       ...base,
@@ -489,9 +753,46 @@ function buildPayload() {
     // 勾了裁切就送裁切几何:矩形没有自己的 geometry,clipGeometry 用 bbox 造矩形环
     geometry: (form.clip ? drawStore.clipGeometry : drawStore.geometry) || null,
     clip: !!(form.clip && drawStore.clipGeometry),
-    annotate: isDem.value ? false : form.annotate,
+    annotate: canAnnotate(form.provider) ? form.annotate : false,
     tms_source_strategy: form.tmsSourceStrategy,
   }
+}
+
+// ---- 三维外部工具自检 ----
+// 三维处理器是外部 exe / 独立 venv,没装好任务必败,不如提交前就拦下
+const TOOL_LABELS = {
+  tiles3d: '3dtiles 转换器(tools.tiles3d_exe)',
+  pdal: 'PDAL(tools.pdal_exe)',
+  py3dtiles: 'py3dtiles(tools.py3dtiles_python)',
+}
+/** 本次三维任务实际用到的外部工具 */
+function required3dTools() {
+  // OSGB 固定走 tiles3d;点云按勾选:DEM/DSM 要 PDAL,3D Tiles 要 py3dtiles
+  const tools = form.d3Type === 'osgb' ? ['tiles3d'] : []
+  if (form.d3Type !== 'osgb') {
+    if (form.export.some((f) => ['dsm', 'dem'].includes(f))) tools.push('pdal')
+    if (form.export.includes('tile_3d')) tools.push('py3dtiles')
+  }
+  return tools
+}
+/** 自检:所需工具任一不可用则中文报错并返回 false(阻止提交) */
+async function check3dTools() {
+  let diag
+  try {
+    diag = await api.toolsDiagnose()
+  } catch (e) {
+    MessagePlugin.error('三维处理器自检失败:' + (e?.message || e))
+    return false
+  }
+  for (const key of required3dTools()) {
+    const t = diag[key] || {}
+    if (t.configured && t.exists && t.runnable) continue
+    MessagePlugin.error(t.configured
+      ? `${TOOL_LABELS[key]}不可用:${t.error || '请检查 config.yaml 中的路径配置'}`
+      : `${TOOL_LABELS[key]}未配置:请在 config.yaml 的 tools 段填写路径并重启服务`)
+    return false
+  }
+  return true
 }
 
 async function submit() {
@@ -513,6 +814,28 @@ async function submit() {
 
   if (isLocalRaster.value && !fileInfo.value) {
     MessagePlugin.error('请先选择要处理的栅格文件'); return
+  }
+  if (isLocal3D.value) {
+    const ready = form.d3Type === 'osgb' ? !!osgbInfo.value : pcInfoOk.value
+    if (!ready) {
+      MessagePlugin.error(form.d3Type === 'osgb'
+        ? '请先选择 OSGB 目录' : '请先选择点云文件或目录')
+      return
+    }
+    if (pcCrsMissing.value && !form.pcCrsLocal) {
+      const epsg = pcEpsgOf()
+      if (!epsg) {
+        MessagePlugin.error('LAS 文件未携带坐标系信息,请填写 EPSG 代码或勾选「按本地坐标」')
+        return
+      }
+      // 后端 _PC_CRS_RE 只收 EPSG:数字,前端当场拦下省一轮请求
+      if (!/^\d+$/.test(epsg)) {
+        MessagePlugin.error('EPSG 代码应为纯数字,如 4547')
+        return
+      }
+    }
+    // 外部处理器缺失时任务必败,提交前拦下(diagnose 必须先于建任务)
+    if (!(await check3dTools())) return
   }
   if (isDownload.value && !drawStore.hasRange && form.provider !== 'local_vector') {
     MessagePlugin.warning('请先在地图上选择范围'); return
@@ -553,6 +876,7 @@ async function submit() {
 
 const title = computed(() => ({
   download: '下载并处理', local_raster: '处理本地栅格', local_vector: '转换本地矢量',
+  local_3d: '处理三维数据',
 }[kind.value] || '处理数据'))
 </script>
 
@@ -563,7 +887,13 @@ const title = computed(() => ({
       <!-- ① 数据:处理什么 -->
       <template v-if="isDownload">
         <t-form-item label="数据源">
-          <t-select v-model="form.provider" :options="providerOptions" />
+          <!-- 提示必须**换行**在下拉下方:t-form-item 的控件区是 flex 行,
+               直接放 span 会与下拉同排,把选择框挤窄(实测过)。 -->
+          <div class="stack">
+            <t-select v-model="form.provider" :options="providerOptions" />
+            <!-- 强耦合的缓解措施:切底图会连带改下载源,得让用户知道 -->
+            <div class="dim">（跟随图层底图，切换底图时同步）</div>
+          </div>
         </t-form-item>
         <t-form-item v-if="!drawStore.hasRange" label-width="0">
           <div class="warn">请先用地图右上的工具画一个范围</div>
@@ -571,15 +901,26 @@ const title = computed(() => ({
       </template>
 
       <template v-else>
-        <t-form-item label="源文件">
+        <t-form-item v-if="isLocal3D" label="数据类型">
+          <t-radio-group v-model="form.d3Type" :options="d3TypeOptions" />
+        </t-form-item>
+        <t-form-item :label="isLocal3D
+          ? (form.d3Type === 'osgb' ? 'OSGB 目录' : '点云文件 / 目录') : '源文件'">
           <div class="pick">
-            <t-input v-model="form.path" placeholder="选择或粘贴文件完整路径"
+            <t-input v-model="form.path"
+              :placeholder="isLocal3D && form.d3Type === 'osgb'
+                ? '选择或粘贴 OSGB 目录完整路径' : '选择或粘贴文件完整路径'"
               @blur="inspect" @keyup.enter="inspect" />
-            <t-button v-if="dialogOk" theme="default" :loading="busy"
-              @click="browse">浏览…</t-button>
+            <template v-if="dialogOk">
+              <t-button v-if="isLocal3D && form.d3Type === 'pointcloud'"
+                theme="default" :loading="busy" @click="browse('files')">选文件…</t-button>
+              <t-button theme="default" :loading="busy" @click="browse('dir')">
+                {{ isLocal3D ? '选目录…' : '浏览…' }}
+              </t-button>
+            </template>
           </div>
         </t-form-item>
-        <t-form-item v-if="fileInfo || vecInfo" label-width="0">
+        <t-form-item v-if="fileInfo || vecInfo || osgbInfo || pcInfoOk" label-width="0">
           <div class="info">
             <template v-if="fileInfo">
               <b>{{ isDem ? '高程数据' : '影像数据' }}</b>
@@ -597,6 +938,32 @@ const title = computed(() => ({
                 {{ vecInfo.crs }} · {{ fmtSize(vecInfo.bytes) }}
               </div>
             </template>
+            <template v-else-if="osgbInfo">
+              <b>OSGB 倾斜模型</b>
+              <div class="dim">{{ osgbInfo.path }}</div>
+              <div v-if="osgbInfo.warning" class="wnote">{{ osgbInfo.warning }}</div>
+            </template>
+            <template v-else-if="pcInfoOk">
+              <b>点云数据</b>
+              <div class="dim">
+                {{ pcInfo.files.length }} 个 LAS/LAZ 文件
+                <template v-if="pcInfo.count != null">
+                  · 首个文件 {{ fmtNum(pcInfo.count) }} 个点
+                </template>
+              </div>
+              <div v-if="pcInfo.bbox" class="dim">范围 {{ pcBboxText(pcInfo.bbox) }}</div>
+              <div class="dim">坐标系 {{ pcInfo.srs || '未知(LAS 文件头未携带)' }}</div>
+            </template>
+          </div>
+        </t-form-item>
+        <!-- LAS 头无 CRS:EPSG 或「按本地坐标」必选一个,否则后端无法配准 -->
+        <t-form-item v-if="pcCrsMissing" label="点云坐标系(必填)">
+          <div class="pc-crs">
+            <t-input v-model="form.pcCrsEpsg" placeholder="EPSG 代码,如 4547"
+              :disabled="form.pcCrsLocal" style="width: 170px" />
+            <t-checkbox v-model="form.pcCrsLocal">按本地坐标</t-checkbox>
+            <InfoTip content="LAS 文件头未携带坐标系信息。点云本身是投影坐标(如 CGCS2000 3 度带)时填对应 EPSG 代码;是局部工程坐标(自定义原点)时勾选「按本地坐标」,成果不做坐标配准。"
+              max-width="360px" />
           </div>
         </t-form-item>
       </template>
@@ -618,8 +985,8 @@ const title = computed(() => ({
         </t-form-item>
       </template>
 
-      <!-- ③ 栅格/下载:名称 + 级别 + 格式 -->
-      <template v-if="!isLocalVector && (isDownload ? true : !!fileInfo)">
+      <!-- ③ 栅格/下载/三维:名称 + 级别 + 格式 -->
+      <template v-if="!isLocalVector && mainReady">
         <t-form-item label="任务名称">
           <t-input v-model="form.name" placeholder="任务名称" />
         </t-form-item>
@@ -677,7 +1044,7 @@ const title = computed(() => ({
             <div v-if="estTotal" class="lv-total">
               已选 {{ form.levels.length }} 级，共 {{ fmtNum(estTotal.tiles) }} 张瓦片，
               约 {{ fmtSize(estTotal.bytes) }}
-              <span v-if="form.annotate && !isDem" class="dim">（含注记，瓦片数翻倍）</span>
+              <span v-if="form.annotate && canAnnotate(form.provider)" class="dim">（含注记）</span>
             </div>
             </div>
           </t-form-item>
@@ -686,7 +1053,16 @@ const title = computed(() => ({
           </t-form-item>
 
           <t-form-item label="导出格式">
-            <t-checkbox-group v-model="form.export" :options="exportOptions" />
+            <!-- OSGB 只有 3D Tiles 一种出路,固定勾选不给改;点云三选一以上 -->
+            <t-checkbox v-if="isLocal3D && form.d3Type === 'osgb'"
+              :model-value="true" disabled>3D Tiles</t-checkbox>
+            <t-checkbox-group v-else v-model="form.export" :options="exportOptions" />
+          </t-form-item>
+          <t-form-item v-if="tmsReprojectWarn" label-width="0">
+            <div class="wnote">{{ tmsReprojectWarn }}</div>
+          </t-form-item>
+          <t-form-item v-if="twoGridNote" label-width="0">
+            <div class="wnote">{{ twoGridNote }}</div>
           </t-form-item>
           <ContainerPicker :stages="stages" :selected="form.export"
             v-model="form.containers" />
@@ -703,9 +1079,16 @@ const title = computed(() => ({
           <!-- 高级选项默认折叠:核实过旧版 104 个表单项里大部分是不常改的 -->
           <t-collapse :default-value="[]" class="adv">
             <t-collapse-panel value="adv" header="高级选项">
-              <t-form-item label="输出坐标系">
+              <t-form-item v-if="!isLocal3D" label="输出坐标系">
                 <t-select v-model="form.crs" :options="crsOpts" filterable />
                 <InfoTip :content="crsHint" max-width="360px" />
+              </t-form-item>
+              <t-form-item v-if="isLocal3D && form.d3Type === 'pointcloud'"
+                label="采样分辨率(米)">
+                <t-input-number v-model="form.pcResolution" :min="0" :max="1000"
+                  :step="0.5" theme="column" style="width: 130px" />
+                <InfoTip content="0 = 按点云密度自动估算。DSM/DEM 栅格的像素大小:改大处理更快、改小成果更精细。"
+                  max-width="360px" />
               </t-form-item>
               <t-form-item v-if="isLocalRaster && drawStore.hasRange" label-width="0">
                 <t-checkbox v-model="form.useRange">只处理所画范围</t-checkbox>
@@ -713,10 +1096,10 @@ const title = computed(() => ({
                   max-width="340px" />
               </t-form-item>
               <t-form-item v-if="showTmsSourceStrategy"
-                label="TMS 断层策略">
+                label="瓦片断层策略">
                 <t-radio-group v-model="form.tmsSourceStrategy"
                   :options="tmsSourceStrategyOptions" />
-                <InfoTip content="连续高层兜底:只使用从最高层开始连续的原始层级,断层后的低层不参与。保留每个输入层级:每个输入 tif 保留自身层级,并向下补到下一个输入层级之上,如 18/17/16/13 会切成 18、17、14-16、1-13。"
+                <InfoTip content="TMS 与 OSM 共用这一项。连续高层兜底:只使用从最高层开始连续的原始层级,断层后的低层不参与。保留每个输入层级:每个输入 tif 保留自身层级,并向下补到下一个输入层级之上,如 18/17/16/13 会切成 18、17、14-16、1-13。"
                   max-width="420px" />
               </t-form-item>
               <t-form-item v-if="isDownload ? drawStore.clippable : form.useRange"
@@ -725,9 +1108,9 @@ const title = computed(() => ({
                 <InfoTip content="瓦片是固定网格,边界由级别决定、不会刚好落在选区上——级别越低超出越多。勾选后成果按选区裁切,超出部分透明或裁掉。"
                   max-width="360px" />
               </t-form-item>
-              <t-form-item v-if="isDownload && !isDem" label-width="0">
-                <t-checkbox v-model="form.annotate">叠加路网注记</t-checkbox>
-                <InfoTip content="同步下载注记图层并烘焙进成果,瓦片数翻倍。" max-width="320px" />
+              <t-form-item v-if="isDownload && canAnnotate(form.provider)" label-width="0">
+                <t-checkbox v-model="form.annotate" :disabled="!annotationUsable(form.levels)">叠加路网注记</t-checkbox>
+                <InfoTip :content="annotationTip" max-width="360px" />
               </t-form-item>
             </t-collapse-panel>
           </t-collapse>
@@ -754,7 +1137,12 @@ const title = computed(() => ({
   padding: 6px 8px; width: 100%; line-height: 1.7;
 }
 .dim { color: #64748b; font-size: 12px; word-break: break-all; }
+/* 控件 + 其下方说明文字的竖向堆叠。t-form-item 的控件区本身是横向 flex,
+   说明文字直接放进去会与控件同排、抢走宽度,故用一个列容器兜住。 */
+.stack { display: flex; flex-direction: column; gap: 4px; width: 100%; }
 .wtag { color: #d97706; font-size: 11px; margin-left: 6px; }
+.wnote { color: #d97706; font-size: 12px; line-height: 1.6; }
+.pc-crs { display: flex; align-items: center; gap: 10px; width: 100%; }
 .warn {
   background: #fffbeb; border: 1px solid #fde68a; border-radius: 4px;
   padding: 6px 8px; color: #92400e; font-size: 12px;

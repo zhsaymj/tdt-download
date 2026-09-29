@@ -1,0 +1,249 @@
+"""测试 worker 进程入口与控制循环。"""
+import unittest
+from multiprocessing import Queue
+from pathlib import Path
+import sys
+import tempfile
+import time
+from unittest.mock import patch, MagicMock
+
+# 添加项目根目录到 sys.path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from backend.core.messages import ControlMessage, EventMessage
+
+
+class _LoggerSnapshotMixin:
+    """快照并还原全局 logger,供进程内直调 worker_main 的测试类复用。
+
+    进程内直接调 worker_main 会把全局 logger 的 handler 换成指向无人消费队列
+    的转发 handler,不还原会让本进程后续所有日志静默丢失。install_forwarding
+    还会 setLevel(INFO),故级别一并还原。
+    """
+
+    def setUp(self):
+        from backend.core.logs import logger
+        self._saved_handlers = list(logger.handlers)
+        self._saved_level = logger.level
+
+    def tearDown(self):
+        from backend.core.logs import logger
+        logger.handlers[:] = self._saved_handlers
+        logger.setLevel(self._saved_level)
+
+
+class TestWorkerBasics(_LoggerSnapshotMixin, unittest.TestCase):
+    """测试 worker 基本启动与关闭。"""
+
+    def test_worker_can_import(self):
+        """worker 模块可以导入。"""
+        from backend.core import worker
+        self.assertIsNotNone(worker)
+
+    def test_worker_has_entry_point(self):
+        """worker 有 worker_main 入口函数。"""
+        from backend.core.worker import worker_main
+        self.assertTrue(callable(worker_main))
+
+    def test_worker_shutdown_on_empty_queue(self):
+        """worker 收到 shutdown 消息后退出循环。"""
+        from backend.core.worker import worker_main
+
+        control_q = Queue()
+        signal_q = Queue()
+        event_q = Queue()
+
+        # 发送 shutdown
+        control_q.put(ControlMessage.shutdown())
+
+        # 在主进程中直接调用（测试用，实际会在子进程）
+        worker_main(control_q, signal_q, event_q, worker_id="test-worker")
+
+        # worker 应该已退出，队列应该为空
+        self.assertTrue(control_q.empty())
+
+
+class TestWorkerTaskExecution(_LoggerSnapshotMixin, unittest.TestCase):
+    """测试 worker 任务执行逻辑。"""
+
+    def test_nonexistent_task_sends_log_and_finished(self):
+        """不存在的任务发送日志和 finished 事件。"""
+        from backend.core.worker import worker_main
+
+        control_q = Queue()
+        signal_q = Queue()
+        event_q = Queue()
+
+        # 发送不存在的任务
+        control_q.put(ControlMessage.run("nonexistent-task-id"))
+        control_q.put(ControlMessage.shutdown())
+
+        worker_main(control_q, signal_q, event_q, worker_id="test-worker")
+
+        # 应该收到至少一个事件
+        events = []
+        while not event_q.empty():
+            events.append(event_q.get())
+
+        # 应该有 log 和 finished 消息
+        kinds = [e["kind"] for e in events]
+        self.assertIn("log", kinds)
+        self.assertIn("finished", kinds)
+
+        # finished 消息应该包含 task_id
+        finished = [e for e in events if e["kind"] == "finished"][0]
+        self.assertEqual(finished["task_id"], "nonexistent-task-id")
+
+        # 任务不存在必须由 _resolve_runner 的分发守卫拦下(LookupError 分支),
+        # 而不是先跑起来再在 runner 内部空转。同时兜住"分发退化回栅格 runner"
+        # 的漂移:那样这里收不到 log,且 2D runner 会静默 return 再报 finished。
+        self.assertTrue(
+            any(e["kind"] == "log" and "任务不存在" in e["msg"] for e in events),
+            f"应由分发守卫报出任务不存在,实际事件:{events}",
+        )
+
+    @patch("backend.core.runner.run_task")
+    @patch("backend.core.worker.get_task")
+    def test_emit_forwards_to_event_queue(self, mock_get_task, mock_run_task):
+        """emit 闭包能正确转发进度到 event_queue。"""
+        from backend.core.worker import worker_main
+
+        # Mock 任务存在
+        mock_get_task.return_value = {"id": "test-task", "name": "测试"}
+
+        # Mock run_task 调用 emit。
+        # 参数个数必须与 worker 实际传给 runner 的一致:不匹配时 side_effect 抛
+        # TypeError,被 _run_task 的 except Exception 吞成「任务失败」事件——测试
+        # 照样绿,却根本没走到 emit 转发。故 **不设默认值**:worker 一旦退回传
+        # 2 个参数(task_id, emit),这里立刻 TypeError,被下面的 failed 事件断言
+        # 拦下。
+        async def fake_run(task_id, emit, should_stop):
+            emit({"type": "progress", "id": task_id, "downloaded": 10})
+
+        mock_run_task.side_effect = fake_run
+
+        control_q = Queue()
+        signal_q = Queue()
+        event_q = Queue()
+
+        control_q.put(ControlMessage.run("test-task"))
+        control_q.put(ControlMessage.shutdown())
+
+        worker_main(control_q, signal_q, event_q, worker_id="test-worker")
+
+        # 检查事件队列
+        events = []
+        while not event_q.empty():
+            events.append(event_q.get())
+
+        # 不应出现失败事件:签名漂移导致的 TypeError 会被 except Exception 吞成
+        # 失败,若不在此处拦截,下面的断言会因为「拿到了空的 event_msgs」而失败得
+        # 莫名其妙,甚至(改成 assertGreater 之类宽松断言时)静默通过。
+        failed = [e for e in events
+                  if e["kind"] == "event"
+                  and e["payload"].get("status") == "failed"]
+        self.assertEqual(failed, [], f"任务不应失败:{failed}")
+
+        # 应该有一个 event 消息包含我们的进度
+        event_msgs = [e for e in events if e["kind"] == "event"]
+        self.assertGreater(len(event_msgs), 0)
+
+        payload = event_msgs[0]["payload"]
+        self.assertEqual(payload["type"], "progress")
+        self.assertEqual(payload["id"], "test-task")
+        self.assertEqual(payload["downloaded"], 10)
+
+    @patch("backend.core.runner.run_task")
+    @patch("backend.core.worker.get_task")
+    def test_task_sends_finished_event(self, mock_get_task, mock_run_task):
+        """任务结束后发送 finished 事件。"""
+        from backend.core.worker import worker_main
+
+        mock_get_task.return_value = {"id": "test-task", "name": "测试"}
+
+        # 参数个数同 test_emit_forwards_to_event_queue:不设默认值,worker 退回
+        # 2 参调用时立刻 TypeError,由下面的 failed 事件断言拦下。
+        async def fake_run(task_id, emit, should_stop):
+            pass  # 空任务
+
+        mock_run_task.side_effect = fake_run
+
+        control_q = Queue()
+        signal_q = Queue()
+        event_q = Queue()
+
+        control_q.put(ControlMessage.run("test-task"))
+        control_q.put(ControlMessage.shutdown())
+
+        worker_main(control_q, signal_q, event_q, worker_id="test-worker")
+
+        # 检查事件队列
+        events = []
+        while not event_q.empty():
+            events.append(event_q.get())
+
+        # 不应出现失败事件(签名不匹配的 TypeError 会被吞成失败,静默通过)
+        failed = [e for e in events
+                  if e["kind"] == "event"
+                  and e["payload"].get("status") == "failed"]
+        self.assertEqual(failed, [], f"任务不应失败:{failed}")
+
+        # 应该有 finished 消息
+        finished_msgs = [e for e in events if e["kind"] == "finished"]
+        self.assertEqual(len(finished_msgs), 1)
+        self.assertEqual(finished_msgs[0]["task_id"], "test-task")
+
+
+class TestWorkerLogging(unittest.TestCase):
+    def test_worker_log_forwarded_to_event_queue(self):
+        """worker 进程内写的日志会出现在 event_queue 里。"""
+        import multiprocessing as mp
+        from backend.core.worker import worker_main
+
+        control_q = mp.Queue()
+        signal_q = mp.Queue()
+        event_q = mp.Queue()
+        control_q.put(ControlMessage.run("nonexistent-task"))
+        control_q.put(ControlMessage.shutdown())
+
+        proc = mp.Process(target=worker_main,
+                          args=(control_q, signal_q, event_q, "w0"))
+        proc.start()
+        proc.join(timeout=15)
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(timeout=2)
+            self.fail("worker 子进程未在 15s 内退出")
+
+        logs = []
+        while not event_q.empty():
+            m = event_q.get_nowait()
+            if m.get("kind") == "log":
+                logs.append(m)
+
+        # 精确匹配启动日志:不能用宽泛的 "worker" 子串 —— worker.py 异常分支
+        # 投的 traceback 里含路径 ...\backend\core\worker.py,会命中造成假阳性。
+        self.assertTrue(
+            any(m.get("level") == "INFO" and "已启动" in m["msg"] for m in logs),
+            f"应收到 worker 启动日志,实际:{logs}",
+        )
+        # 再校验一条业务日志:启动日志由 _setup_worker_env 直发,业务日志走
+        # _resolve_runner → get_task 分支(Task 5 起该分支抛 LookupError,消息
+        # 随之改为中文)。两者都断言,才能区分"转发没生效"与"消息没送达"。
+        self.assertTrue(
+            any("任务不存在" in m["msg"] for m in logs),
+            f"应收到任务不存在日志,实际:{logs}",
+        )
+        # worker_id 透传:多 worker 时据此区分日志来源。
+        self.assertTrue(
+            all(m.get("worker_id") == "w0" for m in logs if m.get("msg")),
+            f"所有日志都应带 worker_id=w0,实际:{logs}",
+        )
+
+        control_q.close()
+        signal_q.close()
+        event_q.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

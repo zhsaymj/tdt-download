@@ -21,14 +21,20 @@ import TaskDetail from './components/TaskDetail.vue'
 import TokenManager from './components/TokenManager.vue'
 import LogDrawer from './components/LogDrawer.vue'
 import AboutDialog from './components/AboutDialog.vue'
+import ServicePanel from './components/ServicePanel.vue'
+import { useServiceStore } from './stores/service'
 
 const tokenMgrVisible = ref(false)
 const logVisible = ref(false)
 const aboutVisible = ref(false)
 const dataVisible = ref(false)
 const taskVisible = ref(false)
+const serviceVisible = ref(false)
 
-// 处理面板:三种数据来源(下载/本地栅格/本地矢量)共用它,由 source 区分。
+// 顶栏「服务」角标要有值，首屏拉一次
+const serviceStore = useServiceStore()
+
+// 处理面板:四种数据来源(下载/本地栅格/本地矢量/本地三维)共用它,由 source 区分。
 // 统一一个面板而非各来源一套,是为了让"选格式"这件事只有一份实现——
 // 旧版格式定义散在 2 个文件、容器选择散在 3 个文件。
 const processVisible = ref(false)
@@ -48,9 +54,21 @@ function onConvertCog(path) {
   openProcess({ kind: 'local_raster', path, preferCog: true })
 }
 
-// 右侧两个面板互斥:它们停靠同一边,同时开只会互相盖住
-function openData() { taskVisible.value = false; dataVisible.value = true }
-function openTasks() { dataVisible.value = false; taskVisible.value = true }
+/**
+ * 右侧三个面板互斥:它们停靠同一边(width 都是 440px),同时开只会互相盖住。
+ *
+ * 打开其一就先关掉另外两个。集中在这里而不是各入口各写一遍——
+ * 服务面板加进来时就是因为入口写成了内联赋值,漏了互斥。
+ */
+function showRightPanel(which) {
+  dataVisible.value = which === 'data'
+  taskVisible.value = which === 'tasks'
+  serviceVisible.value = which === 'services'
+}
+
+const openData = () => showRightPanel('data')
+const openTasks = () => showRightPanel('tasks')
+const openServices = () => showRightPanel('services')
 
 function onTaskCreated() {
   openTasks()
@@ -66,10 +84,14 @@ const PANEL_R = 440          // 与 DataDialog / TaskDialog 的 width 一致
  */
 const padStyle = computed(() => ({
   '--pad-left': (processVisible.value ? PANEL_L : 0) + 'px',
-  '--pad-right': ((dataVisible.value || taskVisible.value) ? PANEL_R : 0) + 'px',
+  '--pad-right': ((dataVisible.value || taskVisible.value
+    || serviceVisible.value) ? PANEL_R : 0) + 'px',
 }))
 
-onMounted(() => registerProj4Defs())
+onMounted(() => {
+  registerProj4Defs()
+  serviceStore.fetchAll()
+})
 </script>
 
 <template>
@@ -78,8 +100,10 @@ onMounted(() => registerProj4Defs())
       @new-download="openProcess({ kind: 'download' })"
       @new-local="openProcess({ kind: 'local_raster' })"
       @new-vector="openProcess({ kind: 'local_vector' })"
+      @new-3d="openProcess({ kind: 'local_3d' })"
       @open-data="openData"
       @open-tasks="openTasks"
+      @open-services="openServices"
       @open-tokens="tokenMgrVisible = true"
       @open-logs="logVisible = true"
       @open-about="aboutVisible = true"
@@ -102,6 +126,9 @@ onMounted(() => registerProj4Defs())
       <DataDialog v-model:visible="dataVisible" @process="openProcess"
         @convert-cog="onConvertCog" />
       <TaskDialog v-model:visible="taskVisible" />
+      <!-- 服务面板与「数据」「任务」同侧同款（SidePanel）：都靠 absolute 相对
+           地图容器定位，高度只占地图区、不盖顶栏 -->
+      <ServicePanel v-model:visible="serviceVisible" />
     </main>
 
     <AppStatusBar @open-tasks="openTasks" />

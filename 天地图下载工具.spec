@@ -36,7 +36,6 @@ pyogrio_datas, pyogrio_binaries, pyogrio_hidden = collect_all("pyogrio")
 datas = list(rio_datas) + list(lerc_datas) + list(pyogrio_datas)
 datas += [
     (str(PROJECT / "frontendvue" / "dist"), "frontendvue/dist"),
-    (str(PROJECT / "frontend"), "frontend"),
     (str(PROJECT / "exmple-data" / "NaturalEarthII"), "exmple-data/NaturalEarthII"),
 ]
 

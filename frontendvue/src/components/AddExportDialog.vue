@@ -10,6 +10,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { useTaskStore } from '../stores/task'
+import { fmtNameOf, isModel3dProvider } from '../utils/provider'
 import { api } from '../api'
 import InfoTip from './InfoTip.vue'
 
@@ -43,10 +44,10 @@ const existing = computed(() => {
   return s.replace(/\+/g, ',').split(',').map((x) => x.trim()).filter(Boolean)
 })
 
-/** 阶段 key → 格式名(DEM 的整幅图阶段 key 是 dem,格式名是 geotiff) */
-function fmtNameOf(stageKey) {
-  return stageKey === 'dem' ? 'geotiff' : stageKey
-}
+// 三维任务的输入是本地源,没有瓦片缓存/重新下载的概念,提示语换一套说法
+const tipContent = computed(() => (isModel3dProvider(props.task?.provider)
+  ? '三维任务往原任务追加处理阶段,复用已解析的输入源与中间成果。已导出过的格式不能重复补充。'
+  : '复用该任务已有的瓦片缓存与合并成果,不重新下载。已导出过的格式不能重复补充;若要换容器格式(如把 GeoTIFF 换成 COG),请用「重新下载」建新任务——原成果已按旧格式写出,就地替换会让成果与说明文件对不上。'))
 
 const stages = computed(() => caps.value[props.task?.provider]?.stages || [])
 const options = computed(() => stages.value.map((s) => {
@@ -103,8 +104,7 @@ async function submit() {
     <div v-if="task" class="ae-body">
       <div class="ae-hint">
         为已完成的任务「{{ task.name }}」补充新格式。
-        <InfoTip content="复用该任务已有的瓦片缓存与合并成果,不重新下载。已导出过的格式不能重复补充;若要换容器格式(如把 GeoTIFF 换成 COG),请用「重新下载」建新任务——原成果已按旧格式写出,就地替换会让成果与说明文件对不上。"
-          max-width="380px" />
+        <InfoTip :content="tipContent" max-width="380px" />
       </div>
       <t-form label-align="top">
         <t-form-item label="新增格式">
