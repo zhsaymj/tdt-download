@@ -83,6 +83,48 @@ class TestLevelListHonoursProviderCap(unittest.TestCase):
         self.assertEqual(_levels("google_img", [0, 1]), [1])
 
 
+class TestLegacyZMinZMaxNotCappedAt18(unittest.TestCase):
+    """`TaskCreate.z_min/z_max` 曾写死 `le=18`。
+
+    这是"硬编码 18"的**第三处**:用旧式 z_min/z_max 表达高级别的客户端
+    会被 pydantic 直接 422 拒绝("Input should be less than or equal to 18"),
+    连"静默截断"都算不上。级别的实际取舍由 level_list 按数据源处理,
+    pydantic 层不该再有固定上限。
+    """
+
+    def _make(self, provider, z_min, z_max):
+        return TaskCreate(name="t", provider=provider,
+                          bbox=[116.38, 39.99, 116.39, 40.0],
+                          levels=[], z_min=z_min, z_max=z_max)
+
+    def test_google_accepts_z_max_21(self):
+        d = self._make("google_img", 1, 21)
+        self.assertEqual(d.level_list(), list(range(1, 22)))
+
+    def test_google_accepts_z_min_19(self):
+        d = self._make("google_img", 19, 21)
+        self.assertEqual(d.level_list(), [19, 20, 21])
+
+    def test_esri_accepts_z_max_19(self):
+        d = self._make("esri_imagery", 18, 19)
+        self.assertEqual(d.level_list(), [18, 19])
+
+    def test_tianditu_still_filtered_by_level_list(self):
+        """天地图的 18 上限改由 level_list 兜住(不再是 pydantic 拒绝)。"""
+        d = self._make("tianditu_img", 17, 21)
+        self.assertEqual(d.level_list(), [17, 18])
+
+    def test_dem_still_accepts_zero(self):
+        d = self._make("esri_terrain", 0, 16)
+        self.assertEqual(d.level_list(), list(range(0, 17)))
+
+    def test_negative_rejected(self):
+        """ge=0 仍应保留:负级别无意义。"""
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            self._make("google_img", -1, 5)
+
+
 class TestSingleSourceOfTruth(unittest.TestCase):
     """回归护栏:级别范围判定不得再出现第二处。"""
 

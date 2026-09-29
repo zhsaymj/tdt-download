@@ -157,8 +157,12 @@ class TaskCreate(BaseModel):
     bbox: list[float] = Field(..., description="[west, south, east, north] 经纬度")
     # 选中的级别列表(勾选模式)。为兼容旧客户端仍接受 z_min/z_max。
     levels: list[int] = Field(default_factory=list, description="选中的级别,如 [10,11,12]")
-    z_min: int = Field(default=0, ge=0, le=18)
-    z_max: int = Field(default=0, ge=0, le=18)
+    # 刻意不设 le=18:级别上限按数据源而异(Google 21 / Esri 影像 19 /
+    # 天地图 18 / DEM 16),由 core.formats.z_cap_of 单处判定、level_list
+    # 过滤。写死在这里会让用旧式 z_min/z_max 的客户端被 422 直接拒绝
+    # ("Input should be less than or equal to 18")。
+    z_min: int = Field(default=0, ge=0)
+    z_max: int = Field(default=0, ge=0)
     export: str = Field(default="geotiff", description="导出格式,逗号分隔:geotiff/tms/osm")
     geometry: Optional[dict] = Field(default=None, description="geojson 几何(矢量/多边形),WGS84")
     clip: bool = Field(default=False, description="是否裁剪 GeoTIFF 到 geometry 边界")
