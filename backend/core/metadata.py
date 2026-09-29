@@ -22,6 +22,31 @@ PROVIDER_CN = {
 }
 
 
+#: 网格 → 元数据里的可读描述
+_GRID_LABEL = {
+    "geodetic": "c (EPSG:4326)",
+    "mercator": "XYZ (EPSG:3857 Web Mercator)",
+}
+
+
+def _tile_grids_of(provider_key: str, export_formats) -> list[str]:
+    """该任务**实际下载**了哪些网格(单一判定处,见 core.formats)。"""
+    from .formats import download_grids_of
+    return download_grids_of(provider_key, export_formats or [])
+
+
+def _tile_grids_label(provider_key: str, export_formats, dem: bool) -> str:
+    """tile_matrix_set 字段的可读值。双网格时两套都写出来。
+
+    DEM 保留原来的固定值:DEM 的下载网格语义与影像不同(本地 DEM 不在
+    PROVIDER_GRIDS 里,按源推断会得到 geodetic,与既有元数据不符)。
+    """
+    if dem:
+        return _GRID_LABEL["mercator"]
+    grids = _tile_grids_of(provider_key, export_formats)
+    return " + ".join(_GRID_LABEL.get(g, g) for g in grids)
+
+
 def write_metadata(
     out_dir: Path,
     *,
@@ -62,7 +87,9 @@ def write_metadata(
         "name": name,
         "provider": provider_key,
         "provider_name": PROVIDER_CN.get(provider_key, provider_key),
-        "tile_matrix_set": "XYZ (EPSG:3857 Web Mercator)" if dem else "c (EPSG:4326)",
+        "tile_matrix_set": _tile_grids_label(provider_key, export_formats, dem),
+        # 实际下载的网格列表(天地图 tms+osm 同选时是两套)
+        "tile_grids": _tile_grids_of(provider_key, export_formats),
         "data_type": "elevation_dem" if dem else "image",
         # DEM 成果为 Esri Terrain3D LERC 解码后的真实海拔(米,F32)
         "dem_encoding": "Esri Terrain3D LERC (float32 meters)" if dem else None,

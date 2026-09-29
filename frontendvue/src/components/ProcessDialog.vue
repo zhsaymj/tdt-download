@@ -394,6 +394,20 @@ function levelUnavailable(z) {
 // 每级都要标出大小:级别每加一级瓦片数翻四倍,不显示的话用户很难预判
 // 勾到 18 级会下多久、占多大。只按选区算,与勾选无关,故一次取全级别。
 const est = ref(null)
+// 后端按 provider+格式推导出的、本次实际要下载的网格(见 loadEstimate 的 export 参数)
+const estGrids = ref([])
+/**
+ * 双网格提示:天地的图同时勾 tms+osm 时会下两套原生瓦片。
+ *
+ * 这样做是为了**两种格式都不用重投影**(各自拿原生网格);代价是下载量约 2×,
+ * 且两套瓦片数不同,不是简单翻倍。预估数已由后端按两套算好,这里只是让用户
+ * 知道"为什么比我以为的多"。
+ */
+const twoGridNote = computed(() => {
+  if (!isDownload.value || estGrids.value.length < 2) return ''
+  return '已按 tms 与 osm 各自的原生网格下载两套数据:两者都不会有重投影损失,'
+    + '代价是下载量约 2×(下面的瓦片数与体积已按两套计)。'
+})
 async function loadEstimate() {
   const b = drawStore.bbox
   if (!b || !isDownload.value || isBuildings.value) { est.value = null; return }
@@ -404,11 +418,15 @@ async function loadEstimate() {
       // 注记增量由后端按 ≤z18 逐级别算 —— 前端不再自己乘,
       // 否则对 z19+ 会虚高一倍(天地图注记只到 z18)
       annotate: form.annotate && canAnnotate(form.provider),
+      // 要下载哪些网格由后端按 provider+格式推导(天地图 tms+osm 同选时两套),
+      // 前端只如实传格式 —— 判定只该有一处,否则预估与实际下载量会对不上
+      export: form.export.join(','),
     })
     const m = {}
     for (const r of d.levels || []) m[r.z] = r
     est.value = m
-  } catch (_) { est.value = null }
+    estGrids.value = d.grids || []
+  } catch (_) { est.value = null; estGrids.value = [] }
 }
 function tilesOf(z) { return est.value?.[z]?.tiles ?? null }
 function sizeOf(z) {
@@ -536,6 +554,7 @@ function resetFormState() {
   lastAutoName.value = ''
   suggest.value = null
   est.value = null
+  estGrids.value = []
   demMaxLevel.value = null
   imgMaxLevel.value = null
   bldParams.value = null
@@ -1041,6 +1060,9 @@ const title = computed(() => ({
           </t-form-item>
           <t-form-item v-if="tmsReprojectWarn" label-width="0">
             <div class="wnote">{{ tmsReprojectWarn }}</div>
+          </t-form-item>
+          <t-form-item v-if="twoGridNote" label-width="0">
+            <div class="wnote">{{ twoGridNote }}</div>
           </t-form-item>
           <ContainerPicker :stages="stages" :selected="form.export"
             v-model="form.containers" />

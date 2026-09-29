@@ -31,8 +31,10 @@ export const api = {
   capabilities: () => req('/api/capabilities'),
   getLogs: (limit = 300) => req(`/api/logs?limit=${limit}`),
   listTasks: () => req('/api/tasks'),
-  estimate: ({ west, south, east, north, levels, provider, annotate }) =>
-    req(`/api/tasks/estimate?west=${west}&south=${south}&east=${east}&north=${north}&levels=${levels}&provider=${provider || 'tianditu_img'}${annotate ? '&annotate=true' : ''}`),
+  // export 决定**要下载哪些网格**:天地图同时勾 tms+osm 时会下两套原生瓦片,
+  // 后端按两套计数(见 core.formats.download_grids_of),不传就只算源自己的默认网格。
+  estimate: ({ west, south, east, north, levels, provider, annotate, export: exp }) =>
+    req(`/api/tasks/estimate?west=${west}&south=${south}&east=${east}&north=${north}&levels=${levels}&provider=${provider || 'tianditu_img'}${annotate ? '&annotate=true' : ''}${exp ? `&export=${encodeURIComponent(exp)}` : ''}`),
   // ---- 本地文件作输入源(仅本机可用:后端会校验请求来自 127.0.0.1)----
   localDialogAvailable: () => req('/api/local/dialog_available'),
   // 弹系统文件对话框选文件,返回真实路径(浏览器拿不到路径,故由后端弹框)

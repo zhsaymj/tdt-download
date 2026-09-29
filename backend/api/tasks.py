@@ -31,14 +31,31 @@ from ..providers.google import build_google_provider, is_google_provider
 from ..providers.terrain import DEM_LAYERS, is_dem_provider
 
 
-def _estimate_total(bbox, levels: list[int], provider: str) -> int:
-    """按数据源的**网格**选择瓦片计数方式。
+def _grids_for_estimate(provider: str, formats) -> list[str]:
+    """该任务实际要下载哪些网格(与下载阶段同一个判定,见 core.formats)。"""
+    from ..core.formats import download_grids_of
+    if isinstance(formats, str):
+        formats = parse_export(formats)
+    return download_grids_of(provider, formats or [])
 
-    墨卡托(Google/Esri 影像、Esri DEM)用 XYZ 计数,天地图用 4326。
-    刻意不在这里做任何上限检查:用户明确要求不设单任务瓦片数上限
-    (设计 §9 Q1),规模由调用方如实呈现、由用户判断。
+
+def _estimate_total(bbox, levels: list[int], provider: str, formats=()) -> int:
+    """按**实际要下载的网格**累计瓦片数。
+
+    天地图同时勾 tms+osm 时会下两套原生瓦片,而两套的计数不同(geodetic 第 z 级
+    是 2^z×2^(z-1)、mercator 是 2^z×2^z)—— **不是翻倍**,得各算一遍再相加。
+    少算一半会让用户以为实际下载量出了 bug。
+
+    刻意不在这里做任何上限检查:用户明确要求不设单任务瓦片数上限(设计 §9 Q1),
+    规模由调用方如实呈现、由用户判断。
     """
-    if grid_of(provider) == GEO_MERCATOR:
+    return sum(_estimate_grid_total(bbox, levels, provider, g)
+               for g in _grids_for_estimate(provider, formats))
+
+
+def _estimate_grid_total(bbox, levels: list[int], provider: str, grid: str) -> int:
+    """单个网格的瓦片数。墨卡托(Google/Esri/DEM)用 XYZ 计数,geodetic 用 4326。"""
+    if grid == GEO_MERCATOR:
         return estimate_mercator_tiles(bbox, levels)
     return estimate_levels(bbox, levels)
 
@@ -67,13 +84,38 @@ _DEM_AVG_BYTES = 60 * 1024
 _MERC_IMG_AVG_BYTES = 18 * 1024
 
 
-def _estimate_detail(bbox, levels: list[int], provider: str) -> dict:
-    """预估明细。墨卡托源逐层按 XYZ 网格计数;天地图走 4326 明细。
+def _estimate_detail(bbox, levels: list[int], provider: str, formats=()) -> dict:
+    """预估明细,按实际要下载的网格累计(见 _estimate_total)。
 
     ⚠️ 取消瓦片数硬上限后(设计 §9 Q1),**这是用户提交前唯一能看到规模的
     途径** —— 3 度选区 z21 是 5.3 亿张瓦片、约 9.6 TB。如实返回,不拦截。
     """
-    if grid_of(provider) != GEO_MERCATOR:
+    grids = _grids_for_estimate(provider, formats)
+    if len(grids) == 1:
+        # 单网格:返回值形状与改动前**完全一致**(不塞额外键 —— 有测试做严格相等)
+        return _estimate_grid_detail(bbox, levels, provider, grids[0])
+
+    # 双网格:两套各算一遍,逐级把瓦片数与字节数**相加**(两套计数不同,不能翻倍)。
+    # ⚠️ cols/rows/width/height 是几何量,**不合并** —— 取主网格(第一项,即源自己
+    # 的网格)的值,界面上"总尺寸"按它显示;两套网格的几何尺寸本就不同,相加无意义。
+    parts = [_estimate_grid_detail(bbox, levels, provider, g) for g in grids]
+    per = []
+    for i, row in enumerate(parts[0]["levels"]):
+        merged = dict(row)
+        merged["tiles"] = sum(p["levels"][i]["tiles"] for p in parts)
+        merged["bytes"] = sum(p["levels"][i]["bytes"] for p in parts)
+        per.append(merged)
+    return {
+        "levels": per,
+        "total_tiles": sum(p["total_tiles"] for p in parts),
+        "total_bytes": sum(p["total_bytes"] for p in parts),
+    }
+
+
+def _estimate_grid_detail(bbox, levels: list[int], provider: str,
+                          grid: str) -> dict:
+    """单个网格的预估明细。"""
+    if grid != GEO_MERCATOR:
         return estimate_levels_detail(bbox, levels, provider)
     avg = _DEM_AVG_BYTES if is_dem_provider(provider) else _MERC_IMG_AVG_BYTES
     w, s, e, n = bbox
@@ -330,7 +372,7 @@ async def api_list_tasks():
 async def api_estimate(west: float, south: float, east: float, north: float,
                        levels: str | None = None, provider: str = "tianditu_img",
                        z_min: int | None = None, z_max: int | None = None,
-                       annotate: bool = False):
+                       annotate: bool = False, export: str | None = None):
     """提交前预估:返回每层瓦片数与估算大小及合计。
 
     levels 为逗号分隔级别,兼容旧的 z_min/z_max。total 字段保留向后兼容。
@@ -339,15 +381,23 @@ async def api_estimate(west: float, south: float, east: float, north: float,
     与 api_create_task 的算法**必须一致** —— 此前本接口不接受 annotate,
     增量由前端整体 ×2 补,导致对话框预估与建成后的任务数对不上
     (z19+ 的注记增量为 0,整体 ×2 会虚高一倍)。
+
+    export 为逗号分隔格式,决定**要下载哪些网格**。天地图同时勾 tms+osm 时会下
+    两套原生瓦片(见 core.formats.download_grids_of),预估要按两套算 ——
+    否则用户看到实际下载量是预估的两倍会以为出 bug。返回里的 grids 字段供前端
+    显示"含双网格"。不传时与改动前一致(只算源自己的默认网格)。
     """
     z_cap = _z_cap_for(provider)
     lv = _parse_levels(levels, z_min, z_max, z_cap,
                        z_floor=_z_floor_for(provider))
-    detail = _estimate_detail((west, south, east, north), lv, provider)
+    detail = _estimate_detail((west, south, east, north), lv, provider, export)
     if annotate and not is_dem_provider(provider):
         _add_annotation_to_detail(detail, lv)
-    # total 保留:旧前端只读 total
-    return {"total": detail["total_tiles"], **detail}
+    # total 保留:旧前端只读 total。
+    # grids 是给界面用的(显示"含双网格,瓦片数已按两套计"),放在接口这一层而不是
+    # _estimate_detail 里 —— 后者有测试做严格相等,不能凭添键。
+    return {"total": detail["total_tiles"],
+            "grids": _grids_for_estimate(provider, export), **detail}
 
 
 @router.get("/suggest_levels")
@@ -840,7 +890,8 @@ async def api_create_task(data: TaskCreate):
             data.levels = kept
             logger.info("任务[%s] 剔除超出该区域能力的级别 %s(区域最高 %s)",
                         data.name, dropped_levels, probed)
-    detail = _estimate_detail((west, south, east, north), levels, data.provider)
+    detail = _estimate_detail((west, south, east, north), levels, data.provider,
+                              data.export)
     total = detail["total_tiles"]
     if total == 0:
         raise HTTPException(400, "所选范围在该级别下没有瓦片,请检查范围或级别")
@@ -1075,14 +1126,16 @@ async def api_update_task(task_id: str, data: TaskCreate):
         (west, south, east, north), levels, data.provider)
     if level_note:
         logger.info("任务[%s] %s", task["name"], level_note)
-    total = _estimate_total((west, south, east, north), levels, data.provider)
+    total = _estimate_total((west, south, east, north), levels, data.provider,
+                            data.export)
     if total == 0:
         raise HTTPException(400, "所选范围在该级别下没有瓦片,请检查范围或级别")
     if data.annotate and not is_dem_provider(data.provider):
         total *= 2
 
     # 预估原始瓦片下载量(仅下载体积,非成果大小)
-    est = _estimate_detail((west, south, east, north), levels, data.provider)
+    est = _estimate_detail((west, south, east, north), levels, data.provider,
+                           data.export)
     est_bytes = est.get("total_bytes", 0)
     if data.annotate and not is_dem_provider(data.provider):
         est_bytes *= 2
