@@ -117,3 +117,27 @@ test('预览页:全零占位 bbox 视为无效,三维任务改用 zoomTo 瓦片�
   assert.ok(previewSource.includes("viewer.zoomTo(tilesets.get('buildings'))"),
     '缺少 zoomTo 瓦片集定位')
 })
+
+test('★ 任务卡片:Esri 影像不得被判为地形(字符串前缀匹配误伤)', () => {
+  // 原实现: String(t.provider).startsWith('esri') || includes('terrain')
+  // 写上它时 esri_terrain 是唯一的 esri 源,前缀匹配尚可;
+  // 新增 esri_imagery 后 'esri_imagery'.startsWith('esri') 为真,
+  // 影像任务被标成「地形」并配琥珀色(实测截图)。
+  //
+  // 这与本文件既有注释的原则一致:"集中判定复用 provider.js,
+  // 不在组件里再做字符串匹配" —— 也正 provider.js 文件头警告过的同类坑。
+  // 先剥掉注释(说明性文字里出现这些字样是正常的),再**只看 isDem 函数体**。
+  // 不能对全文断言 includes('terrain'):文件里另有一处判**导出格式**的
+  // `e.includes('terrain')`(e 是 "geotiff,tms,terrain" 这类格式串),
+  // 那是另一个领域、且是合法的 —— 全文断言会误伤它(实测踩到)。
+  const code = taskQueueSource.replace(/\/\/[^\n]*/g, '')
+  const i = code.indexOf('function isDem')
+  assert.notEqual(i, -1, '未找到 isDem 函数')
+  const body = code.slice(i, i + 200)
+  assert.ok(!body.includes("startsWith('esri')"),
+    "isDem 里仍有 startsWith('esri') —— esri_imagery 会被误判为地形")
+  assert.ok(!body.includes("includes('terrain')"),
+    "isDem 里仍有 includes('terrain') 的 provider 判定")
+  assert.ok(body.includes('isDemProvider'),
+    'isDem 应复用 utils/provider 的 isDemProvider')
+})

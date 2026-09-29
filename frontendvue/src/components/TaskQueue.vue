@@ -5,7 +5,7 @@ import { useTaskStore, STATUS_TEXT } from '../stores/task'
 import { useOverlayStore } from '../stores/overlay'
 import { mapController } from '../composables/mapController'
 import { fmtEta, fmtSize } from '../utils/format'
-import { isBuildingProvider, isModel3dProvider, PREVIEWABLE_STAGE_KEYS } from '../utils/provider'
+import { isBuildingProvider, isDemProvider, isModel3dProvider, PREVIEWABLE_STAGE_KEYS } from '../utils/provider'
 import RedownloadDialog from './RedownloadDialog.vue'
 import AddExportDialog from './AddExportDialog.vue'
 
@@ -93,10 +93,11 @@ async function onPurgeRetryStage(t, s) {
 // 任务类型:三维建筑 / 三维数据(OSGB/点云) / 地形(DEM) / 影像,用于卡片上明显区分
 function isBuildings(t) { return isBuildingProvider(t.provider) }
 function isModel3d(t) { return isModel3dProvider(t.provider) }
-function isDem(t) {
-  if (isBuildings(t) || isModel3d(t)) return false
-  return String(t.provider || '').startsWith('esri') || String(t.provider || '').includes('terrain')
-}
+// 复用 provider.js 的精确名单判定,不在这里做字符串匹配。
+// 原实现用 String(t.provider).startsWith('esri') 判 DEM —— 写上它时
+// esri_terrain 是唯一的 esri 源尚可;新增 esri_imagery 后
+// 'esri_imagery'.startsWith('esri') 为真,影像任务被标成「地形」。
+function isDem(t) { return isDemProvider(t.provider) }
 function taskKind(t) {
   return isBuildings(t) ? '三维' : (isModel3d(t) ? '三维数据' : (isDem(t) ? '地形' : '影像'))
 }

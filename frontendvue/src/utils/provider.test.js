@@ -137,3 +137,15 @@ test('仅底图的三个源在墨卡托列表里', () => {
     assert.ok(MERCATOR_IMAGE_PROVIDERS.includes(k), k)
   }
 })
+
+test('★ isDemProvider 只认精确名单,不吃 esri 前缀', () => {
+  // 曾经的坑:组件里用 String(provider).startsWith('esri') 判 DEM ——
+  // 写上它时 esri_terrain 是唯一的 esri 源;新增 esri_imagery 后,
+  // 'esri_imagery'.startsWith('esri') 为真,影像任务被标成「地形」。
+  assert.equal(isDemProvider('esri_terrain'), true)
+  assert.equal(isDemProvider('esri_imagery'), false, 'Esri 影像是影像,不是地形')
+  assert.equal(isDemProvider('aws_terrain'), false, '存量旧 key 不在名单里')
+  assert.equal(isDemProvider('google_terrain'), false, 'Google 地形是底图图层,不是 DEM')
+  assert.equal(isDemProvider(''), false)
+  assert.equal(isDemProvider(undefined), false)
+})
