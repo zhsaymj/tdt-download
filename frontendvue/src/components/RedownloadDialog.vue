@@ -7,7 +7,7 @@ import { fmtSize } from '../utils/format'
 import {
   formatPixelResolution, formatPixelSize, formatSampleSpacing, formatScale72Dpi,
 } from '../utils/taskDefaults'
-import { isBuildingProvider } from '../utils/provider'
+import { canAnnotate, isBuildingProvider } from '../utils/provider'
 import { api } from '../api'
 
 const props = defineProps({
@@ -170,6 +170,10 @@ async function refreshEstimate() {
     const d = await api.estimate({
       west: b[0], south: b[1], east: b[2], north: b[3],
       levels: ALL_LEVELS.value.join(','), provider: form.provider,
+      // 注记增量由后端按 ≤z18 逐级算 —— 与 ProcessDialog 同一口径。
+      // 原实现不传它、改在 selectedSummary 里整体 ×2,后果是每级明细列
+      // (未含注记)与总计(2 倍)对不上,且 z19+ 会虚高一倍。
+      annotate: form.annotate && canAnnotate(form.provider),
     })
     const map = {}
     for (const it of (d.levels || [])) {
@@ -184,7 +188,9 @@ const selectedSummary = computed(() => {
     const it = perLevel.value[z]
     if (it) { tiles += it.tiles; bytes += it.bytes }
   }
-  if (form.annotate) { tiles *= 2; bytes *= 2 }
+  // 注记增量已由后端算进 perLevel(见 refreshEstimate 的 annotate 参数),
+  // 这里不再乘 —— 前后端各算一遍必然漂移,而且整体 ×2 对 z19+ 是错的
+  // (天地图注记只到 18 级)。
   return { tiles, bytes }
 })
 function levelSize(z) {
@@ -268,6 +274,12 @@ watch(() => props.visible, async (v) => {
 })
 
 watch(() => form.provider, () => {
+  if (props.visible && !isBuildings.value) refreshEstimate()
+})
+
+// 勾选/取消「叠加路网注记」要重新估算 —— 注记增量由后端算(见 refreshEstimate),
+// 不重算的话数字会停在上一次的结果上。
+watch(() => form.annotate, () => {
   if (props.visible && !isBuildings.value) refreshEstimate()
 })
 

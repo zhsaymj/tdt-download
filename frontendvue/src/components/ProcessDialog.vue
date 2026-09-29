@@ -618,6 +618,19 @@ watch(() => form.export, (exp) => {
   }
 })
 
+/**
+ * 勾选/取消「叠加路网注记」后必须重新估算。
+ *
+ * 注记增量由**后端**按 ≤z18 逐级算(见 loadEstimate 的 annotate 参数),
+ * 前端不自己乘 —— 但这也意味着换一次勾选就得重拉一次,否则数字会停在
+ * 上一次的结果上:默认勾上时打开、再取消,总数仍是含注记的 2 倍(实测)。
+ *
+ * 需求35-2 把注记改成所有影像源默认勾选后,"默认勾上 → 用户取消"成了常态。
+ */
+watch(() => form.annotate, () => {
+  if (isDownload.value) loadEstimate()
+})
+
 /** ③区(名称+格式)的显示条件:下载始终显示;本地来源要等检查通过 */
 const mainReady = computed(() => {
   if (isDownload.value) return true
