@@ -136,6 +136,55 @@ class ScanDirTest(unittest.TestCase):
             self.assertEqual(Path(got[0].root).name, "tms")
             self.assertEqual((got[0].minzoom, got[0].maxzoom), (2, 3))
 
+    def test_detects_tms_under_task_dir(self):
+        """★ 扫 output/ 根目录时,任务目录下的 tms/{z}/{x}/{y}.png 必须认出来。
+
+        这是本工具**自己的导出布局**,也是"未注册的成果"列表的主要来源:
+        扫描根是 output/,于是瓦片文件落在
+        `output/<任务名>/tms/<z>/<x>/<y>.png` —— 比 MAX_DEPTH 注释里假设的
+        "成果目录不超过 3 层(output/<任务名>/<成果类型>/<文件>)"深一层。
+
+        实测(2026-09-29):MAX_DEPTH=3 时 output/ 下 6 个候选里影像 **0 个**,
+        10 个已下载的影像成果全部漏掉;放到 4 就是 10 个。用户报的正是这个
+        ——"下载的影像数据是否已经添加到未注册的成果列表"。
+        """
+        with TemporaryDirectory() as d:
+            p = Path(d)
+            task = p / "Google卫星影像_20260101_120000"
+            for x in (3456, 3457):
+                _touch(task / "tms" / "12" / str(x) / "789.png")
+            got = scan_dir(p)
+            self.assertEqual(len(got), 1, f"未识别出影像成果,实际:{got}")
+            self.assertEqual(got[0].kind, "imagery")
+            self.assertEqual(Path(got[0].root), (task / "tms").resolve())
+            self.assertEqual((got[0].minzoom, got[0].maxzoom), (12, 12))
+
+    def test_detects_col_row_layout_under_task_dir(self):
+        """扁平命名 {z}/{col}_{row}.png 在任务目录下同样要认出来(回归护栏)。
+
+        它在第 3 层,MAX_DEPTH=3 时就已能识别 —— 这条锁住加深度后别把它弄坏。
+        """
+        with TemporaryDirectory() as d:
+            p = Path(d)
+            task = p / "天地图影像_20260101"
+            _touch(task / "tms" / "12" / "3456_789.png")
+            got = scan_dir(p)
+            self.assertEqual(len(got), 1, f"未识别出影像成果,实际:{got}")
+            self.assertEqual(got[0].kind, "imagery")
+            self.assertEqual(Path(got[0].root), (task / "tms").resolve())
+
+    def test_task_dir_tms_and_vector_both_found(self):
+        """一个任务目录同时有 tms 与 geojson 时,两个成果都要列出(不互相遮蔽)。"""
+        with TemporaryDirectory() as d:
+            p = Path(d)
+            task = p / "影像任务_20260101"
+            _touch(task / "tms" / "12" / "3456" / "789.png")
+            _touch(task / "范围.geojson",
+                   b'{"type":"FeatureCollection","features":[]}')
+            got = scan_dir(p)
+            self.assertEqual({c.kind for c in got}, {"imagery", "vector"},
+                             f"实际:{[(c.kind, c.root) for c in got]}")
+
 
 if __name__ == "__main__":
     unittest.main()
