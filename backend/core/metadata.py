@@ -47,6 +47,38 @@ def _tile_grids_label(provider_key: str, export_formats, dem: bool) -> str:
     return " + ".join(_GRID_LABEL.get(g, g) for g in grids)
 
 
+def per_level_ranges(provider_key: str, export_formats, levels, bbox,
+                     dem: bool = False) -> list[dict]:
+    """逐级列出瓦片行列区间与数量,便于核对覆盖范围。
+
+    **按实际下载的网格各出一段**,每段带 `grid` 字段 —— 天地图 tms+osm 同选时是
+    两套(行列号语义不同,不能混在一行里描述);只勾 osm 时是 mercator,不能再用
+    geodetic 的行列号去描述 mercator 的成果(设计 §4:任一处都不得按网格 A 的
+    行列号描述网格 B)。
+
+    DEM 保留原来的固定墨卡托口径(本地 DEM 不在 PROVIDER_GRIDS 里,按源推断会得到
+    geodetic,与既有元数据不符)。
+    """
+    if dem:
+        plan = [("mercator", _mercator_range)]
+    else:
+        plan = [(g, _mercator_range if g == "mercator" else range_for_bbox)
+                for g in _tile_grids_of(provider_key, export_formats)]
+    west, south, east, north = bbox
+    out = []
+    for grid, range_fn in plan:
+        for z in levels:
+            tr = range_fn(west, south, east, north, z)
+            out.append({
+                "grid": grid,
+                "level": z,
+                "col_min": tr.col_min, "col_max": tr.col_max,
+                "row_min": tr.row_min, "row_max": tr.row_max,
+                "tile_count": tr.count,
+            })
+    return out
+
+
 def write_metadata(
     out_dir: Path,
     *,
@@ -69,18 +101,8 @@ def write_metadata(
 ) -> Path:
     """写 metadata.json,返回文件路径。"""
     west, south, east, north = bbox
-    # 各级别瓦片行列区间与数量,便于核对覆盖范围。
-    # DEM 用墨卡托 XYZ 网格,其余用天地图 4326 网格。
-    range_fn = _mercator_range if dem else range_for_bbox
-    per_level = []
-    for z in levels:
-        tr = range_fn(west, south, east, north, z)
-        per_level.append({
-            "level": z,
-            "col_min": tr.col_min, "col_max": tr.col_max,
-            "row_min": tr.row_min, "row_max": tr.row_max,
-            "tile_count": tr.count,
-        })
+    # 各级别瓦片行列区间与数量 —— 按**实际下载的网格**各出一段(见 per_level_ranges)
+    per_level = per_level_ranges(provider_key, export_formats, levels, bbox, dem)
 
     meta = {
         "task_id": task_id,

@@ -60,9 +60,18 @@ def migrate_cache_grids(tiles_root: Path) -> int:
             continue
         dst = tiles_root / f"{key}_{grid}"
         if dst.exists():
-            logger.debug("缓存迁移跳过 %s:目标 %s 已存在", src.name, dst.name)
+            logger.warning("缓存迁移跳过 %s:目标 %s 已存在(跳过不覆盖)", src.name, dst.name)
             continue
-        src.rename(dst)
+        try:
+            src.rename(dst)
+        except OSError as ex:
+            # ⚠️ **不能抛出去**:本函数在 lifespan 里调用,一次 rename 失败(Windows 上
+            # 目录被别的进程当 CWD、被资源管理器预览、杀软扫描、旧实例未完全退出 →
+            # WinError 5/32)会让**整个后端起不来**。设计 D2 明确要求"改名失败就当
+            # 不迁移";代价只是老缓存暂时失联,下次启动会再试。
+            logger.warning("缓存迁移失败 %s → %s:%s(跳过,不影响启动)",
+                           src.name, dst.name, ex)
+            continue
         moved += 1
         logger.info("缓存迁移:%s → %s", src.name, dst.name)
     return moved

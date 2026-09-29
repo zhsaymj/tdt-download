@@ -163,6 +163,14 @@ watch(() => form.export, (exp) => {
 
 // 各级别明细 z -> { tiles, bytes }
 const perLevel = ref({})
+// 后端按 provider+格式推导出的、本次实际要下载的网格(与 ProcessDialog 同一口径)
+const estGrids = ref([])
+/** 双网格提示:天地图同时勾 tms+osm 时会下两套原生瓦片(都不重投影,量约 2×)。 */
+const twoGridNote = computed(() => {
+  if (estGrids.value.length < 2) return ''
+  return 'tms 与 osm 各自用原生网格下载两套数据(都不会有重投影损失),'
+    + '代价是下载量约 2× —— 上面的数已按两套计。'
+})
 async function refreshEstimate() {
   const b = props.task?.bbox
   if (!b) { perLevel.value = {}; return }
@@ -174,7 +182,12 @@ async function refreshEstimate() {
       // 原实现不传它、改在 selectedSummary 里整体 ×2,后果是每级明细列
       // (未含注记)与总计(2 倍)对不上,且 z19+ 会虚高一倍。
       annotate: form.annotate && canAnnotate(form.provider),
+      // 格式决定**要下载哪些网格**(天地图 tms+osm 同选时两套原生瓦片),
+      // 与 ProcessDialog 同一口径。不传的话这里显示的是实际的一半,而本对话框
+      // 提交时会把 export 发出去、由后端重算 total —— 同一个对话框里自相矛盾。
+      export: form.export.join(','),
     })
+    estGrids.value = d.grids || []
     const map = {}
     for (const it of (d.levels || [])) {
       map[it.z] = { tiles: it.tiles, bytes: it.bytes, width: it.width, height: it.height }
@@ -482,6 +495,7 @@ async function submit() {
             约 {{ fmtSize(selectedSummary.bytes) }}
           </div>
           <div class="rd-esthint">仅原始瓦片下载量,非最终成果大小(GeoTIFF/TMS/OSM 经压缩/重编码后不同)</div>
+          <div v-if="twoGridNote" class="rd-esthint">{{ twoGridNote }}</div>
         </div>
       </t-form-item>
       <t-form-item v-if="!isBuildings" label="导出格式">

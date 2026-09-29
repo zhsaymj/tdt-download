@@ -20,6 +20,7 @@ _executors_for 按数据类型组装执行器表,两者的一致性在模块导�
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 from ..config import settings
@@ -190,6 +191,34 @@ def _mk_downloader(task, prov) -> TileDownloader:
         use_cache=task.get("use_cache", True))
 
 
+def _grids_missing_cache(cache_dir: Path, provider_key: str, grids,
+                         levels) -> list[str]:
+    """缓存里**完全没有数据**的网格。
+
+    用途:"download 阶段已完成、但要求的网格集变了"的情形。升级前建的任务只下过
+    `_c`;升级后重跑 osm(或恢复一个在 osm 阶段停下的任务)时 download 已是 done,
+    若不补下 `_w`,OSM 会从空缓存拼出**全零源 → 空成果 → 却报成功**
+    (见 `_build_osm_source` 的护栏与最终审查的 Critical 1)。
+
+    判据只看"该网格的最高级别目录下有没有文件",与扩展名无关 —— 不复制缓存路径
+    规则(那条规则只在 `TileDownloader.tile_path` 一处)。
+    """
+    missing = []
+    for g in grids:
+        base = cache_dir / f"{provider_key}_{_matrix_set_of(g)}"
+        found = False
+        for z in levels:
+            try:
+                if next(iter(os.scandir(base / str(z))), None) is not None:
+                    found = True
+                    break
+            except OSError:
+                continue
+        if not found:
+            missing.append(g)
+    return missing
+
+
 def _osm_uses_mercator_cache(ctx) -> bool:
     """OSM 是否需要另用 `_w` 缓存拼 3857 源(而不是复用 geotiff 成果)。
 
@@ -330,7 +359,18 @@ async def run_task(task_id: str, emit, should_stop) -> None:
     # 本地文件源没有 download 阶段(见 models.build_stage_defs);is_done() 对
     # 不存在的阶段返回 False,故要先确认该阶段确实在阶段表里,否则会误入下载分支。
     has_download = any(s["key"] == "download" for s in tracker.stages)
-    if has_download and not tracker.is_done("download"):
+    # download 阶段已 done、但**要求的网格集变了**时也要补下:升级前建的任务只下过
+    # `_c`,升级后重跑 osm 时若不补下 `_w`,OSM 会从空缓存拼出空成果(最终审查
+    # Critical 1)。此时把整个下载阶段重跑一遍即可 —— 已在缓存里的瓦片会被跳过,
+    # 实际只补下缺的那套。
+    _missing_grids = (_grids_missing_cache(settings.cache_dir, task["provider"],
+                                           download_grids_of(task["provider"],
+                                                             formats), levels)
+                      if has_download else [])
+    if has_download and (not tracker.is_done("download") or _missing_grids):
+        if _missing_grids:
+            logger.info("任务[%s] 缓存缺网格 %s,补下下载阶段", task["name"],
+                        ",".join(_missing_grids))
         import time as _time
         downloaded = 0
         failed = 0
@@ -960,7 +1000,13 @@ def _tms_from_planned_sources(ctx, tms_dir: Path, clip_geom,
 
 
 def _downloaded_raster_source(ctx, source_z: int) -> Path:
-    """在线影像任务里,供补金字塔用的指定级别 4326 GeoTIFF 源图。"""
+    """在线影像任务里,供补金字塔用的指定级别源图(网格跟随**任务主网格**)。
+
+    ⚠️ 范围与 crs 都必须按任务主网格取:缓存路径用的是主网格的 key
+    (`ctx.downloader.tile_path`),按 4326 行号去读 3857 命名的缓存会**不报错、
+    静默拼出别处的像素**(两套网格列号相同、行号不同,文件都存在)—— 最终审查
+    Important 5。墨卡托任务拼出的 3857 源,由调用方负责重投影成 4326。
+    """
     task = ctx.task
     done = ctx.out_dir / f"{task['name']}_z{source_z}.tif"
     if done.exists() and done.stat().st_size > 0:
@@ -971,7 +1017,8 @@ def _downloaded_raster_source(ctx, source_z: int) -> Path:
 
     anno_path_fn = (ctx.anno_downloader.tile_path
                     if ctx.anno_downloader is not None else None)
-    tr = range_for_bbox(*ctx.bbox, source_z)
+    grid = _ctx_grid(ctx)
+    tr = _range_fn_for(task["provider"], grid)(*ctx.bbox, source_z)
 
     def on_row(done_rows, total_r):
         _check_stop(ctx)
@@ -979,7 +1026,8 @@ def _downloaded_raster_source(ctx, source_z: int) -> Path:
                            message=f"准备切片源({source_z}级 {done_rows}/{total_r}行)")
 
     mosaic_to_geotiff(ctx.provider, settings.cache_dir, tr, tmp,
-                      ctx.downloader.tile_path, anno_path_fn, on_row=on_row)
+                      ctx.downloader.tile_path, anno_path_fn,
+                      on_row=on_row, crs=_crs_for_grid(grid))
     return tmp
 
 
@@ -1219,8 +1267,28 @@ def _build_osm_source(ctx, z: int, provider, tile_path_fn, grid: str,
     mosaic_to_geotiff(provider, settings.cache_dir, tr, tmp,
                       tile_path_fn, anno_path_fn,
                       on_row=on_row, crs=_crs_for_grid(grid))
+    _assert_source_has_data(tmp, grid)
     tmp.replace(dst)   # 完整拼好才改名为正式源
     return dst, False
+
+
+def _assert_source_has_data(path: Path, grid: str) -> None:
+    """拼出来的源必须有数据 —— 全零说明该网格的缓存里一张瓦片都没有。
+
+    **为什么必须拦**:源全零时 `export_osm` 把每张瓦片判成"无覆盖"直接跳过,
+    于是产出**空目录却报成功**(最终审查 Critical 1)。触发路径很现实:升级前建的
+    任务只下过 `_c`,升级后重跑 osm 阶段时 download 已是 done —— 若没补下 `_w`,
+    用户拿到空目录且零报错。与需求38-2 是同一个失败形状,故改成明确失败。
+    """
+    import rasterio as _rio
+    with _rio.open(path) as s:
+        # 抽样读即可(全零判断不需要全图)
+        data = s.read(1, out_shape=(min(s.height, 512), min(s.width, 512)))
+    if not data.any():
+        raise RuntimeError(
+            f"OSM 源为空:{path.name} 拼出来全是 0 —— "
+            f"{_matrix_set_of(grid)} 网格的缓存里没有瓦片。"
+            f"通常是因为只重跑了 osm 阶段而没补下下载阶段(见 _grids_missing_cache)。")
 
 
 # ============ DEM → 可视化 RGB 源(供复用影像切片器)============

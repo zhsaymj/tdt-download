@@ -64,3 +64,26 @@ test('切换数据源时网格状态要清掉(否则会串到下一个源)', () 
   assert.ok(body.includes('estGrids.value = []'),
     'resetFormState 要清 estGrids,不然切到单网格源后还显示双网格提示')
 })
+
+// ---------- 重下对话框:同一口径(最终审查 Important 2) ----------
+// 原实现只在 ProcessDialog 传了 export,重下侧没传 → 显示的是实际的一半,
+// 而它自己提交时又把 export 发出去、由后端重算 total —— 同一个对话框里自相矛盾。
+
+const rdSrc = readFileSync(new URL('./RedownloadDialog.vue', import.meta.url), 'utf8')
+
+test('★ 重下对话框的预估也要传 export', () => {
+  const code = stripComments(rdSrc)
+  const i = code.indexOf('api.estimate')
+  assert.notEqual(i, -1, '未找到重下对话框的预估调用')
+  const body = code.slice(i, code.indexOf('})', i) + 2)
+  assert.ok(body.includes('export'),
+    '重下预估不传 export → 天地图 tms+osm 时只显示一半,与提交后的任务数矛盾')
+  assert.ok(body.includes('form.export.join'), '应传当前勾选的格式')
+})
+
+test('★ 重下对话框也给出双网格提示', () => {
+  const code = stripComments(rdSrc)
+  assert.ok(code.includes('const twoGridNote'),
+    '重下侧没有双网格提示 —— 用户不知道为什么下载量变多')
+  assert.ok(code.includes('v-if="twoGridNote"'), 'twoGridNote 没有渲染')
+})

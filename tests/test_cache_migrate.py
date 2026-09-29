@@ -10,6 +10,7 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from backend.core.cache_migrate import migrate_cache_grids
 
@@ -72,6 +73,23 @@ class CacheMigrateTest(unittest.TestCase):
             n = migrate_cache_grids(root)
             self.assertEqual(n, 0)
             self.assertTrue((root / "google_img" / "18").is_dir())
+
+    def test_rename_failure_does_not_raise(self):
+        """★ 最终审查 Important 4 ★ rename 失败不能抛出去。
+
+        本函数在 lifespan 里调用 —— 一次 rename 失败(Windows 上目录被别的进程
+        占着 → WinError 5/32)会让**整个后端起不来**。设计 D2 明写"改名失败就当
+        不迁移",而它动的是用户真实缓存(实测 18 万张)。
+        """
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "tianditu_img" / "18").mkdir(parents=True)
+            with mock.patch.object(Path, "rename",
+                                   side_effect=PermissionError("WinError 32")):
+                n = migrate_cache_grids(root)      # 不应抛
+            self.assertEqual(n, 0, "失败的迁移不该计入成功数")
+            self.assertTrue((root / "tianditu_img" / "18").is_dir(),
+                            "源目录应原样保留")
 
     def test_is_idempotent(self):
         """迁移完再跑一次应无事发生(启动期每次都会调)。"""
