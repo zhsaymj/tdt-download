@@ -14,6 +14,7 @@ import { useDrawStore } from '../stores/draw'
 import { useTaskStore } from '../stores/task'
 import { useBasemapStore } from '../stores/basemap'
 import { crsOptions } from '../utils/crs'
+import { isBasemapKey } from '../utils/basemap'
 import { fmtNum, fmtSize } from '../utils/format'
 import {
   ANNOTATION_MAX_Z, annotationExcessLevels, annotationUsable, canAnnotate,
@@ -55,6 +56,10 @@ const providerOptions = [
   { value: 'osm_buildings', label: '三维建筑白模(OSM)', group: '三维建筑' },
   { value: 'local_vector', label: '三维建筑白模(本地矢量面)', group: '三维建筑' },
 ]
+
+// 本对话框可下载的数据源集合。用于「底图 → 数据源」的成员判定 ——
+// 从 providerOptions 派生而不是另抄一份,列表增删时不会漂移。
+const DOWNLOAD_KEYS = new Set(providerOptions.map((o) => o.value))
 
 // 单一表单模型:字段是四个旧 form 的并集,显示与否由数据类型决定
 const form = reactive({
@@ -473,7 +478,16 @@ function toggleAll(on) { form.levels = on ? [...availableLevels.value] : [] }
 
 function resetFormState() {
   form.name = ''
-  form.provider = 'tianditu_img'
+  // 数据源默认跟随当前底图(仅当该底图可下载),否则回落天地图影像。
+  // 原实现写死 'tianditu_img' —— 每次打开对话框都执行,导致切了底图
+  // 再打开又被重置,"默认选择跟随底图"的诉求落空。
+  //
+  // 只需 DOWNLOAD_KEYS.has 一个条件:basemapStore.key 只可能取自
+  // BASEMAP_OPTIONS,故它必然是底图键,于是这个判定恰好等价于两个列表
+  // 的交集(google_road 这类只在底图的键自然为假)。
+  form.provider = DOWNLOAD_KEYS.has(basemapStore.key)
+    ? basemapStore.key
+    : 'tianditu_img'
   form.levels = [...IMG_LEVELS]
   form.export = []
   form.containers = {}
@@ -546,13 +560,29 @@ watch(
 watch(() => form.provider, async () => {
   if (!isDownload.value) return
   applyDownloadDefaults()
-  if (['tianditu_img', 'tianditu_vec', 'tianditu_ter'].includes(form.provider)) {
+  // 仅当该数据源在底图列表里存在时才切底图。
+  // 原实现写死三个天地图键,切到 Google/Esri 时底图不动;
+  // 而 esri_terrain / 三维建筑 / 本地矢量面 不在底图列表,不该动底图。
+  if (isBasemapKey(form.provider) && basemapStore.key !== form.provider) {
     basemapStore.setKey(form.provider)
   }
   await loadSuggest()
   await loadEstimate()
   await loadDemMaxLevel()
-    await loadImgMaxLevel()
+  await loadImgMaxLevel()
+})
+
+// 底图切换 → 同步数据源。仅当该底图在本对话框可下载时才改:
+// 如 Google 路线图只在底图列表里,切到它不动数据源。
+//
+// 这个 watch 会通过上面的 watch 回写底图,形成一次往返;因为设同值不触发
+// Vue watcher,且这里有同值守卫,一轮即收敛。守卫不可省 ——
+// basemapStore.setKey 会 apply()(移除并重建底图图层),不守卫会闪屏。
+watch(() => basemapStore.key, (k) => {
+  if (!isDownload.value) return
+  if (!DOWNLOAD_KEYS.has(k)) return      // 不在下载列表 → 不动
+  if (form.provider === k) return        // 已是它 → 不动
+  form.provider = k
 })
 
 // 三维来源内切换数据类型:路径与检查结果全部作废,导出勾选待重新检查
@@ -804,6 +834,8 @@ const title = computed(() => ({
       <template v-if="isDownload">
         <t-form-item label="数据源">
           <t-select v-model="form.provider" :options="providerOptions" />
+          <!-- 强耦合的缓解措施:切底图会连带改下载源,得让用户知道 -->
+          <span class="dim">（跟随图层底图，切换底图时同步）</span>
         </t-form-item>
         <t-form-item v-if="!drawStore.hasRange" label-width="0">
           <div class="warn">请先用地图右上的工具画一个范围</div>
