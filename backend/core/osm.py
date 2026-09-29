@@ -24,6 +24,8 @@ from rasterio.transform import from_bounds
 from rasterio.vrt import WarpedVRT
 from rasterio.windows import from_bounds as window_from_bounds
 
+from .logs import logger
+from . import gdal_env  # noqa: F401  进程级 GDAL 配置只设一次
 from .mercator_tiling import (
     LAT_LIMIT, MERC_MAX, TILE_SIZE, _tile_xyz_range, lonlat_to_xyz,
     tile_bounds_3857,
@@ -67,17 +69,31 @@ def _write_png(path: Path, arr: np.ndarray, transform) -> None:
         "driver": "GTiff", "height": TILE_SIZE, "width": TILE_SIZE,
         "count": bands, "dtype": "uint8", "crs": "EPSG:3857", "transform": transform,
     }
-    # 关闭 PAM,避免每张瓦片旁生成 .png.aux.xml(与示例数据保持一致的纯 PNG)
-    with rasterio.Env(GDAL_PAM_ENABLED="NO"):
-        with MemoryFile() as mem:
-            with mem.open(**profile) as tmp:
-                tmp.write(arr)
-                # 标注最后一个波段为 alpha,PNG 驱动据此输出透明通道
-                tmp.colorinterp = [
-                    *tmp.colorinterp[:bands - 1], ColorInterp.alpha,
-                ]
-            with mem.open() as tmp:
-                rio_shutil.copy(tmp, str(path), driver="PNG")
+    # ⚠️ 这里**不要**再套 `with rasterio.Env(GDAL_PAM_ENABLED="NO")`:rasterio 的
+    # Env 用 threading.local 判断"是不是最外层",于是**每个线程都以为自己最外层**,
+    # 各自去改/还原**进程级全局**的 GDAL 配置 —— 多线程切瓦片时是真实的数据竞争
+    # (实测:OSM 切到 99.3% 时 8 个线程同时报 libpng: No IDATs written into file,
+    # 而同一张瓦片单独写两次都成功)。PAM 已在 core.gdal_env 里设一次。
+    last: Exception | None = None
+    for attempt in (1, 2):
+        try:
+            with MemoryFile() as mem:
+                with mem.open(**profile) as tmp:
+                    tmp.write(arr)
+                    # 标注最后一个波段为 alpha,PNG 驱动据此输出透明通道
+                    tmp.colorinterp = [
+                        *tmp.colorinterp[:bands - 1], ColorInterp.alpha,
+                    ]
+                with mem.open() as tmp:
+                    rio_shutil.copy(tmp, str(path), driver="PNG")
+            return
+        except Exception as ex:      # noqa: BLE001
+            last = ex
+            if attempt == 1:
+                # GDAL 的 PNG 驱动在"带 alpha"这条路上本就脆弱(已知问题)。
+                # 一张瓦片写失败不该让整个阶段(已切好一万多张)前功尽弃。
+                logger.warning("瓦片 PNG 写入失败,重试一次:%s(%s)", path.name, ex)
+    raise last       # 重试也失败 → 抛出,不能静默产出坏瓦片
 
 
 def _bleed_rgb_into_transparent_pixels(arr: np.ndarray, max_iter: int = 8) -> np.ndarray:

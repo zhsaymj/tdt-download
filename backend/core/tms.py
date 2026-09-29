@@ -23,6 +23,8 @@ import rasterio.shutil as rio_shutil
 from rasterio.enums import ColorInterp
 from rasterio.io import MemoryFile
 
+from .logs import logger
+from . import gdal_env  # noqa: F401  进程级 GDAL 配置只设一次
 from ..providers.base import TileProvider
 from .annotate import composite_annotation
 from .mosaic import _read_tile
@@ -34,20 +36,33 @@ BASE_UPP = 180.0 / 256.0
 
 
 def _write_tile_png(path: Path, rgb: np.ndarray, alpha: np.ndarray) -> None:
-    """把 RGB(3,256,256)+alpha(256,256) 写成透明 PNG(经内存 GTiff CreateCopy)。"""
+    """把 RGB(3,256,256)+alpha(256,256) 写成透明 PNG(经内存 GTiff CreateCopy)。
+
+    ⚠️ **不要**在这里套 `rasterio.Env`:它的进出会改**进程级全局**的 GDAL 配置,
+    而多线程切瓦片时每个线程都以为自己是最外层(见 core/gdal_env.py 的说明)。
+    PAM 已在 core.gdal_env 里设一次。写入失败重试一次 —— 见 osm._write_png 的说明。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     rgba = np.concatenate([rgb[:3], alpha[np.newaxis, :, :]], axis=0)
-    with rasterio.Env(GDAL_PAM_ENABLED="NO"):
-        with MemoryFile() as mem:
-            with mem.open(driver="GTiff", height=TILE_SIZE, width=TILE_SIZE,
-                          count=4, dtype="uint8") as tmp:
-                tmp.write(rgba)
-                tmp.colorinterp = [
-                    ColorInterp.red, ColorInterp.green,
-                    ColorInterp.blue, ColorInterp.alpha,
-                ]
-            with mem.open() as tmp:
-                rio_shutil.copy(tmp, str(path), driver="PNG")
+    last: Exception | None = None
+    for attempt in (1, 2):
+        try:
+            with MemoryFile() as mem:
+                with mem.open(driver="GTiff", height=TILE_SIZE, width=TILE_SIZE,
+                              count=4, dtype="uint8") as tmp:
+                    tmp.write(rgba)
+                    tmp.colorinterp = [
+                        ColorInterp.red, ColorInterp.green,
+                        ColorInterp.blue, ColorInterp.alpha,
+                    ]
+                with mem.open() as tmp:
+                    rio_shutil.copy(tmp, str(path), driver="PNG")
+            return
+        except Exception as ex:      # noqa: BLE001
+            last = ex
+            if attempt == 1:
+                logger.warning("瓦片 PNG 写入失败,重试一次:%s(%s)", path.name, ex)
+    raise last
 
 
 def tms_level(z: int) -> int:
