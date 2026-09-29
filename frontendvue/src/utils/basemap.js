@@ -87,3 +87,16 @@ const ANNOTATION_OF_BASEMAP = {
 export function annotationLayerOf(basemapKey) {
   return ANNOTATION_OF_BASEMAP[basemapKey] || null
 }
+
+/**
+ * 该 key 是否是底图列表中的一项。
+ *
+ * 用于「数据源 → 底图」的同步判定:数据源切到只在下载列表里的键
+ * (如 esri_terrain)时,底图不该跟着变。
+ *
+ * 判定直接来自 BASEMAP_OPTIONS 而非另抄一份键数组 —— 底图列表增删时
+ * 不会漂移(这个项目为此栽过好几次)。
+ */
+export function isBasemapKey(key) {
+  return BASEMAP_OPTIONS.some((x) => x.value === key)
+}

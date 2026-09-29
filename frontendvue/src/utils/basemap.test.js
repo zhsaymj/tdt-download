@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   BASEMAP_OPTIONS, annotationLayerOf, basemapMaxZoom, basemapTileUrl,
-  basemapTypesFor, basemapZIndexForLevel,
+  basemapTypesFor, basemapZIndexForLevel, isBasemapKey,
 } from './basemap.js'
 
 test('图层管理提供三个不可移除的天地图底图选项', () => {
@@ -119,4 +119,38 @@ test('未知底图无配对注记', () => {
   assert.equal(annotationLayerOf('nope'), null)
   assert.equal(annotationLayerOf(undefined), null)
   assert.equal(annotationLayerOf(''), null)
+})
+
+
+// ---------- 底图成员判定(供数据源 → 底图的同步用) ----------
+
+test('isBasemapKey 认得全部 8 个底图键', () => {
+  for (const v of [
+    'tianditu_img', 'tianditu_vec', 'tianditu_ter',
+    'google_img', 'google_hybrid', 'google_road', 'google_terrain',
+    'esri_imagery',
+  ]) {
+    assert.equal(isBasemapKey(v), true, v)
+  }
+})
+
+test('isBasemapKey 不认只在下载列表里的键', () => {
+  // 这三个在下载数据源列表里,但不是底图 —— 数据源切到它们时底图不该动
+  for (const v of ['esri_terrain', 'osm_buildings', 'local_vector']) {
+    assert.equal(isBasemapKey(v), false, v)
+  }
+})
+
+test('isBasemapKey 对未知/空值返回 false', () => {
+  assert.equal(isBasemapKey('nope'), false)
+  assert.equal(isBasemapKey(''), false)
+  assert.equal(isBasemapKey(undefined), false)
+  assert.equal(isBasemapKey(null), false)
+})
+
+test('isBasemapKey 与 BASEMAP_OPTIONS 一致', () => {
+  // 判定必须来自列表本身,不是另抄一份 —— 否则列表增删时会漂移
+  for (const opt of BASEMAP_OPTIONS) {
+    assert.equal(isBasemapKey(opt.value), true, opt.value)
+  }
 })
