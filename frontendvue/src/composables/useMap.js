@@ -138,8 +138,14 @@ export function createMapController(target, hooks = {}) {
           `&STYLE=default&TILEMATRIXSET=w&FORMAT=tiles` +
           `&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&tk=${token}`,
         crossOrigin: 'anonymous',
-        maxZoom: ANNOTATION_MAX_Z,   // 注记最高 z18
+        maxZoom: ANNOTATION_MAX_Z,   // source 级:注记瓦片只到 z18
       }),
+      // layer 级:视图缩放超过 z18 就整个不渲染。
+      // 与上面 source 级那个是两回事 —— source 级只限瓦片网格,超过之后 OL 会
+      // 继续用 z18 瓦片并**拉伸显示**:糊掉的路名压在清晰的影像上,观感就是
+      // "放大后底图没变清晰"(用户反馈:切到 Google/Esri 放大到 18 级以上时)。
+      // 判定见 ol/layer/Layer.js::inView() 的 `zoom <= layerState.maxZoom`。
+      maxZoom: ANNOTATION_MAX_Z,
       zIndex: annoLayerZ(),
     })
   }
