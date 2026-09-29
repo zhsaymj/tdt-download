@@ -17,7 +17,8 @@ import { crsOptions } from '../utils/crs'
 import { isBasemapKey } from '../utils/basemap'
 import { fmtNum, fmtSize } from '../utils/format'
 import {
-  ANNOTATION_MAX_Z, annotationExcessLevels, annotationUsable, canAnnotate,
+  ANNOTATION_MAX_Z, MERCATOR_IMAGE_PROVIDERS,
+  annotationExcessLevels, annotationUsable, canAnnotate,
   fmtNameOf,
 } from '../utils/provider'
 import {
@@ -169,6 +170,23 @@ const bldVecOptions = computed(() => {
 const levelList = computed(() => levelsForProvider(form.provider))
 const picksMbtiles = computed(() => ['tms', 'osm'].some(
   (k) => form.export.includes(k) && form.containers[k] === 'mbtiles'))
+
+/**
+ * 勾了 TMS、但数据源是 Web 墨卡托时的提示。
+ *
+ * TMS 是 gdal2tiles **geodetic(EPSG:4326)** 网格,与 3857 源不同构,导出必须先
+ * 重投影 —— 实测高频能量只剩 68%,而前端显示 geodetic TMS 时 OL 还要再转一次
+ * 3857,端到端约 44%,细笔画的文字标注明显发虚(需求37)。OSM 是 3857→3857,
+ * 文件无损且前端不再重投影,故默认已改成 OSM;这条只在用户手动勾回 TMS 时提醒。
+ *
+ * 不含 DEM:它没有文字标注,且默认同样已翻成 OSM(后端按网格判定)。
+ */
+const tmsReprojectWarn = computed(() => {
+  if (!isDownload.value || !form.export.includes('tms')) return ''
+  if (!MERCATOR_IMAGE_PROVIDERS.includes(form.provider)) return ''
+  return '该数据源是 Web 墨卡托(3857),TMS 走 geodetic(4326)网格需要重投影,'
+    + '文字与细线条会比原图软一些。要无损请改勾「切 OSM 瓦片」。'
+})
 const tmsSourceStrategyOptions = [
   { value: 'contiguous', label: '连续高层兜底(默认)' },
   { value: 'preserve_inputs', label: '保留每个输入层级并分段补齐' },
@@ -1016,6 +1034,9 @@ const title = computed(() => ({
             <t-checkbox v-if="isLocal3D && form.d3Type === 'osgb'"
               :model-value="true" disabled>3D Tiles</t-checkbox>
             <t-checkbox-group v-else v-model="form.export" :options="exportOptions" />
+          </t-form-item>
+          <t-form-item v-if="tmsReprojectWarn" label-width="0">
+            <div class="wnote">{{ tmsReprojectWarn }}</div>
           </t-form-item>
           <ContainerPicker :stages="stages" :selected="form.export"
             v-model="form.containers" />

@@ -918,8 +918,14 @@ def _mercator_raster_source(ctx, source_z: int) -> Path:
     if dst.exists() and dst.stat().st_size > 0:
         return dst
     import shutil as _shutil
+    from rasterio.enums import Resampling
     _shutil.copyfile(src, dst)
-    reproject_geotiff(dst, "EPSG:4326")
+    # ⚠️ 用 cubic 而非 reproject_geotiff 的默认 bilinear。这一步是墨卡托源出
+    # TMS 的**必经重投影**(见上),而 TMS 是唯一能出文字标注的瓦片格式 ——
+    # 双线性把细笔画抹得最狠:实测高频能量只剩 68%,用户看到"下载切片后的
+    # 文字标注比原始模糊很多"(需求37)。cubic 约 80%。
+    # 不用 lanczos(90%):它在高对比边缘产生振铃,文字上比略软更显眼。
+    reproject_geotiff(dst, "EPSG:4326", resampling=Resampling.cubic)
     return dst
 
 

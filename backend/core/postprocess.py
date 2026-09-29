@@ -182,10 +182,16 @@ def clip_to_geometry(src_path: Path, geometry: dict) -> bool:
     return True
 
 
-def reproject_geotiff(src_path: Path, dst_crs: str) -> bool:
+def reproject_geotiff(src_path: Path, dst_crs: str,
+                      resampling: Resampling = Resampling.bilinear) -> bool:
     """把 GeoTIFF 原地重投影到 dst_crs(如 EPSG:4547)。
 
     dst_crs 与源相同或为空则跳过,返回 False。
+
+    resampling 只作用于**彩色波段**;alpha 与掩膜恒用 nearest(它们是有效性
+    边界,插值会把透明区扩成灰边)。默认 bilinear 是既有行为,不要随手改 ——
+    用户选的"输出坐标系"走的就是这条。TMS 的 4326 源另传 cubic,理由见
+    runner._mercator_raster_source。
     """
     if not dst_crs:
         return False
@@ -231,9 +237,9 @@ def reproject_geotiff(src_path: Path, dst_crs: str) -> bool:
                 dst_crs=dst_crs,
                 src_nodata=src_nodata,
                 dst_nodata=src_nodata,
-                # alpha 是有效性边界,避免双线性插值把透明边界扩大成灰边。
+                # alpha 是有效性边界,避免插值把透明边界扩大成灰边。
                 resampling=Resampling.nearest if i in alpha_indexes
-                else Resampling.bilinear,
+                else resampling,
             )
         if has_mask and not alpha_indexes:
             dst_mask = np.zeros((height, width), dtype=np.uint8)

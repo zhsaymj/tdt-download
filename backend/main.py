@@ -101,13 +101,17 @@ async def api_capabilities():
     core.formats 注册表,界面自动跟上。
     """
     from .core.formats import (CONTAINERS, PIPE_3D, PIPE_BUILDING, PIPE_RASTER,
-                               PROVIDER_KIND, DataKind, kind_of, stages_for)
+                               PROVIDER_KIND, DataKind, default_on_stage_keys,
+                               kind_of, stages_for)
 
-    def stage_json(s):
+    def stage_json(s, default_keys):
         return {
             "key": s.key,
             "label": s.label,
-            "default_on": s.default_on,
+            # 默认勾选按**源自身的网格**定,不用注册表里静态的 default_on ——
+            # 对墨卡托源出 geodetic TMS 要重投影、文字会发虚(需求37),
+            # 详见 core.formats.default_on_stage_keys
+            "default_on": s.key in default_keys,
             "note": s.note,
             "containers": [
                 {"key": c, "label": CONTAINERS[c].label,
@@ -128,9 +132,11 @@ async def api_capabilities():
     for key in PROVIDER_KIND:
         kind = kind_of(key)
         pipe = kind_pipe.get(kind, PIPE_RASTER)
+        stages = stages_for(kind, pipe)
+        default_keys = default_on_stage_keys(key, stages)
         providers[key] = {
             "kind": kind,
-            "stages": [stage_json(s) for s in stages_for(kind, pipe)],
+            "stages": [stage_json(s, default_keys) for s in stages],
         }
     return {"providers": providers}
 

@@ -422,6 +422,37 @@ def grid_of(provider: str) -> str:
     return PROVIDER_GRID.get(provider, GEO_GEODETIC)
 
 
+def default_on_stage_keys(provider: str,
+                          stages: list[ExportStage] | None = None) -> set[str]:
+    """该数据源默认勾选的导出阶段 key。
+
+    在注册表的静态 `default_on` 之上,**按源自身的网格**改写瓦片格式:
+
+      天地图(EPSG:4326)        → tms(gdal2tiles geodetic),与源同构、无损直映射
+      Google/Esri(EPSG:3857)  → osm(Web 墨卡托 XYZ),3857→3857 无损
+
+    为什么不能只靠 `default_on`:那个标志是静态的,而"哪个瓦片网格无损"取决于
+    源自己的网格。对墨卡托源出 geodetic TMS 必须先重投影 —— 实测高频能量只剩
+    68%(bilinear),而前端显示 geodetic TMS 时 OL 还要再转一次 3857,端到端约
+    44%,细笔画的文字标注明显发虚(需求37)。OSM 那条路文件无损,且前端按 3857
+    渲染、不再重投影。
+
+    stages 传该数据源**实际可用**的阶段(来自 stages_for);不传则按默认参数取。
+    前端读 /api/capabilities 的 default_on 决定默认勾选,故 main.py 必须用本函数。
+    """
+    if stages is None:
+        stages = stages_for(kind_of(provider))
+    keys = {s.key for s in stages if s.default_on}
+    avail = {s.key for s in stages}
+    want = "osm" if grid_of(provider) == GEO_MERCATOR else "tms"
+    drop = "tms" if want == "osm" else "osm"
+    if want in avail:
+        keys.add(want)
+    if drop in avail:
+        keys.discard(drop)
+    return keys
+
+
 #: 未登记数据源的级别回落(与旧行为一致:影像 1~18)
 _DEFAULT_Z_CAP = 18
 
