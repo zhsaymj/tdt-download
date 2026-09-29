@@ -247,22 +247,29 @@ async def _probe_imagery_max_level(bbox, provider: str) -> int | None:
                                    settings.esri_imagery)
 
 
-def _anno_extra(detail: dict, levels: list[int]) -> tuple[int, int]:
-    """注记带来的额外 (瓦片数, 字节数)。
 
-    只统计 **≤ ANNOTATION_MAX_Z 的级别** —— 天地图注记最高 z18,
-    Google 选 z19~21 时注记一张都不下。旧的 `total *= 2` 在这种场景下
-    会虚高一倍。
+def _add_annotation_to_detail(detail: dict, levels: list[int]) -> None:
+    """把注记瓦片计入预估明细(**原地修改** detail)。
 
-    detail["levels"] 已是逐级别明细 {z, tiles, bytes},直接筛出来求和:
-    不必再算一次瓦片数,也不依赖任何"单瓦片平均字节"的经验常量。
+    注记与底图共用同一个瓦片区间,所以逐级别"翻倍";但天地图注记最高
+    z18,超过的级别一张都不下 —— 不是整体 ×2。
+
+    逐级别与合计一起更新,避免界面表格与合计自相矛盾。
+
+    与 api_create_task 用的是同一份逻辑(后者也走这个函数),两者不可能
+    再漂移 —— 此前预估接口不接受 annotate、前端自己乘 2,结果
+    z19~21 勾注记时预估是任务数的两倍。
     """
     from ..core.runner import ANNOTATION_MAX_Z
 
-    keep = {int(z) for z in levels if int(z) <= ANNOTATION_MAX_Z}
-    rows = [r for r in detail.get("levels", []) if r.get("z") in keep]
-    return (sum(r.get("tiles", 0) for r in rows),
-            sum(r.get("bytes", 0) for r in rows))
+    if not detail.get("levels"):
+        return
+    for row in detail["levels"]:
+        if row.get("z") is not None and row["z"] <= ANNOTATION_MAX_Z:
+            row["tiles"] = row.get("tiles", 0) * 2
+            row["bytes"] = row.get("bytes", 0) * 2
+    detail["total_tiles"] = sum(r.get("tiles", 0) for r in detail["levels"])
+    detail["total_bytes"] = sum(r.get("bytes", 0) for r in detail["levels"])
 
 
 async def _probe_dem_max_level(bbox, provider: str) -> int | None:
@@ -322,15 +329,23 @@ async def api_list_tasks():
 @router.get("/estimate")
 async def api_estimate(west: float, south: float, east: float, north: float,
                        levels: str | None = None, provider: str = "tianditu_img",
-                       z_min: int | None = None, z_max: int | None = None):
+                       z_min: int | None = None, z_max: int | None = None,
+                       annotate: bool = False):
     """提交前预估:返回每层瓦片数与估算大小及合计。
 
     levels 为逗号分隔级别,兼容旧的 z_min/z_max。total 字段保留向后兼容。
+
+    annotate=True 时把注记瓦片算进来(只对 ≤ ANNOTATION_MAX_Z 的级别),
+    与 api_create_task 的算法**必须一致** —— 此前本接口不接受 annotate,
+    增量由前端整体 ×2 补,导致对话框预估与建成后的任务数对不上
+    (z19+ 的注记增量为 0,整体 ×2 会虚高一倍)。
     """
     z_cap = _z_cap_for(provider)
     lv = _parse_levels(levels, z_min, z_max, z_cap,
                        z_floor=_z_floor_for(provider))
     detail = _estimate_detail((west, south, east, north), lv, provider)
+    if annotate and not is_dem_provider(provider):
+        _add_annotation_to_detail(detail, lv)
     # total 保留:旧前端只读 total
     return {"total": detail["total_tiles"], **detail}
 
@@ -834,11 +849,11 @@ async def api_create_task(data: TaskCreate):
     # 叠加注记要额外下载同网格的注记瓦片,进度分母与体积都要算上。
     # ⚠️ 不能整体翻倍:天地图注记最高 z18(见 ANNOTATION_MAX_Z),
     # Google 选 z19~21 时注记一张都不下,翻倍会虚高一倍。
-    has_annotation = not dem
-    if data.annotate and has_annotation:
-        anno_tiles, anno_bytes = _anno_extra(detail, levels)
-        total += anno_tiles
-        est_bytes += anno_bytes
+    # 用与 /api/tasks/estimate 相同的函数,保证"对话框预估 = 建成的任务数"。
+    if data.annotate and not dem:
+        _add_annotation_to_detail(detail, levels)
+        total = detail["total_tiles"]
+        est_bytes = detail["total_bytes"]
 
     task_id = create_task(data, total, est_bytes)
     await task_queue.enqueue(task_id)

@@ -374,6 +374,9 @@ async function loadEstimate() {
     const d = await api.estimate({
       west: b[0], south: b[1], east: b[2], north: b[3],
       levels: levelList.value.join(','), provider: form.provider,
+      // 注记增量由后端按 ≤z18 逐级别算 —— 前端不再自己乘,
+      // 否则对 z19+ 会虚高一倍(天地图注记只到 z18)
+      annotate: form.annotate && canAnnotate(form.provider),
     })
     const m = {}
     for (const r of d.levels || []) m[r.z] = r
@@ -449,8 +452,10 @@ const estTotal = computed(() => {
     return '同步下载天地图注记图层并烘焙进成果。'
   })
 
-  const mul = form.annotate && canAnnotate(form.provider) ? 2 : 1
-  return { tiles: tiles * mul, bytes: bytes * mul }
+  // 注记增量已由后端算进 est(见 loadEstimate 的 annotate 参数),
+  // 这里不再乘 —— 前后端各算一遍必然漂移,而且前端的"整体 ×2"
+  // 对 z19+ 是错的(天地图注记只到 z18)。
+  return { tiles, bytes }
 })
 
 // ---- 级别勾选 ----
