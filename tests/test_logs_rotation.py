@@ -6,7 +6,13 @@
 
 多进程隐患不适用本项目:worker 的 handler 被 install_forwarding 清空换成
 队列转发,只有主进程写文件(见 tests/test_log_forwarder.py 的护栏)。
+
+⚠️ 测试进程里文件 handler 落在临时目录,不是 `data/logs/` —— 判定见
+   `core/logs.py::_resolve_log_dir`(测试进程不许污染生产日志)。
+   本文件验的是 handler 的**配置**(类型/轮转点/保留期/编码),与落点无关;
+   落点由 tests/test_logs_isolation.py 三层守着。
 """
+import os
 import shutil
 import tempfile
 import time
@@ -14,11 +20,7 @@ import unittest
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
-from backend.config import ROOT
 from backend.core.logs import logger, recent_logs
-
-#: 日志文件路径(与 core/logs.py 的 _setup() 保持一致)
-LOG_FILE = ROOT / "data" / "logs" / "app.log"
 
 
 def _file_handler():
@@ -63,10 +65,17 @@ class TestRotationConfig(unittest.TestCase):
         self.assertEqual(h.encoding, "utf-8",
                          "日志含中文,非 utf-8 会乱码/报错")
 
-    def test_base_filename_is_app_log(self):
+    def test_base_filename_is_app_log_in_configured_dir(self):
+        """文件名恒为 app.log,目录听 `TDT_LOG_DIR`(生产下即 data/logs/)。
+
+        "生产进程落在 data/logs/app.log"这条由 tests/test_logs_isolation.py 的
+        TestProductionProcessStillWritesFile 用子进程守着 —— 那边不受测试引导影响。
+        """
         h = _file_handler()
         self.assertIsNotNone(h)
-        self.assertEqual(h.baseFilename, str(LOG_FILE))
+        self.assertEqual(Path(h.baseFilename).name, "app.log")
+        self.assertEqual(Path(h.baseFilename).parent,
+                         Path(os.environ["TDT_LOG_DIR"]))
 
 
 class TestPanelUnaffectedByRotation(unittest.TestCase):

@@ -10,9 +10,13 @@
 from __future__ import annotations
 
 import logging
+import os
+import sys
+import tempfile
 from collections import deque
 from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
+from pathlib import Path
 
 from ..config import ROOT
 
@@ -59,6 +63,43 @@ class _RingHandler(logging.Handler):
 _ring = _RingHandler()
 
 
+def _in_test_process() -> bool:
+    """本进程是不是测试进程。
+
+    单抽成一个函数只为可测:测试里要能分别验"生产分支"与"测试分支",
+    而直接增删 `sys.modules["unittest"]` 会连测试框架自己一起拆掉。
+    """
+    return "unittest" in sys.modules
+
+
+def _resolve_log_dir() -> Path:
+    """解析日志目录。
+
+    **测试进程落到临时目录**,否则跑一次测试就会把日志写进用户的生产日志
+    `data/logs/app.log` —— 2026-09-29 实测一次全量灌进 1464 行噪音(占
+    33045 行的 4.4%),正好抵消需求35"按天分文件、便于翻查"的目标。
+
+    判定用 `_in_test_process()`,与**调用方式无关**:
+    `discover tests` / `python -m unittest tests.test_x` / 脚本方式跑单个文件
+    三种都成立。(最初把引导放在 `tests/__init__.py`,结果 `discover tests` 下
+    模块被当成顶层模块导入、那个文件根本不执行 —— 所以防线必须在这里。)
+
+    测试分支还会把路径写回 `TDT_LOG_DIR`,好让被测代码 spawn 出去的 worker
+    子进程继承同一个目录 —— 子进程里没有 `unittest`,单靠上面的判定会漏。
+
+    ⚠️ 别改成"测试干脆不落盘":文件 handler 没了,测试就没法验证它的配置
+       (轮转点/保留期/编码)。tests/test_logs_isolation.py 守着这三层。
+    """
+    override = os.environ.get("TDT_LOG_DIR")
+    if override:
+        return Path(override)
+    if _in_test_process():
+        if "TDT_LOG_DIR" not in os.environ:
+            os.environ["TDT_LOG_DIR"] = tempfile.mkdtemp(prefix="tdt-test-logs-")
+        return Path(os.environ["TDT_LOG_DIR"])
+    return ROOT / "data" / "logs"
+
+
 def _setup() -> None:
     """初始化文件与环形处理器(幂等,重复调用只装一次)。"""
     if getattr(logger, "_tdt_ready", False):
@@ -66,7 +107,7 @@ def _setup() -> None:
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s",
                             datefmt="%Y-%m-%d %H:%M:%S")
     try:
-        log_dir = ROOT / "data" / "logs"
+        log_dir = _resolve_log_dir()
         log_dir.mkdir(parents=True, exist_ok=True)
         # 按日期轮转:每天零点把 app.log 更名为 app.log.<当天日期>,保留 180 天。
         # 原实现按大小(RotatingFileHandler, 5MB×3),但实测 26 个使用日只用
@@ -87,7 +128,7 @@ def _setup() -> None:
         fh.setFormatter(fmt)
         logger.addHandler(fh)
     except OSError:
-        pass  # 文件不可写时仅保留内存/控制台
+        pass  # 文件不可用/不可写时仅保留内存与控制台
     # 控制台(与 uvicorn 同窗口可见)
     ch = logging.StreamHandler()
     ch.setFormatter(fmt)
