@@ -1,5 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+//: 本目录(读同目录下其他源文件做"去重守卫"用)
+const utilsDir = dirname(fileURLToPath(import.meta.url))
 
 import {
   BASEMAP_ONLY_IMAGE_PROVIDERS,
@@ -148,4 +154,34 @@ test('★ isDemProvider 只认精确名单,不吃 esri 前缀', () => {
   assert.equal(isDemProvider('google_terrain'), false, 'Google 地形是底图图层,不是 DEM')
   assert.equal(isDemProvider(''), false)
   assert.equal(isDemProvider(undefined), false)
+})
+
+
+// ---------- local_dem:两份 isDemProvider 名单曾不一致 ----------
+
+test('★ local_dem 是地形(provider.js 的名单曾漏了它)', () => {
+  // provider.js 的 DEM_PROVIDERS 只写了 esri_terrain,而 taskDefaults.js
+  // 自己那份还含 local_dem —— 同一个函数两份名单,于是 local_dem 任务
+  // 在任务队列/数据管理里被标成「影像」并配影像配色。
+  // 与之前 esri_imagery 被标成地形是同一类问题(名单漂移)。
+  assert.equal(isDemProvider('local_dem'), true)
+  assert.equal(taskKindOf({ provider: 'local_dem' }), 'dem')
+  assert.ok(DEM_PROVIDERS.includes('local_dem'), 'DEM_PROVIDERS 缺 local_dem')
+})
+
+test('local_dem 仍不支持叠加注记(本地文件源,不联网)', () => {
+  assert.equal(canAnnotate('local_dem'), false)
+})
+
+test('isDemProvider 只有一份实现(锁住去重)', () => {
+  // 断言行为恒等不够 —— 两份名单只要当前值一样就测不出来,得直接锁"没有第二份"。
+  // 先剥掉注释:说明性文字里出现 "function isDemProvider" 是正常的。
+  const src = readFileSync(resolve(utilsDir, 'taskDefaults.js'), 'utf8')
+    .replace(/\/\/[^\n]*/g, '')
+  assert.ok(!src.includes('function isDemProvider'),
+    'taskDefaults.js 又抄了一份 isDemProvider —— 应统一从 provider.js 导入')
+  assert.ok(!src.includes('function isTiandituRasterProvider'),
+    'taskDefaults.js 又抄了一份 isTiandituRasterProvider')
+  assert.ok(src.includes("from './provider.js'"),
+    'taskDefaults.js 应改为从 provider.js 导入共享判定')
 })

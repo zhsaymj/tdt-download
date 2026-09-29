@@ -1,3 +1,8 @@
+// 数据源判定统一从 provider.js 取 —— 本文件原先自己抄了一份 isDemProvider
+// (还含 local_dem,与 provider.js 那份不一致,见那边的注释)。名单抄多份必然
+// 漂移,本项目已踩过三次;新增数据源只改 provider.js 一处。
+import { canAnnotate, isDemProvider } from './provider.js'
+
 export const IMG_LEVELS = Array.from({ length: 18 }, (_, i) => i + 1)
 export const DEM_LEVELS = Array.from({ length: 17 }, (_, i) => i)
 
@@ -49,14 +54,6 @@ const PROVIDER_LABELS = {
   local_dem: '本地地形',
   local_osgb: '本地 OSGB',
   local_pointcloud: '本地点云',
-}
-
-export function isDemProvider(provider) {
-  return provider === 'esri_terrain' || provider === 'local_dem'
-}
-
-export function isTiandituRasterProvider(provider) {
-  return ['tianditu_img', 'tianditu_vec', 'tianditu_ter'].includes(provider)
 }
 
 function pad2(v) { return String(v).padStart(2, '0') }
@@ -128,8 +125,19 @@ export function defaultCrsForProvider() {
   return 'EPSG:4326'
 }
 
+/**
+ * 高级选项里「叠加路网注记」的默认勾选状态。
+ *
+ * **所有支持注记的影像源都默认勾上**(天地图影像/矢量/地形、Google、Esri)。
+ * 原实现是 `isTiandituRasterProvider(provider)` —— 需求13-5 写"影像数据默认勾选"
+ * 时只有天地图,Google/Esri 加进来后判据没跟上,这两个源一直默认不勾。
+ *
+ * 判据直接用 `canAnnotate` 而不是另写一份名单:两者语义本就重合
+ * ("这个源能叠注记吗" / "默认要不要叠"),分头维护必然漂移。
+ * 测试锁了 `defaultAnnotateForProvider(p) === canAnnotate(p)` 恒等。
+ */
 export function defaultAnnotateForProvider(provider) {
-  return isTiandituRasterProvider(provider)
+  return canAnnotate(provider)
 }
 
 export function downloadDefaultsForProvider(provider, stages = [], date = new Date()) {

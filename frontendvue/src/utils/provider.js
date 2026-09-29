@@ -5,8 +5,13 @@
 // 三维建筑数据源(与后端 providers/buildings.py 的 BUILDING_LAYERS 保持一致)
 export const BUILDING_PROVIDERS = ['osm_buildings', 'overture_buildings', 'local_vector']
 
-// DEM/地形数据源
-export const DEM_PROVIDERS = ['esri_terrain']
+// DEM/地形数据源。
+//
+// ⚠️ local_dem 曾经漏在这里,而 taskDefaults.js 自己那份含它 —— 同一个
+// `isDemProvider` 两份名单,于是本地栅格转出的 DEM 任务在任务队列/数据管理里
+// 被标成「影像」并配影像配色(与 esri_imagery 被标成地形同一类漂移)。
+// 现在 taskDefaults 已改为从本文件导入,只剩这一处名单。
+export const DEM_PROVIDERS = ['esri_terrain', 'local_dem']
 
 /**
  * 仅作底图预览、**不出现在下载列表**的影像源。
