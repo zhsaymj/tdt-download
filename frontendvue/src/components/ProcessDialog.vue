@@ -187,12 +187,16 @@ const tmsReprojectWarn = computed(() => {
   return '该数据源是 Web 墨卡托(3857),TMS 走 geodetic(4326)网格需要重投影,'
     + '文字与细线条会比原图软一些。要无损请改勾「切 OSM 瓦片」。'
 })
+// 断层策略:TMS 与 OSM **共用同一套**(后端同一个 task 字段 tms_source_strategy,
+// 见 runner._source_tms_plan_for_task)。故勾了任一瓦片格式都要显示 ——
+// 原先只判 'tms',只勾 OSM 时用户看不到、也就改不了策略(需求38-2)。
 const tmsSourceStrategyOptions = [
   { value: 'contiguous', label: '连续高层兜底(默认)' },
   { value: 'preserve_inputs', label: '保留每个输入层级并分段补齐' },
 ]
 const showTmsSourceStrategy = computed(() =>
-  !isBuildings.value && !isDem.value && form.export.includes('tms'))
+  !isBuildings.value && !isDem.value
+  && ['tms', 'osm'].some((k) => form.export.includes(k)))
 
 function applyAutoName(force = false) {
   const next = defaultTaskName(form.provider)
@@ -1070,10 +1074,10 @@ const title = computed(() => ({
                   max-width="340px" />
               </t-form-item>
               <t-form-item v-if="showTmsSourceStrategy"
-                label="TMS 断层策略">
+                label="瓦片断层策略">
                 <t-radio-group v-model="form.tmsSourceStrategy"
                   :options="tmsSourceStrategyOptions" />
-                <InfoTip content="连续高层兜底:只使用从最高层开始连续的原始层级,断层后的低层不参与。保留每个输入层级:每个输入 tif 保留自身层级,并向下补到下一个输入层级之上,如 18/17/16/13 会切成 18、17、14-16、1-13。"
+                <InfoTip content="TMS 与 OSM 共用这一项。连续高层兜底:只使用从最高层开始连续的原始层级,断层后的低层不参与。保留每个输入层级:每个输入 tif 保留自身层级,并向下补到下一个输入层级之上,如 18/17/16/13 会切成 18、17、14-16、1-13。"
                   max-width="420px" />
               </t-form-item>
               <t-form-item v-if="isDownload ? drawStore.clippable : form.useRange"

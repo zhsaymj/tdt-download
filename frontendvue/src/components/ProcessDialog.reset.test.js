@@ -68,13 +68,16 @@ test('层级列表按数据类型展示分辨率/比例尺/尺寸/大小四列',
   assert.ok(taskDefaultsSource.includes('levelResolutionMeters'))
 })
 
-test('影像 TMS 支持选择分段保留输入层级策略', () => {
+test('影像瓦片支持选择分段保留输入层级策略', () => {
   assert.ok(componentSource.includes("tmsSourceStrategy: 'contiguous'"))
   assert.ok(componentSource.includes('tmsSourceStrategyOptions'))
   assert.ok(componentSource.includes('showTmsSourceStrategy'))
-  assert.ok(componentSource.includes("!isBuildings.value && !isDem.value && form.export.includes('tms')"))
+  // TMS 与 OSM **共用同一套**断层策略(后端同一个 task 字段),故勾了任一都要显示。
+  // 原先只判 'tms' —— 只勾 OSM 时用户看不到、改不了策略(需求38-2)。
+  assert.ok(componentSource.includes("['tms', 'osm'].some((k) => form.export.includes(k))"))
   assert.ok(componentSource.includes("value: 'preserve_inputs'"))
   assert.ok((componentSource.match(/tms_source_strategy: form.tmsSourceStrategy/g) || []).length >= 2)
-  assert.ok(componentSource.includes('TMS 断层策略'))
+  // 标签不再写死 TMS —— OSM 也用它
+  assert.ok(componentSource.includes('瓦片断层策略'))
   assert.ok(componentSource.includes("form.export.includes('tms')"))
 })

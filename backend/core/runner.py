@@ -572,6 +572,13 @@ def _stage_geotiff(ctx) -> list[str]:
     mosaic_crs = _crs_for_grid(_ctx_grid(ctx))
     trs = {z: range_fn(*ctx.bbox, z) for z in levels}
     total_rows = sum(trs[z].rows for z in levels)
+    # 裁剪 + 要出 OSM 时,需在裁剪**前**把 OSM 要用到的那几级留存一份未裁剪源
+    # (OSM 自带几何遮罩、需要未裁剪源才能精确切边;用裁过的源会在几何边缘产生暗边)。
+    # 要哪几级由 OSM 的断层策略决定 —— 与 TMS 同一套计划,不再只留最高级(需求38-2)。
+    _need_osm = "osm" in parse_export(task.get("export", "geotiff"))
+    _clipping = bool(task.get("clip") and ctx.geom)
+    _osm_keep = ({sz for sz, _ in _source_tms_plan_for_task(ctx)}
+                 if (_need_osm and _clipping and ctx.local_src is None) else set())
     ctx.tracker.start("geotiff", total=total_rows, message="合并 GeoTIFF")
     outputs = []
     base_done = 0
@@ -599,12 +606,8 @@ def _stage_geotiff(ctx) -> list[str]:
                               ctx.downloader.tile_path, anno_path_fn,
                               on_row=on_row, crs=mosaic_crs)
 
-        # 裁剪 + 需要 OSM 时:裁剪前把最高级那张未裁剪 4326 图留一份给 OSM 复用。
-        # OSM 需未裁剪源(自带几何遮罩精确切边),裁过的源会在几何边缘产生暗边。
-        # 这样 OSM 阶段直接捡起此源,彻底不必自拼(裁剪场景也免重拼)。
-        _need_osm = "osm" in parse_export(task.get("export", "geotiff"))
-        _clipping = bool(task.get("clip") and ctx.geom)
-        if z == max(levels) and _need_osm and _clipping:
+        # 裁剪前把 OSM 要用的那几级未裁剪图留一份(见上面 _osm_keep 的说明)。
+        if z in _osm_keep:
             import shutil as _shutil
             osm_src = ctx.out_dir / f".osm_src_z{z}.tif"
             _shutil.copyfile(geotiff, osm_src)
@@ -972,25 +975,6 @@ def _stage_osm(ctx) -> list[str]:
     # tracker 拿到的增量极小且不均匀,速率/ETA 计算会失真(速率显示 0、剩余时间乱跳)。
     ctx.tracker.start("osm", total=1, message="准备 OSM 源")
 
-    tr_max = range_for_bbox(*ctx.bbox, z_max)
-    osm_src = ctx.out_dir / f".osm_src_z{z_max}.tif"
-
-    # OSM 源必须是 EPSG:4326 未裁剪 RGB 图。geotiff 阶段的主文件 {name}_z{z}.tif
-    # 恒为 4326 版(目标投影另存 _{epsg}.tif),故只要 geotiff 阶段完成即可复用,
-    # 不再受输出坐标系限制,省掉一次最高级重复拼接。
-    # 裁剪时不复用裁过的主文件(边界外 nodata 会与 OSM 自带遮罩重复处理、产生暗边),
-    # 但 geotiff 阶段已在裁剪前把最高级未裁剪源留到 .osm_src_z{z}.tif,
-    # 下面的 elif 分支会捡起它——裁剪场景同样免自拼。
-    formats = parse_export(task.get("export", "geotiff"))
-    clipped = bool(task.get("clip") and ctx.geom)
-    geotiff_src = ctx.out_dir / f"{task['name']}_z{z_max}.tif"
-    can_reuse_geotiff = (
-        "geotiff" in formats
-        and not clipped
-        and ctx.tracker.is_done("geotiff")
-        and geotiff_src.exists() and geotiff_src.stat().st_size > 0
-    )
-
     # 本地影像源:用已重采样对齐的源图切片(复用 geotiff 阶段成果或临时生成)
     if ctx.local_src is not None and not ctx.is_dem:
         src_path = _local_raster_source(ctx)
@@ -1033,50 +1017,99 @@ def _stage_osm(ctx) -> list[str]:
         return _maybe_mbtiles(ctx, "osm", osm_dir,
                     _mbtiles_scheme_for(_ctx_grid(ctx), "osm"), "png")
 
-    reused = False
-    if can_reuse_geotiff:
-        src_path = geotiff_src
-        reused = True
-        ctx.tracker.update("osm", message="复用合并的 GeoTIFF 作为 OSM 源")
-        logger.info("任务[%s] 阶段[OSM] 复用合并 GeoTIFF(%s)作源,跳过重拼",
-                    task["name"], geotiff_src.name)
-    elif osm_src.exists() and osm_src.stat().st_size > 0:
-        # 断点续切:上次拼好并保留的自拼源,跳过重拼直接切片。
-        src_path = osm_src
-        ctx.tracker.update("osm", message="复用已拼 OSM 源,继续切片")
-        logger.info("任务[%s] 阶段[OSM] 复用已拼源图,跳过重拼", task["name"])
-    else:
-        def on_row(done_rows, total_r):
-            _check_stop(ctx)
-            ctx.tracker.update("osm", message=f"拼接 OSM 源({done_rows}/{total_r} 行)")
-
-        # 拼源用临时文件 + 原子改名,中途暂停留下的是 .tmp(不会被误当完整源)。
-        tmp_src = ctx.out_dir / f".osm_src_z{z_max}.tmp.tif"
-        mosaic_to_geotiff(ctx.provider, settings.cache_dir, tr_max, tmp_src,
-                          ctx.downloader.tile_path, anno_path_fn, on_row=on_row)
-        tmp_src.replace(osm_src)   # 完整拼好才改名为正式源
-        src_path = osm_src
-        ctx.tracker.update("osm", message="切 OSM 瓦片")
-
-    # 切片阶段进度:直接上报真实瓦片数(export_osm 给的 done/total 即真实瓦片计数),
-    # 速率就是真实"张/秒",ETA 基于真实量、平滑有意义。切片开始时把 total 校正为真实值。
-    def on_progress(done, total):
-        _check_stop(ctx)
-        ctx.tracker.update("osm", done=done, total=total,
-                           message=f"切 OSM 瓦片({done}/{total} 张)")
-
+    # ---- 在线影像:按与 TMS **相同的断层策略**分段切片(需求38-2)----
+    # 原先一律从最高级降采样("只切最高级")。改为按 task.tms_source_strategy 规划
+    # "源层级 → 输出层级",每个源层级用**自己那一级**的拼接图 —— 与 TMS 同一套策略、
+    # 同一个字段(用户明确选择复用 TMS 的选项,不另开一个)。
+    #
+    # 分组数取决于级别是否连续(实测):
+    #   级别 1..12(连续)      → 12 组,每级各用自己的源
+    #   级别 18/17/16/13        → 连续高层兜底 3 组:z16 源出 z1..z16、z17/z18 各出自己
+    #                             保留输入层级 4 组:z16 源出 z14..z16、z13 源出 z1..z13
+    # 故它**不是**"和原先完全一致":常规的连续级别也改成了逐级取源,这正是需求38-2
+    # 要的"不再只切最高级"。
     osm_dir = ctx.out_dir / "osm"
-    _, _, stopped = export_osm(src_path, osm_levels, ctx.bbox, osm_dir,
-                               on_progress=on_progress, clip_geom=clip_geom,
-                               should_stop=ctx.should_stop)
+    plan = _source_tms_plan_for_task(ctx)
+    floor = min(OSM_MIN_LEVEL, z_max)
+    groups = [(sz, [z for z in lv if z >= floor]) for sz, lv in plan]
+    groups = [(sz, lv) for sz, lv in groups if lv]
+    # 进度按**全部分组**累计:分组数可能不少(级别连续时每级一组,见计划说明),
+    # 逐组重置的话进度条会来回跳。总瓦片数用墨卡托 XYZ 计数 —— OSM 恒是 3857 网格,
+    # 与源数据源的网格无关。
+    group_totals = [sum(mercator_range_for_bbox(*ctx.bbox, z).count for z in lv)
+                    for _, lv in groups]
+    grand_total = max(sum(group_totals), 1)
+    base_done = 0
+    built: list[Path] = []          # 本次自拼的源,切完删掉
+    stopped = False
+    try:
+        for (source_z, levels_here), total_here in zip(groups, group_totals):
+            src_path, reusable = _osm_source_for_level(ctx, source_z)
+            if not reusable:
+                built.append(src_path)
+
+            # 切片阶段进度:直接上报真实瓦片数(export_osm 给的 done/total 即真实
+            # 瓦片计数),速率就是真实"张/秒",ETA 才有意义。
+            def on_progress(done, total, _base=base_done, _z=source_z):
+                _check_stop(ctx)
+                ctx.tracker.update("osm", done=_base + done, total=grand_total,
+                                   message=f"切 OSM 瓦片(源 z{_z},{_base + done}/{grand_total} 张)")
+
+            _, _, stopped = export_osm(
+                src_path, levels_here, ctx.bbox, osm_dir,
+                on_progress=on_progress, clip_geom=clip_geom,
+                should_stop=ctx.should_stop)
+            if stopped:
+                break
+            base_done += total_here
+    finally:
+        # 暂停/取消时**保留**源,恢复时免重拼;正常结束才删自拼的那几份。
+        # 用安全删除:删不掉不影响已切好的成果(阶段仍算成功)。
+        if not stopped:
+            for p in built:
+                _safe_unlink(p)
     if stopped:
-        raise _Stopped()          # 保留源,供恢复时复用、不重拼
-    # 只删自拼的临时源;复用的 geotiff 是正式成果,保留。
-    # 用安全删除:删不掉不影响已切好的成果(阶段仍算成功)。
-    if not reused:
-        _safe_unlink(osm_src)
+        raise _Stopped()
     return _maybe_mbtiles(ctx, "osm", osm_dir,
                     _mbtiles_scheme_for(_ctx_grid(ctx), "osm"), "png")
+
+
+def _osm_source_for_level(ctx, z: int) -> tuple[Path, bool]:
+    """OSM 切 z 这一层要用的源;返回 (路径, 是否切完保留)。
+
+    优先用 geotiff 阶段**裁剪前**留存的未裁剪源(`.osm_src_z{z}.tif`)——OSM 需要
+    未裁剪源(它自带几何遮罩、能精确切边;用裁过的源会在几何边缘产生暗边)。
+    未裁剪任务下 geotiff 成果本身就是未裁剪源,直接复用。两者都没有(裁剪任务
+    且没勾 geotiff)时才自拼一份。
+    """
+    task = ctx.task
+    kept = ctx.out_dir / f".osm_src_z{z}.tif"
+    if kept.exists() and kept.stat().st_size > 0:
+        return kept, True
+    done = ctx.out_dir / f"{task['name']}_z{z}.tif"
+    clipped = bool(task.get("clip") and ctx.geom)
+    if not clipped and done.exists() and done.stat().st_size > 0:
+        return done, True
+
+    def on_row(done_rows, total_r):
+        _check_stop(ctx)
+        ctx.tracker.update("osm", message=f"拼接 OSM 源 z{z}({done_rows}/{total_r} 行)")
+
+    # ⚠️ 范围与坐标系都要按**数据源自己的网格**取。原先写死 range_for_bbox(4326)
+    # 且不传 crs,对墨卡托源会按 4326 的行列号去读按 3857 命名的缓存 —— 整幅拼空。
+    # 常规情况下走的是复用分支,这条自拼路径没被覆盖到,问题一直藏着。
+    range_fn = _range_fn_for(task["provider"])
+    tr = range_fn(*ctx.bbox, z)
+    crs = "EPSG:3857" if _ctx_grid(ctx) == GEO_MERCATOR else "EPSG:4326"
+    anno_path_fn = (ctx.anno_downloader.tile_path
+                    if ctx.anno_downloader is not None else None)
+    # 拼源用临时文件 + 原子改名,中途暂停留下的是 .tmp(不会被误当完整源)。
+    tmp = ctx.out_dir / f".osm_src_z{z}.tmp.tif"
+    mosaic_to_geotiff(ctx.provider, settings.cache_dir, tr, tmp,
+                      ctx.downloader.tile_path, anno_path_fn,
+                      on_row=on_row, crs=crs)
+    tmp.replace(kept)   # 完整拼好才改名为正式源
+    return kept, False
 
 
 # ============ DEM → 可视化 RGB 源(供复用影像切片器)============
