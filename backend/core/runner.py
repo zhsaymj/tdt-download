@@ -37,8 +37,8 @@ from .mbtiles import pack_mbtiles
 from .dem import hillshade_from_dem, mosaic_dem_geotiff
 from .dem_tiling import mercator_range_for_bbox, mosaic_bounds_3857
 from .downloader import TileDownloader
-from .formats import (CONTAINERS, GEO_GEODETIC, GEO_MERCATOR, DataKind, STAGES,
-                      grid_of,
+from .formats import (CONTAINERS, GEO_GEODETIC, GEO_MERCATOR, PROVIDER_GRIDS,
+                      DataKind, STAGES, download_grids_of, grid_of,
                       is_local_source, kind_of, resolve_outputs)
 from .logs import logger
 from .metadata import write_metadata
@@ -93,16 +93,19 @@ def _anno_levels_for(levels: list[int]) -> list[int]:
     return sorted({int(z) for z in levels if int(z) <= ANNOTATION_MAX_Z})
 
 
-def _range_fn_for(provider: str):
-    """按数据源的网格返回瓦片区间函数。
+def _range_fn_for(provider: str, grid: str | None = None):
+    """按网格返回瓦片区间函数。
 
-    geodetic(天地图)用 4326 的 range_for_bbox;mercator(Google/Esri 影像、
-    Esri DEM)用墨卡托 XYZ 的 mercator_range_for_bbox。两者不能混用 ——
-    混了会按错误的网格取瓦片,下出来的图整体错位。
+    geodetic 用 4326 的 range_for_bbox;mercator(Google/Esri 影像、Esri DEM)用
+    墨卡托 XYZ 的 mercator_range_for_bbox。两者不能混用 —— 混了会按错误的网格
+    取瓦片,下出来的图整体错位。
+
+    grid 显式给出时以它为准(天地图两套网格都要下,同一个 provider 名会用到两套);
+    不传则回落到按 provider 推断(与改动前一致,现有调用点都只传 provider)。
     """
-    if grid_of(provider) == GEO_MERCATOR:
-        return mercator_range_for_bbox
-    return range_for_bbox
+    if grid is None:
+        grid = grid_of(provider)
+    return mercator_range_for_bbox if grid == GEO_MERCATOR else range_for_bbox
 
 
 def _crs_for_grid(grid: str) -> str:
@@ -143,11 +146,15 @@ def _mbtiles_scheme_for(grid: str, stage_key: str) -> str:
     return "xyz" if stage_key == "osm" else "tms"
 
 
-def _build_provider_for(task):
+def _build_provider_for(task, grid: str | None = None):
     """按 provider key 构造数据源实例(分发即守卫)。
 
     分支顺序无所谓(各 is_xxx 互斥),但必须都在 —— 漏一个会静默回落到
     build_provider 并报"暂不支持的数据源"。
+
+    grid 只在天地图上起作用:同一个图层有两套网格(`_c`/`_w`),靠 matrix_set
+    切换,而 key 会带上网格后缀(缓存路径按它分流,见 providers/tianditu.py)。
+    其余数据源只有一套网格,忽略该参数。
     """
     key = task["provider"]
     if is_dem_provider(key):
@@ -158,7 +165,48 @@ def _build_provider_for(task):
         return build_esri_imagery_provider(settings.esri_imagery)
     token_src = (token_pool.use_token if token_pool.has_any()
                  else settings.tianditu.token)
+    if grid is not None and key in PROVIDER_GRIDS:
+        return build_provider(key, token_src, matrix_set=_matrix_set_of(grid))
     return build_provider(key, token_src)
+
+
+def _matrix_set_of(grid: str) -> str:
+    """网格 → 天地图 TILEMATRIXSET(`c` = EPSG:4326,`w` = EPSG:3857)。"""
+    return "w" if grid == GEO_MERCATOR else "c"
+
+
+async def _download_all_grids(*, provider_key: str, grids, levels, bbox,
+                              anno_levels, downloader_for, anno_for,
+                              on_progress, should_stop) -> bool:
+    """按网格逐级下载原始瓦片(与注记);返回是否被停止。
+
+    抽成独立函数是为了**可测**:它埋在 run_task 里时没法用假下载器验证
+    "每个网格各用各的区间函数"。
+
+    每个网格配自己的区间函数与下载器 —— `_c` 与 `_w` 的行号语义不同
+    (第 z 级 2^(z-1) vs 2^z 行),混用会按错误网格取瓦片、下出来的图整体错位,
+    而且**不报错**。
+
+    注记复用同网格底图算出的那个 `tr`:这是"天然对齐"的实现点,两者行列号同源。
+    ⚠️ 所以注记 provider 也必须按**同一个 grid** 构造,网格选错会请求到别处的
+    注记(不报错,只是路网对不上影像)。
+    """
+    for grid in grids:
+        range_fn = _range_fn_for(provider_key, grid)
+        dl = downloader_for(grid)
+        anno = anno_for(grid) if anno_for is not None else None
+        for z in levels:
+            tr = range_fn(*bbox, z)
+            _ok, _fail, stopped = await dl.download_range(
+                tr, on_progress, should_stop)
+            if stopped:
+                return True
+            if anno is not None and z in anno_levels:
+                _ok, _fail, stopped = await anno.download_range(
+                    tr, on_progress, should_stop)
+                if stopped:
+                    return True
+    return False
 
 
 async def run_task(task_id: str, emit, should_stop) -> None:
@@ -278,23 +326,41 @@ async def run_task(task_id: str, emit, should_stop) -> None:
 
         tracker.start("download", total=total, message="下载原始瓦片")
         logger.info("任务[%s] 阶段[下载] 开始,共 %d 张瓦片", task["name"], total)
-        # 按网格取区间函数:影像也可能是墨卡托(Google/Esri),
-        # 不能再按 is_dem 二选一
-        range_fn = _range_fn_for(task["provider"])
         # 注记只下 ≤ z18 的级别(底图不受此限)
         anno_levels = _anno_levels_for(levels)
-        stopped = False
-        for z in levels:
-            tr = range_fn(west, south, east, north, z)
-            _ok, _fail, stopped = await downloader.download_range(tr, on_progress, should_stop)
-            if stopped:
-                break
-            # 注记复用底图算出的同一个 tr —— 这是"天然对齐"的实现点:
-            # 两者行列号同源,不需要第二套坐标换算。
-            if anno_downloader is not None and z in anno_levels:
-                _ok, _fail, stopped = await anno_downloader.download_range(tr, on_progress, should_stop)
-                if stopped:
-                    break
+
+        # 按网格下载(设计 D3):天地图两套网格都要下时(tms+osm 同选),每个网格
+        # 配自己的 provider / 区间函数 / 下载器 —— `_c` 与 `_w` 的行号语义不同,
+        # 混用会按错误网格取瓦片、下出来的图整体错位,而且不报错。
+        # 其余数据源只有一套网格,grids 就一项,行为与改动前完全一致。
+        default_grid = grid_of(task["provider"])
+        grids = download_grids_of(task["provider"], formats)
+
+        def _mk_downloader(prov):
+            return TileDownloader(
+                prov, cache_dir=settings.cache_dir,
+                concurrency=settings.download.concurrency,
+                max_retries=settings.download.max_retries,
+                timeout=settings.download.timeout,
+                use_cache=task.get("use_cache", True))
+
+        dl_by_grid = {default_grid: downloader}
+        anno_by_grid = {default_grid: anno_downloader}
+        for g in grids:
+            if g == default_grid:
+                continue
+            dl_by_grid[g] = _mk_downloader(_build_provider_for(task, g))
+            if anno_downloader is not None:
+                anno_prov = build_annotation_provider(
+                    task["provider"], anno_token_src, grid=g)
+                anno_by_grid[g] = _mk_downloader(anno_prov) if anno_prov else None
+
+        stopped = await _download_all_grids(
+            provider_key=task["provider"], grids=grids, levels=levels, bbox=bbox,
+            anno_levels=anno_levels,
+            downloader_for=lambda g: dl_by_grid[g],
+            anno_for=(lambda g: anno_by_grid.get(g)) if anno_downloader else None,
+            on_progress=on_progress, should_stop=should_stop)
 
         if stopped:
             return _handle_stop(task_id, tracker, "download", downloaded,

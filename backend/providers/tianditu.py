@@ -103,15 +103,19 @@ class TiandituProvider(TileProvider):
         return 18
 
 
-def build_provider(key: str, token: TokenSource) -> TileProvider:
+def build_provider(key: str, token: TokenSource,
+                   matrix_set: str = "c") -> TileProvider:
     """按数据源标识构造 provider。后续 DEM 等在此登记。
 
     token 可为固定字符串或可调用(tk 使用池:每次取 URL 时动态取密钥并计数)。
+
+    matrix_set 只对天地图有意义:`c`(EPSG:4326)/ `w`(EPSG:3857)是**同一份影像
+    的两套网格**(见 core/formats.PROVIDER_GRIDS)。默认 `c` 与改动前一致。
     """
     if key in ("img",):
         key = "tianditu_img"
     if key in LAYERS:
-        return TiandituProvider(key, token)
+        return TiandituProvider(key, token, matrix_set=matrix_set)
     raise ValueError(f"暂不支持的数据源:{key}")
 
 
