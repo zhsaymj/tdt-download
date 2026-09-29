@@ -19,6 +19,15 @@ from rasterio.enums import ColorInterp
 
 TILE_SIZE = 256
 
+#: 天地图注记的最高可用级别。实测 z19+ 返回 HTTP 200 + 213 字节空图
+#: (0 不透明像素),不是 404 —— 若不裁剪会白跑请求、把空图写进缓存。
+#: 而 Google 开放到 z21,故 z19~z21 的成果没有注记可叠。
+#: 前端 utils/provider.js 有同名常量,改动需同步。
+#:
+#: 定义在这里(而非 runner)是为了让 core.tile_estimate 也能引用 —— 那个模块
+#: 是"要下载多少张瓦片"的唯一判定处,建任务与运行期共用,不能反向依赖 runner。
+ANNOTATION_MAX_Z = 18
+
 
 def read_annotation_rgba(path: Path) -> tuple[np.ndarray, np.ndarray] | None:
     """读注记瓦片为 (rgb(3,256,256), alpha(256,256)) uint8;失败返回 None。

@@ -32,11 +32,9 @@ from ..providers.terrain import DEM_LAYERS, is_dem_provider
 
 
 def _grids_for_estimate(provider: str, formats) -> list[str]:
-    """该任务实际要下载哪些网格(与下载阶段同一个判定,见 core.formats)。"""
-    from ..core.formats import download_grids_of
-    if isinstance(formats, str):
-        formats = parse_export(formats)
-    return download_grids_of(provider, formats or [])
+    """该任务实际要下载哪些网格(与下载阶段同一个判定)。"""
+    from ..core.tile_estimate import grids_of
+    return grids_of(provider, formats)
 
 
 def _estimate_total(bbox, levels: list[int], provider: str, formats=()) -> int:
@@ -49,15 +47,8 @@ def _estimate_total(bbox, levels: list[int], provider: str, formats=()) -> int:
     刻意不在这里做任何上限检查:用户明确要求不设单任务瓦片数上限(设计 §9 Q1),
     规模由调用方如实呈现、由用户判断。
     """
-    return sum(_estimate_grid_total(bbox, levels, provider, g)
-               for g in _grids_for_estimate(provider, formats))
-
-
-def _estimate_grid_total(bbox, levels: list[int], provider: str, grid: str) -> int:
-    """单个网格的瓦片数。墨卡托(Google/Esri/DEM)用 XYZ 计数,geodetic 用 4326。"""
-    if grid == GEO_MERCATOR:
-        return estimate_mercator_tiles(bbox, levels)
-    return estimate_levels(bbox, levels)
+    from ..core.tile_estimate import tile_total
+    return tile_total(provider, formats, bbox, levels, annotate=False)
 
 
 def _z_cap_for(provider: str) -> int:
@@ -302,7 +293,7 @@ def _add_annotation_to_detail(detail: dict, levels: list[int]) -> None:
     再漂移 —— 此前预估接口不接受 annotate、前端自己乘 2,结果
     z19~21 勾注记时预估是任务数的两倍。
     """
-    from ..core.runner import ANNOTATION_MAX_Z
+    from ..core.annotate import ANNOTATION_MAX_Z
 
     if not detail.get("levels"):
         return
@@ -890,21 +881,22 @@ async def api_create_task(data: TaskCreate):
             data.levels = kept
             logger.info("任务[%s] 剔除超出该区域能力的级别 %s(区域最高 %s)",
                         data.name, dropped_levels, probed)
-    detail = _estimate_detail((west, south, east, north), levels, data.provider,
-                              data.export)
-    total = detail["total_tiles"]
-    if total == 0:
-        raise HTTPException(400, "所选范围在该级别下没有瓦片,请检查范围或级别")
-    # 预估原始瓦片下载量(字节):仅下载量,非成果大小
-    est_bytes = detail["total_bytes"]
+    bbox_t = (west, south, east, north)
+    detail = _estimate_detail(bbox_t, levels, data.provider, data.export)
     # 叠加注记要额外下载同网格的注记瓦片,进度分母与体积都要算上。
     # ⚠️ 不能整体翻倍:天地图注记最高 z18(见 ANNOTATION_MAX_Z),
     # Google 选 z19~21 时注记一张都不下,翻倍会虚高一倍。
-    # 用与 /api/tasks/estimate 相同的函数,保证"对话框预估 = 建成的任务数"。
-    if data.annotate and not dem:
-        _add_annotation_to_detail(detail, levels)
-        total = detail["total_tiles"]
-        est_bytes = detail["total_bytes"]
+    _ann = bool(data.annotate) and not dem
+    # total 走 core.tile_estimate 这个**唯一判定处** —— 运行期下载阶段的进度分母
+    # 用的是同一个函数,两处不会再对不上(需求39)。
+    from ..core.tile_estimate import tile_total
+    total = tile_total(data.provider, data.export, bbox_t, levels, annotate=_ann)
+    if total == 0:
+        raise HTTPException(400, "所选范围在该级别下没有瓦片,请检查范围或级别")
+    if _ann:
+        _add_annotation_to_detail(detail, levels)   # 明细也要显示成含注记
+    # 预估原始瓦片下载量(字节):仅下载量,非成果大小
+    est_bytes = detail["total_bytes"]
 
     task_id = create_task(data, total, est_bytes)
     await task_queue.enqueue(task_id)
@@ -1126,8 +1118,11 @@ async def api_update_task(task_id: str, data: TaskCreate):
         (west, south, east, north), levels, data.provider)
     if level_note:
         logger.info("任务[%s] %s", task["name"], level_note)
-    total = _estimate_total((west, south, east, north), levels, data.provider,
-                            data.export)
+    from ..core.tile_estimate import tile_total
+    total = tile_total(data.provider, data.export,
+                       (west, south, east, north), levels,
+                       annotate=bool(data.annotate) and not is_dem_provider(
+                           data.provider))
     if total == 0:
         raise HTTPException(400, "所选范围在该级别下没有瓦片,请检查范围或级别")
     if data.annotate and not is_dem_provider(data.provider):

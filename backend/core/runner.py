@@ -32,6 +32,7 @@ from ..providers.esri_imagery import (build_esri_imagery_provider,
 from ..providers.google import build_google_provider, is_google_provider
 from ..providers.terrain import build_terrain_provider, is_dem_provider
 from ..providers.tianditu import build_annotation_provider, build_provider
+from .annotate import ANNOTATION_MAX_Z
 from .containers import container_of, convert_raster
 from .contour import DEFAULT_INTERVAL, extract_contours, write_contours
 from .mbtiles import pack_mbtiles
@@ -79,11 +80,6 @@ def _safe_unlink(p: Path, retries: int = 5, delay: float = 0.3) -> None:
     logger.warning("临时文件暂时无法删除(将于下次清理):%s", p)
 
 
-#: 天地图注记的最高可用级别。实测 z19+ 返回 HTTP 200 + 213 字节空图
-#: (0 不透明像素),不是 404 —— 若不裁剪会白跑请求、把空图写进缓存。
-#: 而 Google 开放到 z21,故 z19~z21 的成果没有注记可叠。
-#: 前端 utils/provider.js 有同名常量,改动需同步。
-ANNOTATION_MAX_Z = 18
 
 
 def _anno_levels_for(levels: list[int]) -> list[int]:
@@ -371,6 +367,20 @@ async def run_task(task_id: str, emit, should_stop) -> None:
         if _missing_grids:
             logger.info("任务[%s] 缓存缺网格 %s,补下下载阶段", task["name"],
                         ",".join(_missing_grids))
+        # 进度分母必须与**本次实际要下的量**一致。分母是建任务时算好落库的,而
+        # 运行期实际量可能更大(最典型:补下另一个网格时那套瓦片没算进去)——
+        # 不重算就会出现"进度到 100% 却还在下载、且下载数大于总数"(需求39)。
+        # 用与建任务同一个函数(core.tile_estimate 是唯一判定处),两处不会再漂。
+        from .tile_estimate import tile_total
+        _want_total = tile_total(task["provider"], formats, bbox, levels,
+                                 annotate=annotate)
+        if _want_total != total:
+            logger.info("任务[%s] 下载量按当前网格重算:%d → %d 张",
+                        task["name"], total, _want_total)
+            total = _want_total
+            # 计数也要清零:本阶段会重跑一遍(已缓存的瓦片按 ok 计入),从 0 起算
+            # 才与新的分母同步;否则界面会在下一次限流落库前一直显示旧的大数字。
+            update_task(task_id, total=total, downloaded=0, failed=0)
         import time as _time
         downloaded = 0
         failed = 0
