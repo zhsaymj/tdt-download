@@ -58,7 +58,9 @@ class TestBuildAnnotationProvider(unittest.TestCase):
     def test_legacy_short_key(self):
         p = build_annotation_provider("img", "tk")
         self.assertIsNotNone(p)
-        self.assertEqual(p.key, "tianditu_cia")
+        # key 现在带网格后缀(设计 D2):缓存路径是 {key}/{z}/{col}_{row},
+        # 而 _c 与 _w 的行号语义不同,不带网格两套会互相覆盖、静默错乱。
+        self.assertEqual(p.key, "tianditu_cia_c")
 
     def test_mercator_grid_on_tianditu_source_also_w(self):
         """网格由参数决定,不由源类型决定 —— 天地图源也能用 w(供将来复用)。"""

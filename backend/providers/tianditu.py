@@ -61,7 +61,15 @@ class TiandituProvider(TileProvider):
         if matrix_set not in ("c", "w"):
             raise ValueError(f"未知的 TILEMATRIXSET:{matrix_set}(只支持 c/w)")
         layer_type, layer_name, ext, bands, _cn = LAYERS[key]
-        self.key = key
+        # key 带上网格后缀(`tianditu_img_c` / `tianditu_img_w`)。
+        #
+        # 为什么:同一个天地图图层有两套网格,而 `_c`(geodetic)与 `_w`(mercator)
+        # 的**行号语义不同**(第 z 级分别 2^(z-1) 与 2^z 行),同一 (col,row) 不是
+        # 同一地点。缓存路径是 {cache}/{key}/{z}/{col}_{row}.{ext},key 不带网格
+        # 两套会互相覆盖、断点续传时静默错乱(设计 D2)。
+        #
+        # 旧缓存由 core/cache_migrate.migrate_cache_grids 在启动时改名接上。
+        self.key = f"{key}_{matrix_set}"
         self.layer_type = layer_type
         self.layer_name = layer_name
         self.matrix_set = matrix_set

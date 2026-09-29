@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from .config import settings
+from .core.cache_migrate import migrate_cache_grids
 from .core.logs import logger as app_logger, recent_logs, set_notifier as set_log_notifier
 from .core.queue import task_queue
 from .core.token_pool import token_pool
@@ -36,6 +37,13 @@ BASEMAP_DIR = RES_DIR / "exmple-data" / "NaturalEarthII"
 async def lifespan(app: FastAPI):
     init_db()
     reset_stale_running()
+    # 瓦片缓存目录带网格后缀的一次性迁移(设计 D2):`tianditu_img/` → `tianditu_img_c/`。
+    # 不加后缀的话,同一个图层的 `_c`(geodetic)与 `_w`(mercator)两套行号不同的
+    # 瓦片会互相覆盖、断点续传时静默错乱。实测现有天地图影像缓存 18 级 18.2 万张,
+    # 不迁移等于白下。幂等:迁过再调返回 0。注记类 key 刻意不迁(见模块说明)。
+    _moved = migrate_cache_grids(settings.cache_dir)
+    if _moved:
+        app_logger.info("缓存迁移:已为 %d 个目录加上网格后缀", _moved)
     # 主进程只做调度:任务由 worker 子进程执行,不再注册本地 runner
     task_queue.start()
     # 预览瓦片转发用的共享 HTTP session(必须在事件循环里创建)
