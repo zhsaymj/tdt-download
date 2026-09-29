@@ -422,6 +422,64 @@ def grid_of(provider: str) -> str:
     return PROVIDER_GRID.get(provider, GEO_GEODETIC)
 
 
+#: 各导出格式的**原生网格**。未列出者不限(用源自己的默认网格)。
+#:
+#: tms 是 gdal2tiles geodetic(4326);osm 是 Web 墨卡托 XYZ(3857)。
+#: 两种格式的网格不同构,所以"跨网格"的那一种必然要重投影。
+_FORMAT_GRID: dict[str, str] = {
+    "osm": GEO_MERCATOR,
+    "tms": GEO_GEODETIC,
+}
+
+#: 数据源**原生提供**哪些网格(未登记者只有自己的默认网格)。
+#:
+#: 目前只有天地图两套都有:同一份影像提供 `img_c/vec_c/ter_c`(TileMatrixSet=c,
+#: EPSG:4326)与 `img_w/vec_w/ter_w`(TileMatrixSet=w,EPSG:3857)两组服务。
+#: Google/Esri 没有 geodetic 那套,故不登记 —— 它们出 tms 只能重投影(由需求37
+#: 的 cubic 核兜着质量)。
+#:
+#: 注记(cia/cva/cta)不在这里:它们不直接作为下载目标,网格跟随调用方。
+PROVIDER_GRIDS: dict[str, tuple[str, ...]] = {
+    "tianditu_img": (GEO_GEODETIC, GEO_MERCATOR),
+    "tianditu_vec": (GEO_GEODETIC, GEO_MERCATOR),
+    "tianditu_ter": (GEO_GEODETIC, GEO_MERCATOR),
+}
+
+
+def download_grids_of(provider: str, export_formats) -> list[str]:
+    """该任务实际要下载哪些网格(稳定顺序,geodetic 在前)。
+
+    规则:从源自己的默认网格出发;对每个请求格式,若它需要另一种网格**且源确实
+    提供那种网格**,就一并下载。于是:
+
+        天地图 + tms          → [geodetic]        同构、无损直映射
+        天地图 + osm          → [mercator]        3857→3857、不重投影
+        天地图 + tms,osm      → [geodetic,mercator]  两套都下,各自无损
+        Google + tms,osm      → [mercator]        只有 3857,tms 仍重投影
+
+    **不落库**:纯函数,预估接口与 worker 调同一个即可保持一致 —— 若某一方自己
+    再写一遍判定,两处必然漂移(本项目已踩过多次"名单抄多份")。
+    """
+    default = grid_of(provider)
+    avail = PROVIDER_GRIDS.get(provider, ())
+    required: set[str] = set()
+    for fmt in (export_formats or []):
+        need = _FORMAT_GRID.get(fmt)
+        # 不限网格的格式(geotiff/dem/terrain/contour),或源没有那种原生网格
+        # (只能重投影) → 都落到源自己的默认网格上。
+        #
+        # ⚠️ 默认网格**不是无条件要的**:天地图只勾 osm 时不需要 `_c` 那套
+        # (没有 COG 要出),下了就是白下(下载量与 tk 配额都翻倍)。
+        if need is None or need not in avail:
+            required.add(default)
+        else:
+            required.add(need)
+    if not required:
+        # 空格式列表(提交侧会拦,这里兜底):至少把默认网格下了
+        required.add(default)
+    return sorted(required, key=lambda g: (g != GEO_GEODETIC, g))
+
+
 def default_on_stage_keys(provider: str,
                           stages: list[ExportStage] | None = None) -> set[str]:
     """该数据源默认勾选的导出阶段 key。
