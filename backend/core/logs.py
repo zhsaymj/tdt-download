@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from collections import deque
 from datetime import datetime
-from logging.handlers import RotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler
 
 from ..config import ROOT
 
@@ -68,8 +68,22 @@ def _setup() -> None:
     try:
         log_dir = ROOT / "data" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
-        fh = RotatingFileHandler(log_dir / "app.log", maxBytes=5 * 1024 * 1024,
-                                 backupCount=3, encoding="utf-8")
+        # 按日期轮转:每天零点把 app.log 更名为 app.log.<当天日期>,保留 180 天。
+        # 原实现按大小(RotatingFileHandler, 5MB×3),但实测 26 个使用日只用
+        # 3.2MB、最大单日 686KB —— 5MB 阈值要 26 天才轮转一次,等于没轮,
+        # 文件会跨月累积(这正是"不便查看"的成因)。
+        #
+        # utc 不传(默认 False,本机时间),与界面上看到的日志时间戳一致。
+        #
+        # ⚠️ TimedRotatingFileHandler 在多进程下会各自判断轮转时刻而重复轮转,
+        # 但本项目 worker 的 handler 被 install_forwarding 清空换成队列转发,
+        # 只有主进程写文件(见 log_forwarder.py 与 tests/test_log_forwarder.py)。
+        fh = TimedRotatingFileHandler(
+            log_dir / "app.log",
+            when="midnight",
+            backupCount=180,
+            encoding="utf-8",
+        )
         fh.setFormatter(fmt)
         logger.addHandler(fh)
     except OSError:
