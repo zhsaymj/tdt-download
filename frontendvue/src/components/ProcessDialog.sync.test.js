@@ -71,6 +71,20 @@ test('数据源下拉旁有"跟随底图"的说明', () => {
     '缺少"跟随图层底图"的界面提示')
 })
 
+test('★ 该提示换行在下方,不与下拉同排', () => {
+  // 回归护栏:t-form-item 的控件区是横向 flex,提示直接放进去会与下拉同排、
+  // 把选择框挤窄(实测踩到)。必须包在列容器 .stack 里。
+  const i = componentSource.indexOf('跟随图层底图')
+  assert.notEqual(i, -1)
+  const before = componentSource.slice(Math.max(0, i - 400), i)
+  assert.ok(before.includes('class="stack"'),
+    '提示未包在 .stack 列容器里 —— 会与数据源下拉同排并挤压其宽度')
+  assert.ok(
+    componentSource.includes(
+      '.stack { display: flex; flex-direction: column;'),
+    '缺少 .stack 的列布局样式')
+})
+
 test('既有护栏不回归:provider watcher 仍保护非下载来源', () => {
   // ProcessDialog.reset.test.js 用 260 字符窗口切 watch(() => form.provider
   // 找这句。本任务改了同一处,要确保窗口仍覆盖得到。

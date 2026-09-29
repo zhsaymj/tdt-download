@@ -833,9 +833,13 @@ const title = computed(() => ({
       <!-- ① 数据:处理什么 -->
       <template v-if="isDownload">
         <t-form-item label="数据源">
-          <t-select v-model="form.provider" :options="providerOptions" />
-          <!-- 强耦合的缓解措施:切底图会连带改下载源,得让用户知道 -->
-          <span class="dim">（跟随图层底图，切换底图时同步）</span>
+          <!-- 提示必须**换行**在下拉下方:t-form-item 的控件区是 flex 行,
+               直接放 span 会与下拉同排,把选择框挤窄(实测过)。 -->
+          <div class="stack">
+            <t-select v-model="form.provider" :options="providerOptions" />
+            <!-- 强耦合的缓解措施:切底图会连带改下载源,得让用户知道 -->
+            <div class="dim">（跟随图层底图，切换底图时同步）</div>
+          </div>
         </t-form-item>
         <t-form-item v-if="!drawStore.hasRange" label-width="0">
           <div class="warn">请先用地图右上的工具画一个范围</div>
@@ -1073,6 +1077,9 @@ const title = computed(() => ({
   padding: 6px 8px; width: 100%; line-height: 1.7;
 }
 .dim { color: #64748b; font-size: 12px; word-break: break-all; }
+/* 控件 + 其下方说明文字的竖向堆叠。t-form-item 的控件区本身是横向 flex,
+   说明文字直接放进去会与控件同排、抢走宽度,故用一个列容器兜住。 */
+.stack { display: flex; flex-direction: column; gap: 4px; width: 100%; }
 .wtag { color: #d97706; font-size: 11px; margin-left: 6px; }
 .wnote { color: #d97706; font-size: 12px; line-height: 1.6; }
 .pc-crs { display: flex; align-items: center; gap: 10px; width: 100%; }
