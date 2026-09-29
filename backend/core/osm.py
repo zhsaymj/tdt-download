@@ -42,6 +42,12 @@ def _has_explicit_alpha_or_mask(ds) -> bool:
 
 
 def _warped_vrt_kwargs(ds, crs: str) -> dict:
+    """WarpedVRT 的构造参数。
+
+    无 alpha 的源用 `nodata=0` 表达"未覆盖"(拼接画布上未覆盖处是全零)。
+    ⚠️ 它带来的是**逐波段**的掩膜 —— 只看单波段会把 R=0 的真实像素也判成未覆盖,
+    故 `_render_one_tile` 取各波段掩膜的**并集**,不要退回只看第 1 个波段(需求38)。
+    """
     kwargs = {"crs": crs, "resampling": Resampling.bilinear}
     if not _has_explicit_alpha_or_mask(ds):
         kwargs.update(src_nodata=ds.nodata, nodata=0)
@@ -144,7 +150,24 @@ def _render_one_tile(vrt, vrt_bounds, bands, z, x, y, dst_png,
     sub = vrt.read(indexes=list(range(1, bands + 1)),
                    out_shape=(bands, oh, ow), window=window,
                    resampling=Resampling.bilinear).astype(np.uint8)
-    submask = vrt.read_masks(1, out_shape=(oh, ow), window=window).astype(np.uint8)
+    # alpha = **各波段掩膜的并集**,而不是只看第 1 波段:
+    #   * 源自带 alpha 时,三个波段的掩膜都取自那个 alpha → 并集就是它;
+    #   * 无 alpha 的源(GDAL 按 VRT 的 nodata=0 逐波段判定)时,并集恰好等于
+    #     "**任一**波段非 0",也就是 mosaic_to_geotiff 的覆盖约定
+    #     (未覆盖区是画布上的全零像素)。
+    #
+    # ⚠️ 原先只取 read_masks(1) —— GDAL 的 nodata 判定是逐波段的,于是**只要 R 为 0**
+    # 就算未覆盖。深绿植被的 R 常为 0,成果里就出现一片片透明麻点(需求38:OSM 在
+    # 绿色很深的地方变透明,而 COG 没有)。只在裁剪任务上暴露 —— 那时 OSM 不能复用
+    # 带 alpha 的 {name}_z{z}.tif(被裁过),只能自拼这个 3 波段源。
+    #
+    # 用 read_masks(默认 nearest 重采样)而不是对像素值做判断:遮罩边界不会被插值
+    # 糊开 —— 否则数据边缘会多出一圈不透明的过渡像素(实测踩到)。
+    submask = np.zeros((oh, ow), dtype=np.uint8)
+    for i in range(1, bands + 1):
+        np.maximum(submask,
+                   vrt.read_masks(i, out_shape=(oh, ow), window=window),
+                   out=submask)
     rgb[:, py0:py1, px0:px1] = sub
     alpha[py0:py1, px0:px1] = submask
     if clip_geoms_3857 is not None:
