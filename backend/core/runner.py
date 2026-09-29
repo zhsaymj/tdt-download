@@ -175,6 +175,34 @@ def _matrix_set_of(grid: str) -> str:
     return "w" if grid == GEO_MERCATOR else "c"
 
 
+def _mk_downloader(task, prov) -> TileDownloader:
+    """按 provider 造一个瓦片下载器。
+
+    抽出来是因为"某个网格的缓存路径怎么拼"只该有一处实现
+    (`TileDownloader.tile_path` 用 `provider.key`,而 key 带网格后缀);
+    OSM 自拼源时也要按网格读缓存,不能再抄一份路径规则(本项目为此栽过多次)。
+    """
+    return TileDownloader(
+        prov, cache_dir=settings.cache_dir,
+        concurrency=settings.download.concurrency,
+        max_retries=settings.download.max_retries,
+        timeout=settings.download.timeout,
+        use_cache=task.get("use_cache", True))
+
+
+def _osm_uses_mercator_cache(ctx) -> bool:
+    """OSM 是否需要另用 `_w` 缓存拼 3857 源(而不是复用 geotiff 成果)。
+
+    成立条件:源**两套网格都有**(天地图),而任务主网格不是 mercator ——
+    此时 geotiff 成果是 4326 的,对 OSM(3857 输出)没用:
+
+    * 拿它当源 → `export_osm` 得逐瓦片重投影,有损(设计 D4 要消除的正是这个)
+    * geotiff 阶段也不必为 OSM 留存未裁剪副本(那份同样是主网格的,白占磁盘)
+    """
+    return (GEO_MERCATOR in PROVIDER_GRIDS.get(ctx.task["provider"], ())
+            and _ctx_grid(ctx) != GEO_MERCATOR)
+
+
 async def _download_all_grids(*, provider_key: str, grids, levels, bbox,
                               anno_levels, downloader_for, anno_for,
                               on_progress, should_stop) -> bool:
@@ -336,24 +364,16 @@ async def run_task(task_id: str, emit, should_stop) -> None:
         default_grid = grid_of(task["provider"])
         grids = download_grids_of(task["provider"], formats)
 
-        def _mk_downloader(prov):
-            return TileDownloader(
-                prov, cache_dir=settings.cache_dir,
-                concurrency=settings.download.concurrency,
-                max_retries=settings.download.max_retries,
-                timeout=settings.download.timeout,
-                use_cache=task.get("use_cache", True))
-
         dl_by_grid = {default_grid: downloader}
         anno_by_grid = {default_grid: anno_downloader}
         for g in grids:
             if g == default_grid:
                 continue
-            dl_by_grid[g] = _mk_downloader(_build_provider_for(task, g))
+            dl_by_grid[g] = _mk_downloader(task, _build_provider_for(task, g))
             if anno_downloader is not None:
                 anno_prov = build_annotation_provider(
                     task["provider"], anno_token_src, grid=g)
-                anno_by_grid[g] = _mk_downloader(anno_prov) if anno_prov else None
+                anno_by_grid[g] = _mk_downloader(task, anno_prov) if anno_prov else None
 
         stopped = await _download_all_grids(
             provider_key=task["provider"], grids=grids, levels=levels, bbox=bbox,
@@ -643,8 +663,11 @@ def _stage_geotiff(ctx) -> list[str]:
     # 要哪几级由 OSM 的断层策略决定 —— 与 TMS 同一套计划,不再只留最高级(需求38-2)。
     _need_osm = "osm" in parse_export(task.get("export", "geotiff"))
     _clipping = bool(task.get("clip") and ctx.geom)
+    # 但两套网格都有的源(天地图)是例外:它的 OSM 源要另用 _w 缓存拼 3857 的,
+    # 这里留存的主网格副本对它没用 —— 白占磁盘与时间,故不留。
     _osm_keep = ({sz for sz, _ in _source_tms_plan_for_task(ctx)}
-                 if (_need_osm and _clipping and ctx.local_src is None) else set())
+                 if (_need_osm and _clipping and ctx.local_src is None
+                     and not _osm_uses_mercator_cache(ctx)) else set())
     ctx.tracker.start("geotiff", total=total_rows, message="合并 GeoTIFF")
     outputs = []
     base_done = 0
@@ -1149,6 +1172,25 @@ def _osm_source_for_level(ctx, z: int) -> tuple[Path, bool]:
     且没勾 geotiff)时才自拼一份。
     """
     task = ctx.task
+    if _osm_uses_mercator_cache(ctx):
+        # 天地图:geotiff 成果与留存副本都是**任务主网格(4326)**的,对 OSM 没用。
+        # 另用 `_w` 缓存拼 3857 源 —— 于是 export_osm 的 WarpedVRT 是 3857→3857
+        # 的空操作,零重投影(设计 D4)。文件名带 w 以示区分。
+        mkept = ctx.out_dir / f".osm_src_w_z{z}.tif"
+        if mkept.exists() and mkept.stat().st_size > 0:
+            return mkept, True
+        prov_w = _build_provider_for(task, GEO_MERCATOR)
+        dl_w = _mk_downloader(task, prov_w)
+        anno_w = None
+        if ctx.anno_downloader is not None:
+            tok = (token_pool.use_token if token_pool.has_any()
+                   else settings.tianditu.token)
+            ap = build_annotation_provider(task["provider"], tok,
+                                           grid=GEO_MERCATOR)
+            anno_w = _mk_downloader(task, ap) if ap else None
+        return _build_osm_source(ctx, z, prov_w, dl_w.tile_path,
+                                 GEO_MERCATOR, mkept, anno_w)
+
     kept = ctx.out_dir / f".osm_src_z{z}.tif"
     if kept.exists() and kept.stat().st_size > 0:
         return kept, True
@@ -1156,26 +1198,29 @@ def _osm_source_for_level(ctx, z: int) -> tuple[Path, bool]:
     clipped = bool(task.get("clip") and ctx.geom)
     if not clipped and done.exists() and done.stat().st_size > 0:
         return done, True
+    return _build_osm_source(ctx, z, ctx.provider, ctx.downloader.tile_path,
+                             _ctx_grid(ctx), kept, ctx.anno_downloader)
 
+
+def _build_osm_source(ctx, z: int, provider, tile_path_fn, grid: str,
+                      dst: Path, anno_downloader) -> tuple[Path, bool]:
+    """按指定网格拼一份 OSM 源(临时文件 + 原子改名,中途暂停留下的是 .tmp)。"""
     def on_row(done_rows, total_r):
         _check_stop(ctx)
         ctx.tracker.update("osm", message=f"拼接 OSM 源 z{z}({done_rows}/{total_r} 行)")
 
-    # ⚠️ 范围与坐标系都要按**数据源自己的网格**取。原先写死 range_for_bbox(4326)
+    # ⚠️ 范围与坐标系都要按**指定的网格**取。原先写死 range_for_bbox(4326)
     # 且不传 crs,对墨卡托源会按 4326 的行列号去读按 3857 命名的缓存 —— 整幅拼空。
-    # 常规情况下走的是复用分支,这条自拼路径没被覆盖到,问题一直藏着。
-    range_fn = _range_fn_for(task["provider"])
+    range_fn = _range_fn_for(ctx.task["provider"], grid)
     tr = range_fn(*ctx.bbox, z)
-    crs = "EPSG:3857" if _ctx_grid(ctx) == GEO_MERCATOR else "EPSG:4326"
-    anno_path_fn = (ctx.anno_downloader.tile_path
-                    if ctx.anno_downloader is not None else None)
-    # 拼源用临时文件 + 原子改名,中途暂停留下的是 .tmp(不会被误当完整源)。
-    tmp = ctx.out_dir / f".osm_src_z{z}.tmp.tif"
-    mosaic_to_geotiff(ctx.provider, settings.cache_dir, tr, tmp,
-                      ctx.downloader.tile_path, anno_path_fn,
-                      on_row=on_row, crs=crs)
-    tmp.replace(kept)   # 完整拼好才改名为正式源
-    return kept, False
+    anno_path_fn = (anno_downloader.tile_path
+                    if anno_downloader is not None else None)
+    tmp = dst.with_suffix(".tmp.tif")
+    mosaic_to_geotiff(provider, settings.cache_dir, tr, tmp,
+                      tile_path_fn, anno_path_fn,
+                      on_row=on_row, crs=_crs_for_grid(grid))
+    tmp.replace(dst)   # 完整拼好才改名为正式源
+    return dst, False
 
 
 # ============ DEM → 可视化 RGB 源(供复用影像切片器)============
