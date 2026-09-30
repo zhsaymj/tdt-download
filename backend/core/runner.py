@@ -1208,6 +1208,31 @@ def _stage_osm(ctx) -> list[str]:
     # 故它**不是**"和原先完全一致":常规的连续级别也改成了逐级取源,这正是需求38-2
     # 要的"不再只切最高级"。
     osm_dir = ctx.out_dir / "osm"
+
+    # 全球底图段:低层级从缓存直映射(不重投影),写进同一 osm_dir
+    global_max = int(task.get("global_max_level", 0) or 0)
+    if global_max > 0 and not ctx.is_dem and ctx.local_src is None:
+        from .osm_cache import export_osm_from_cache
+        gg = [z for z in range(1, global_max + 1) if z >= OSM_MIN_LEVEL]
+        if gg:
+            global_bbox = (-180.0, -85.05112878, 180.0, 85.05112878)
+
+            def on_progress_og(done, total):
+                ctx.tracker.update(
+                    "osm", done=done, total=total,
+                    message=f"切全球底图({done}/{total} 张)")
+
+            _, gz, gstop = export_osm_from_cache(
+                ctx.provider, ctx.downloader.tile_path,
+                global_bbox, gg, osm_dir,
+                anno_tile_path_fn=None if ctx.anno_downloader is None
+                else ctx.anno_downloader.tile_path,
+                on_progress=on_progress_og, should_stop=ctx.should_stop)
+            if gstop:
+                raise _Stopped()
+            if gz:
+                logger.info("任务[%s] OSM 全球底图段已输出 z%s", task["name"], gz)
+
     plan = _source_tms_plan_for_task(ctx)
     floor = min(OSM_MIN_LEVEL, z_max)
     groups = [(sz, [z for z in lv if z >= floor]) for sz, lv in plan]
