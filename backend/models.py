@@ -169,6 +169,12 @@ class TaskCreate(BaseModel):
     crs: str = Field(default="EPSG:4326", description="GeoTIFF 输出坐标系")
     use_cache: bool = Field(default=True, description="是否复用瓦片缓存(False=强制重下原始瓦片)")
     annotate: bool = Field(default=False, description="是否叠加路网注记(同步下载注记图层并烘焙进成果)")
+    global_max_level: int = Field(
+        default=0, ge=0, le=21,
+        description="全球底图铺到第几层;0=不启用(切片包低层级用真实全球瓦片)")
+    buffer_rings: int = Field(
+        default=1, ge=0, le=10,
+        description="每层范围外额外外扩的圈数(把清晰/模糊边界推远)")
     hillshade: HillshadeParams = Field(default_factory=HillshadeParams, description="DEM 晕渲光照参数")
     # ---- 三维建筑(Overture → b3dm)参数 ----
     base_height_mode: str = Field(
@@ -266,6 +272,7 @@ def create_task(data: TaskCreate, total: int, est_bytes: int = 0) -> str:
                (id, name, provider, bbox, z_min, z_max, export,
                 status, total, downloaded, failed, message,
                 output_path, geometry, clip, crs, levels, use_cache, annotate,
+                global_max_level, buffer_rings,
                 hillshade, stages, est_bytes,
                 base_height_mode, height_offset, default_height, max_per_tile,
                 building_count,
@@ -275,7 +282,7 @@ def create_task(data: TaskCreate, total: int, est_bytes: int = 0) -> str:
                 tms_source_strategy, pc_crs, pc_resolution,
                 created_at, updated_at)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-                       ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 task_id, data.name, data.provider, json.dumps(data.bbox),
                 z_min, z_max, data.export,
@@ -284,6 +291,9 @@ def create_task(data: TaskCreate, total: int, est_bytes: int = 0) -> str:
                 1 if data.clip else 0, data.crs or "EPSG:4326",
                 json.dumps(levels), 1 if data.use_cache else 0,
                 1 if data.annotate else 0,
+                int(getattr(data, "global_max_level", 0) or 0),
+                1 if getattr(data, "buffer_rings", 1) is None
+                else int(getattr(data, "buffer_rings", 1)),
                 json.dumps(data.hillshade.model_dump()),
                 json.dumps(stages), int(est_bytes or 0),
                 data.base_height_mode, float(data.height_offset),
@@ -360,6 +370,8 @@ def _row_to_dict(row) -> dict:
     d["crs"] = d.get("crs") or "EPSG:4326"
     d["use_cache"] = bool(d.get("use_cache", 1))
     d["annotate"] = bool(d.get("annotate", 0))
+    d["global_max_level"] = int(d.get("global_max_level", 0) or 0)
+    d["buffer_rings"] = int(d["buffer_rings"]) if d.get("buffer_rings") is not None else 1
     hs = d.get("hillshade")
     d["hillshade"] = json.loads(hs) if hs else {"azimuth": 315.0, "altitude": 45.0, "z_factor": 1.0}
     # 级别列表:优先存储的 levels,旧任务(空)回退连续区间
