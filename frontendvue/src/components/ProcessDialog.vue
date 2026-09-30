@@ -678,7 +678,10 @@ watch(() => form.export, (exp) => {
 watch(() => form.annotate, () => {
   if (isDownload.value) loadEstimate()
 })
-watch(() => form.globalBasemap, () => {
+watch(() => form.globalBasemap, (on) => {
+  // 与裁剪互斥:裁剪是"去掉范围外",全球底图是"补进范围外",同时开等于白下。
+  // 裁剪默认是勾着的,所以由勾上全球底图这一侧负责取消对方。
+  if (on) form.clip = false
   if (isDownload.value) loadEstimate()
 })
 watch(() => form.globalMaxLevel, () => {
@@ -1122,9 +1125,11 @@ const title = computed(() => ({
               </t-form-item>
               <t-form-item v-if="isDownload ? drawStore.clippable : form.useRange"
                 label-width="0">
-                <t-checkbox v-model="form.clip">裁剪成果到范围边界</t-checkbox>
-                <InfoTip content="瓦片是固定网格,边界由级别决定、不会刚好落在选区上——级别越低超出越多。勾选后成果按选区裁切,超出部分透明或裁掉。"
-                  max-width="360px" />
+                <t-checkbox v-model="form.clip" :disabled="form.globalBasemap">裁剪成果到范围边界</t-checkbox>
+                <InfoTip :content="form.globalBasemap
+                  ? '与「全球底图 + 边缘缓冲」互斥:裁剪会把范围外的部分去掉,而全球底图正是要把范围外补进来,同时开等于白下。取消全球底图后可再勾选。'
+                  : '瓦片是固定网格,边界由级别决定、不会刚好落在选区上——级别越低超出越多。勾选后成果按选区裁切,超出部分透明或裁掉。'"
+                  max-width="380px" />
               </t-form-item>
               <t-form-item v-if="isDownload && canAnnotate(form.provider)" label-width="0">
                 <t-checkbox v-model="form.annotate" :disabled="!annotationUsable(form.levels)">叠加路网注记</t-checkbox>

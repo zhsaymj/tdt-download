@@ -47,6 +47,22 @@ test('控件渲染在界面上', () => {
     '层级下拉没有绑定 form.globalMaxLevel')
 })
 
+test('★ 与「裁剪成果到范围边界」互斥 ★', () => {
+  const code = stripComments(src)
+  // 1) 勾了全球底图时,裁剪勾选框禁用
+  const ci = code.indexOf('裁剪成果到范围边界')
+  assert.notEqual(ci, -1, '找不到裁剪勾选框')
+  const head = code.slice(Math.max(0, ci - 260), ci)
+  assert.ok(head.includes(':disabled="form.globalBasemap"'),
+    '裁剪框没有在全球底图开启时禁用 —— 两者目标相反,同时开会把刚补的范围裁掉')
+  // 2) 勾上全球底图时自动取消裁剪(用户默认是勾着裁剪的)
+  const wi = code.indexOf('watch(() => form.globalBasemap')
+  assert.notEqual(wi, -1, '找不到 globalBasemap 的 watch')
+  const wbody = code.slice(wi, code.indexOf('})', wi) + 2)
+  assert.ok(/form\.clip\s*=\s*false/.test(wbody),
+    '勾上全球底图时应自动取消裁剪,否则用户要靠自己发现冲突')
+})
+
 test('DEM 源不显示这个开关(后端对该链路不生效,显示即误导)', () => {
   const code = stripComments(src)
   const i = code.indexOf('v-model="form.globalBasemap"')

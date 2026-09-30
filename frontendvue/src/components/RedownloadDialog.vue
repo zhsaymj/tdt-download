@@ -265,6 +265,13 @@ watch(() => props.visible, async (v) => {
     form.crs = t.crs || 'EPSG:4326'
     form.clip = !!t.clip
     form.annotate = !!t.annotate
+    // 全球底图也要预填 —— 不填的话重跑会把该设置静默丢掉(回到 global_max_level=0)
+    form.globalBasemap = (t.global_max_level || 0) > 0
+    form.globalMaxLevel = t.global_max_level || 5
+    form.bufferRings = (t.buffer_rings ?? 1)
+    // 与裁剪互斥:两者目标相反,同时开会把刚补的范围外又裁掉。
+    // 历史任务若两者皆真,以全球底图为准(它是更"宽"的那个设置)。
+    if (form.globalBasemap) form.clip = false
     form.use_cache = true
     form.tms_source_strategy = t.tms_source_strategy || 'contiguous'
     // 三维建筑参数预填
@@ -298,6 +305,12 @@ watch(() => form.provider, () => {
 // 勾选/取消「叠加路网注记」要重新估算 —— 注记增量由后端算(见 refreshEstimate),
 // 不重算的话数字会停在上一次的结果上。
 watch(() => form.annotate, () => {
+  if (props.visible && !isBuildings.value) refreshEstimate()
+})
+
+// 全球底图与裁剪互斥(目标相反),勾上时自动取消裁剪并重算瓦片数。
+watch(() => form.globalBasemap, (on) => {
+  if (on) form.clip = false
   if (props.visible && !isBuildings.value) refreshEstimate()
 })
 
@@ -525,11 +538,29 @@ async function submit() {
         <t-select v-model="form.crs" :options="crsOpts" filterable />
       </t-form-item>
       <t-form-item v-if="!isBuildings && !isDem && hasGeometry">
-        <t-checkbox v-model="form.clip">裁剪 GeoTIFF 到矢量/多边形边界</t-checkbox>
+        <t-checkbox v-model="form.clip" :disabled="form.globalBasemap">裁剪 GeoTIFF 到矢量/多边形边界</t-checkbox>
       </t-form-item>
       <t-form-item v-if="!isBuildings && !isDem">
         <t-checkbox v-model="form.annotate">叠加路网注记(瓦片数翻倍)</t-checkbox>
       </t-form-item>
+      <t-form-item v-if="!isBuildings && !isDem">
+        <t-checkbox v-model="form.globalBasemap">全球底图 + 边缘缓冲</t-checkbox>
+      </t-form-item>
+      <template v-if="form.globalBasemap && !isBuildings && !isDem">
+        <t-form-item label="全球底图铺到">
+          <t-select v-model="form.globalMaxLevel" :options="[
+            { value: 3, label: 'z3' }, { value: 4, label: 'z4' },
+            { value: 5, label: 'z5' }, { value: 6, label: 'z6' },
+            { value: 7, label: 'z7' }, { value: 8, label: 'z8' },
+          ]" style="width: 100px" />
+        </t-form-item>
+        <t-form-item label="边缘缓冲圈数">
+          <t-select v-model="form.bufferRings" :options="[
+            { value: 0, label: '0 圈' }, { value: 1, label: '1 圈' },
+            { value: 2, label: '2 圈' }, { value: 3, label: '3 圈' },
+          ]" style="width: 100px" />
+        </t-form-item>
+      </template>
       <t-form-item v-if="!isBuildings">
         <t-checkbox v-model="form.use_cache">使用缓存数据(不勾选则重新下载原始瓦片)</t-checkbox>
       </t-form-item>
