@@ -52,6 +52,7 @@ from .terrain_tiles import export_terrain, level_for_resolution, write_layer_jso
 from .token_pool import token_pool
 from .tms import (export_tms, export_tms_from_source, source_tms_level_plan,
                   source_tms_level_plan_preserve_inputs, write_tilemapresource)
+from .tile_range import download_levels, level_range
 from .tiling import TILE_SIZE, range_for_bbox
 
 # OSM 金字塔起始下限:低于此级的超低层(单瓦片跨度巨大、小范围里基本全透明)
@@ -230,26 +231,22 @@ def _osm_uses_mercator_cache(ctx) -> bool:
 
 async def _download_all_grids(*, provider_key: str, grids, levels, bbox,
                               anno_levels, downloader_for, anno_for,
-                              on_progress, should_stop) -> bool:
+                              on_progress, should_stop,
+                              global_max_level=0, buffer_rings=0) -> bool:
     """按网格逐级下载原始瓦片(与注记);返回是否被停止。
 
-    抽成独立函数是为了**可测**:它埋在 run_task 里时没法用假下载器验证
-    "每个网格各用各的区间函数"。
-
-    每个网格配自己的区间函数与下载器 —— `_c` 与 `_w` 的行号语义不同
-    (第 z 级 2^(z-1) vs 2^z 行),混用会按错误网格取瓦片、下出来的图整体错位,
-    而且**不报错**。
-
-    注记复用同网格底图算出的那个 `tr`:这是"天然对齐"的实现点,两者行列号同源。
-    ⚠️ 所以注记 provider 也必须按**同一个 grid** 构造,网格选错会请求到别处的
-    注记(不报错,只是路网对不上影像)。
+    ... 现有 docstring ...
+    global_max_level: 全球底图层级上限(0=不启用),见 tile_range.level_range
+    buffer_rings: 每层范围外外扩圈数(0=不外扩)
     """
     for grid in grids:
         range_fn = _range_fn_for(provider_key, grid)
         dl = downloader_for(grid)
         anno = anno_for(grid) if anno_for is not None else None
         for z in levels:
-            tr = range_fn(*bbox, z)
+            tr = level_range(z, grid, bbox,
+                             global_max_level=global_max_level,
+                             buffer_rings=buffer_rings)
             _ok, _fail, stopped = await dl.download_range(
                 tr, on_progress, should_stop)
             if stopped:
@@ -404,8 +401,8 @@ async def run_task(task_id: str, emit, should_stop) -> None:
 
         tracker.start("download", total=total, message="下载原始瓦片")
         logger.info("任务[%s] 阶段[下载] 开始,共 %d 张瓦片", task["name"], total)
-        # 注记只下 ≤ z18 的级别(底图不受此限)
-        anno_levels = _anno_levels_for(levels)
+        # 注记层级随下载层级走(全球段也要下注记)
+        # anno_levels 在最终的调用点按 dl_levels 重新定义
 
         # 按网格下载(设计 D3):天地图两套网格都要下时(tms+osm 同选),每个网格
         # 配自己的 provider / 区间函数 / 下载器 —— `_c` 与 `_w` 的行号语义不同,
@@ -425,9 +422,17 @@ async def run_task(task_id: str, emit, should_stop) -> None:
                     task["provider"], anno_token_src, grid=g)
                 anno_by_grid[g] = _mk_downloader(task, anno_prov) if anno_prov else None
 
+        # 全球底图 + 边缘缓冲(设计 2026-09-30)
+        global_max = int(task.get("global_max_level", 0) or 0)
+        buffer_rings = (1 if task.get("buffer_rings", 1) is None
+                        else int(task.get("buffer_rings", 1)))
+        dl_levels = download_levels(levels, global_max)
+        anno_levels = _anno_levels_for(dl_levels)
+
         stopped = await _download_all_grids(
-            provider_key=task["provider"], grids=grids, levels=levels, bbox=bbox,
+            provider_key=task["provider"], grids=grids, levels=dl_levels, bbox=bbox,
             anno_levels=anno_levels,
+            global_max_level=global_max, buffer_rings=buffer_rings,
             downloader_for=lambda g: dl_by_grid[g],
             anno_for=(lambda g: anno_by_grid.get(g)) if anno_downloader else None,
             on_progress=on_progress, should_stop=should_stop)
