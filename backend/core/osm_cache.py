@@ -19,6 +19,18 @@ from .mosaic import _read_tile
 from .tms import _write_tile_png
 
 
+def global_osm_levels(global_max_level: int) -> list[int]:
+    """全球底图段的 OSM 层级:从 z1 起的完整序列。
+
+    ⚠️ **不套用 OSM_MIN_LEVEL**:那个下限是给**局部段**定的(小范围在超低层
+    基本全透明,切了没意义);全球段恰恰相反 —— 缩到最顶层时正是 z1/z2 在
+    顶着,少了它们客户端缩远了显示空白(实测踩到:只输出 z[3,4,5])。
+    """
+    if global_max_level <= 0:
+        return []
+    return list(range(1, global_max_level + 1))
+
+
 def export_osm_from_cache(
     provider, tile_path_fn, bbox, levels, out_dir,
     anno_tile_path_fn=None, on_progress=None, should_stop=None,

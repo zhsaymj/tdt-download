@@ -958,8 +958,10 @@ def _stage_tms(ctx) -> list[str]:
         ctx.tracker.update("tms", done=done, total=total,
                            message=f"已切 {done}/{total} 张")
 
+    # 导出层级要含全球段 —— 用户可能只勾了 z10-18,而全球底图必须从 z1 起
+    tms_levels = download_levels(levels, gb_max) if gb_max > 0 else levels
     _, _, tms_ext, stopped = export_tms(
-        ctx.provider, ctx.downloader.tile_path, ctx.bbox, levels, tms_dir,
+        ctx.provider, ctx.downloader.tile_path, ctx.bbox, tms_levels, tms_dir,
         clip_geom=clip_geom, anno_tile_path_fn=anno_path_fn,
         on_progress=on_progress, should_stop=ctx.should_stop,
         global_max_level=gb_max, buffer_rings=gb_rings)
@@ -1245,8 +1247,8 @@ def _stage_osm(ctx) -> list[str]:
     # 全球底图段:低层级从缓存直映射(不重投影),写进同一 osm_dir
     global_max = int(task.get("global_max_level", 0) or 0)
     if global_max > 0 and not ctx.is_dem and ctx.local_src is None:
-        from .osm_cache import export_osm_from_cache
-        gg = [z for z in range(1, global_max + 1) if z >= OSM_MIN_LEVEL]
+        from .osm_cache import export_osm_from_cache, global_osm_levels
+        gg = global_osm_levels(global_max)
         if gg:
             global_bbox = (-180.0, -85.05112878, 180.0, 85.05112878)
 
