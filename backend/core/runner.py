@@ -902,6 +902,26 @@ def _stage_tms(ctx) -> list[str]:
     if _tms_plan_requires_source(plan):
         return _tms_from_downloaded_sources(ctx, tms_dir, clip_geom, plan)
 
+    # 全球底图段(geodetic 源):低层级真实全球瓦片,写进同一 tms_dir。
+    # 级号/行号换算走 export_tms 内部,不在外面自己算(混用即整体错位且不报错)。
+    global_max = int(ctx.task.get("global_max_level", 0) or 0)
+    global_bbox = (-180.0, -90.0, 180.0, 90.0)
+    if global_max > 0 and _ctx_grid(ctx) == "geodetic":
+        gg = [z for z in range(1, global_max + 1)]
+
+        def on_progress_g(done, total):
+            ctx.tracker.update("tms", done=done, total=total,
+                               message=f"切全球底图({done}/{total} 张)")
+
+        _, gz, _, gstop = export_tms(
+            ctx.provider, ctx.downloader.tile_path, global_bbox, gg, tms_dir,
+            clip_geom=None, anno_tile_path_fn=anno_path_fn,
+            on_progress=on_progress_g, should_stop=ctx.should_stop)
+        if gstop:
+            raise _Stopped()
+        if gz:
+            logger.info("任务[%s] 全球底图段已输出 z%s", task["name"], gz)
+
     def on_progress(done, total):
         ctx.tracker.update("tms", done=done, total=total,
                            message=f"已切 {done}/{total} 张")
@@ -912,7 +932,10 @@ def _stage_tms(ctx) -> list[str]:
         on_progress=on_progress, should_stop=ctx.should_stop)
     if stopped:
         raise _Stopped()
-    write_tilemapresource(tms_dir, ctx.provider, task["name"], ctx.bbox, levels, ext=tms_ext)
+    merged_bbox = global_bbox if (global_max > 0 and _ctx_grid(ctx) == "geodetic") else ctx.bbox
+    merged_levels = list(range(1, max(levels) + 1)) if global_max > 0 else levels
+    write_tilemapresource(tms_dir, ctx.provider, task["name"],
+                          merged_bbox, merged_levels, ext=tms_ext)
     return _maybe_mbtiles(ctx, "tms", tms_dir,
                     _mbtiles_scheme_for(_ctx_grid(ctx), "tms"), tms_ext)
 
