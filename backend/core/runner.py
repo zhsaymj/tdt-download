@@ -864,6 +864,24 @@ def _tms_from_planned_sources_guarded(ctx, tms_dir: Path, clip_geom, plan,
     return out
 
 
+def _global_basemap_of(ctx) -> tuple[int, int]:
+    """任务的 (global_max_level, buffer_rings);不支持的数据源一律 (0, 0)。
+
+    与下载阶段同一口径(supports_global_basemap)—— 下载按缓冲、导出不按,
+    就会出现"瓦片下好了但瓦片包里没有"的静默浪费(实测踩到)。
+    未勾选(global_max_level=0)时两个都归零,与建任务时的口径一致。
+    """
+    t = ctx.task
+    if not supports_global_basemap(t["provider"]):
+        return 0, 0
+    gmax = int(t.get("global_max_level", 0) or 0)
+    if gmax <= 0:
+        return 0, 0
+    rings = (1 if t.get("buffer_rings", 1) is None
+             else int(t.get("buffer_rings", 1)))
+    return gmax, rings
+
+
 def _merge_tree(src: Path, dst: Path) -> None:
     """把 src 下的瓦片树合并进 dst(不覆盖已存在文件,跳过标记文件)。"""
     for p in src.rglob("*"):
@@ -888,6 +906,7 @@ def _stage_tms(ctx) -> list[str]:
     ctx.tracker.start("tms", total=1, message="切 TMS 瓦片")
     tms_dir = ctx.out_dir / "tms"
     global_max = int(ctx.task.get("global_max_level", 0) or 0)
+    buffer_rings = int(ctx.task.get("buffer_rings", 1) or 0)
     global_bbox = (-180.0, -90.0, 180.0, 90.0)
 
     # DEM 走另一条路:export_tms 是"从缓存逐张搬运瓦片",而 DEM 缓存里是 3857 网格的
@@ -929,23 +948,11 @@ def _stage_tms(ctx) -> list[str]:
     if _tms_plan_requires_source(plan):
         return _tms_from_downloaded_sources(ctx, tms_dir, clip_geom, plan)
 
-    # 全球底图段(geodetic 源):低层级真实全球瓦片,写进同一 tms_dir。
-    # 级号/行号换算走 export_tms 内部,不在外面自己算(混用即整体错位且不报错)。
-    if global_max > 0 and _ctx_grid(ctx) == "geodetic":
-        gg = [z for z in range(1, global_max + 1)]
-
-        def on_progress_g(done, total):
-            ctx.tracker.update("tms", done=done, total=total,
-                               message=f"切全球底图({done}/{total} 张)")
-
-        _, gz, _, gstop = export_tms(
-            ctx.provider, ctx.downloader.tile_path, global_bbox, gg, tms_dir,
-            clip_geom=None, anno_tile_path_fn=anno_path_fn,
-            on_progress=on_progress_g, should_stop=ctx.should_stop)
-        if gstop:
-            raise _Stopped()
-        if gz:
-            logger.info("任务[%s] 全球底图段已输出 z%s", task["name"], gz)
+    # 全球底图与边缘缓冲都交给 export_tms 的 level_range 算覆盖范围:
+    # z ≤ global_max_level 取整层(全球),其余层级按 bbox 外扩 buffer_rings 圈。
+    # 一次调用即输出完整金字塔 —— 不再单独切一次全球段(那会造成两次遍历)。
+    gb_max = global_max if _ctx_grid(ctx) == "geodetic" else 0
+    gb_rings = buffer_rings if _ctx_grid(ctx) == "geodetic" else 0
 
     def on_progress(done, total):
         ctx.tracker.update("tms", done=done, total=total,
@@ -954,7 +961,8 @@ def _stage_tms(ctx) -> list[str]:
     _, _, tms_ext, stopped = export_tms(
         ctx.provider, ctx.downloader.tile_path, ctx.bbox, levels, tms_dir,
         clip_geom=clip_geom, anno_tile_path_fn=anno_path_fn,
-        on_progress=on_progress, should_stop=ctx.should_stop)
+        on_progress=on_progress, should_stop=ctx.should_stop,
+        global_max_level=gb_max, buffer_rings=gb_rings)
     if stopped:
         raise _Stopped()
     merged_bbox = global_bbox if (global_max > 0 and _ctx_grid(ctx) == "geodetic") else ctx.bbox
@@ -1258,6 +1266,9 @@ def _stage_osm(ctx) -> list[str]:
             if gz:
                 logger.info("任务[%s] OSM 全球底图段已输出 z%s", task["name"], gz)
 
+    # 局部段也要带缓冲(源图在 _build_osm_source 里按同一口径拼到缓冲区)
+    gb_max, gb_rings = _global_basemap_of(ctx)
+
     plan = _source_tms_plan_for_task(ctx)
     floor = min(OSM_MIN_LEVEL, z_max)
     groups = [(sz, [z for z in lv if z >= floor]) for sz, lv in plan]
@@ -1287,7 +1298,8 @@ def _stage_osm(ctx) -> list[str]:
             _, _, stopped = export_osm(
                 src_path, levels_here, ctx.bbox, osm_dir,
                 on_progress=on_progress, clip_geom=clip_geom,
-                should_stop=ctx.should_stop)
+                should_stop=ctx.should_stop,
+                global_max_level=gb_max, buffer_rings=gb_rings)
             if stopped:
                 break
             base_done += total_here
@@ -1351,8 +1363,11 @@ def _build_osm_source(ctx, z: int, provider, tile_path_fn, grid: str,
 
     # ⚠️ 范围与坐标系都要按**指定的网格**取。原先写死 range_for_bbox(4326)
     # 且不传 crs,对墨卡托源会按 4326 的行列号去读按 3857 命名的缓存 —— 整幅拼空。
-    range_fn = _range_fn_for(ctx.task["provider"], grid)
-    tr = range_fn(*ctx.bbox, z)
+    # 范围走 level_range:源图必须覆盖到缓冲区,否则 export_osm 切到缓冲瓦片时
+    # 会因"完全在源范围外"把它们全跳过 —— 缓冲白下(实测踩到)。
+    gb_max, gb_rings = _global_basemap_of(ctx)
+    tr = level_range(z, grid, ctx.bbox,
+                     global_max_level=gb_max, buffer_rings=gb_rings)
     anno_path_fn = (anno_downloader.tile_path
                     if anno_downloader is not None else None)
     tmp = dst.with_suffix(".tmp.tif")

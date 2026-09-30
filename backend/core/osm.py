@@ -206,6 +206,8 @@ def export_osm(
     clip_geom: dict | None = None,
     should_stop=None,
     concurrency: int | None = None,
+    global_max_level: int = 0,
+    buffer_rings: int = 0,
 ) -> tuple[Path, list[int], bool]:
     """把 EPSG:4326 的源 GeoTIFF 重投影切成 OSM XYZ 瓦片(多线程)。
 
@@ -218,11 +220,20 @@ def export_osm(
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     stopped = False
+    from .tile_range import level_range
+
+    def _xyz_range(z):
+        """本层的 (x 区间, y 区间) —— 走 level_range,缓冲才不会被丢掉。"""
+        tr = level_range(z, "mercator", bbox,
+                         global_max_level=global_max_level,
+                         buffer_rings=buffer_rings)
+        return range(tr.col_min, tr.col_max + 1), range(tr.row_min, tr.row_max + 1)
+
     # 细粒度进度:总瓦片数(各级 xs*ys 之和,含将被跳过的空瓦片,作为进度分母)
     total_tiles = 0
     for z in levels:
-        xs, ys = _tile_xyz_range(bbox, z)
-        total_tiles += len(list(xs)) * len(list(ys))
+        xs, ys = _xyz_range(z)
+        total_tiles += len(xs) * len(ys)
     total_tiles = max(total_tiles, 1)
     done_tiles = 0
 
@@ -285,7 +296,7 @@ def export_osm(
                 if should_stop and should_stop():
                     stopped = True
                     break
-                xs, ys = _tile_xyz_range(bbox, z)
+                xs, ys = _xyz_range(z)
                 futures = []
                 for x in xs:
                     if should_stop and should_stop():

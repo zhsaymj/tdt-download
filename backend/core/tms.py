@@ -194,6 +194,8 @@ def export_tms(
     on_progress=None,
     should_stop=None,
     concurrency: int | None = None,
+    global_max_level: int = 0,
+    buffer_rings: int = 0,
 ) -> tuple[Path, list[int], str, bool]:
     """把缓存中的天地图瓦片按 TMS 规则输出到 out_dir(多线程)。
 
@@ -204,11 +206,15 @@ def export_tms(
     未提供裁剪与注记时维持原样无损复制,保持原格式(jpg/png)。
 
     levels: 选中的天地图级别列表。
+    global_max_level/buffer_rings: 覆盖范围由 tile_range.level_range 算 ——
+      z ≤ global_max_level 取整层(全球),其余层级按 bbox 外扩 buffer_rings 圈。
+      **不传这两个参数就等于只切 bbox 范围内的瓦片**(缓冲会被丢掉)。
     on_progress(done, total): 可选,细粒度上报已处理瓦片数。
     should_stop(): 可选,返回 True 时在层边界尽快停止(暂停/取消)。
     concurrency: 切片线程数;None 时取 min(CPU 核数, 8)。
     返回 (out_dir, 已导出的 gdal 级号列表, 输出扩展名, stopped)。
     """
+    from .tile_range import level_range
     out_dir.mkdir(parents=True, exist_ok=True)
     stopped = False
     clipping = clip_geom is not None
@@ -221,7 +227,9 @@ def export_tms(
         clip_bounds = _bounds_of(geoms)
 
     # 细粒度进度:总瓦片数(所有层级之和),每处理一张回调一次
-    total_tiles = max(sum(range_for_bbox(*bbox, z).count for z in levels), 1)
+    total_tiles = max(sum(level_range(
+        z, "geodetic", bbox, global_max_level=global_max_level,
+        buffer_rings=buffer_rings).count for z in levels), 1)
     workers = concurrency if concurrency and concurrency > 0 else min(os.cpu_count() or 4, 8)
 
     lock = threading.Lock()
@@ -248,7 +256,9 @@ def export_tms(
             if should_stop and should_stop():
                 stopped = True
                 break
-            tr = range_for_bbox(*bbox, z)
+            tr = level_range(z, "geodetic", bbox,
+                             global_max_level=global_max_level,
+                             buffer_rings=buffer_rings)
             futures = []
             for i, (col, row) in enumerate(tr.iter_tiles()):
                 # 提交过程中定期查停止:及时中断大层级,取消未开始的任务
