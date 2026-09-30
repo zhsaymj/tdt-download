@@ -35,7 +35,8 @@ class GlobalBasemapFieldsTest(unittest.TestCase):
         self.assertEqual(row["global_max_level"], 5)
         self.assertEqual(row["buffer_rings"], 2)
 
-    def test_row_to_dict_parses(self):
+    def test_defaults_are_off_and_three_rings(self):
+        """默认:global_max_level=0(不启用)、buffer_rings=3(实测 1 圈仍能看到边界)。"""
         d = self.TMP / "r.db"
         with mock.patch.object(db, "DB_PATH", d):
             db.init_db()
@@ -50,7 +51,7 @@ class GlobalBasemapFieldsTest(unittest.TestCase):
                     "SELECT * FROM tasks WHERE name='t2'").fetchone()
                 parsed = models._row_to_dict(raw)
         self.assertEqual(parsed["global_max_level"], 0)
-        self.assertEqual(parsed["buffer_rings"], 1)
+        self.assertEqual(parsed["buffer_rings"], 3)
 
 
 if __name__ == "__main__":

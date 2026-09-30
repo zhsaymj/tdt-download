@@ -74,7 +74,7 @@ const form = reactive({
   annotate: false,
   globalBasemap: false,
   globalMaxLevel: 5,
-  bufferRings: 1,
+  bufferRings: 3,
   keepTilesDir: true,
   tmsSourceStrategy: 'contiguous',
   contourInterval: 50,

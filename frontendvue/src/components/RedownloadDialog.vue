@@ -46,7 +46,7 @@ const crsOpts = crsOptions()
 const form = reactive({
   name: '', provider: 'tianditu_img', levels: [], export: [],
   crs: 'EPSG:4326', clip: false, use_cache: true, annotate: false,
-  globalBasemap: false, globalMaxLevel: 5, bufferRings: 1,
+  globalBasemap: false, globalMaxLevel: 5, bufferRings: 3,
   tms_source_strategy: 'contiguous',
   // 三维建筑参数
   base_height_mode: 'terrain', height_offset: 0, default_height: 6, max_per_tile: 2000,
@@ -268,7 +268,7 @@ watch(() => props.visible, async (v) => {
     // 全球底图也要预填 —— 不填的话重跑会把该设置静默丢掉(回到 global_max_level=0)
     form.globalBasemap = (t.global_max_level || 0) > 0
     form.globalMaxLevel = t.global_max_level || 5
-    form.bufferRings = (t.buffer_rings ?? 1)
+    form.bufferRings = (t.buffer_rings ?? 3)
     // 与裁剪互斥:两者目标相反,同时开会把刚补的范围外又裁掉。
     // 历史任务若两者皆真,以全球底图为准(它是更"宽"的那个设置)。
     if (form.globalBasemap) form.clip = false

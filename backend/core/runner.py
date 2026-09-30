@@ -373,7 +373,7 @@ async def run_task(task_id: str, emit, should_stop) -> None:
                                  annotate=annotate,
                                  global_max_level=int(task.get(
                                      "global_max_level", 0) or 0),
-                                 buffer_rings=int(task.get("buffer_rings", 1))
+                                 buffer_rings=int(task.get("buffer_rings", 3))
                                  if int(task.get("global_max_level", 0) or 0) > 0 else 0)
         if _want_total != total:
             logger.info("任务[%s] 下载量按当前网格重算:%d → %d 张",
@@ -431,8 +431,8 @@ async def run_task(task_id: str, emit, should_stop) -> None:
         # 不归零的话会白下 geodetic z1-5 的 682 张(静默浪费)。
         _gb_ok = supports_global_basemap(task["provider"])
         global_max = int(task.get("global_max_level", 0) or 0) if _gb_ok else 0
-        buffer_rings = (1 if task.get("buffer_rings", 1) is None
-                        else int(task.get("buffer_rings", 1))) if _gb_ok else 0
+        buffer_rings = (3 if task.get("buffer_rings", 3) is None
+                        else int(task.get("buffer_rings", 3))) if _gb_ok else 0
         dl_levels = download_levels(levels, global_max)
         anno_levels = _anno_levels_for(dl_levels)
 
@@ -877,8 +877,8 @@ def _global_basemap_of(ctx) -> tuple[int, int]:
     gmax = int(t.get("global_max_level", 0) or 0)
     if gmax <= 0:
         return 0, 0
-    rings = (1 if t.get("buffer_rings", 1) is None
-             else int(t.get("buffer_rings", 1)))
+    rings = (3 if t.get("buffer_rings", 3) is None
+             else int(t.get("buffer_rings", 3)))
     return gmax, rings
 
 
@@ -906,7 +906,7 @@ def _stage_tms(ctx) -> list[str]:
     ctx.tracker.start("tms", total=1, message="切 TMS 瓦片")
     tms_dir = ctx.out_dir / "tms"
     global_max = int(ctx.task.get("global_max_level", 0) or 0)
-    buffer_rings = int(ctx.task.get("buffer_rings", 1) or 0)
+    buffer_rings = int(ctx.task.get("buffer_rings", 3) or 0)
     global_bbox = (-180.0, -90.0, 180.0, 90.0)
 
     # DEM 走另一条路:export_tms 是"从缓存逐张搬运瓦片",而 DEM 缓存里是 3857 网格的

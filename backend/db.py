@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     use_cache   INTEGER DEFAULT 1,      -- 是否复用瓦片缓存(0=强制重新下载原始瓦片)
     annotate    INTEGER DEFAULT 0,      -- 是否叠加路网注记(同步下载注记图层并烘焙进成果)
     global_max_level INTEGER DEFAULT 0, -- 全球底图铺到第几层;0=不启用(设计 2026-09-30)
-    buffer_rings     INTEGER DEFAULT 1, -- 每层范围外外扩圈数
+    buffer_rings     INTEGER DEFAULT 3, -- 每层范围外外扩圈数(实测 1 圈仍能看到边界)
     hillshade   TEXT DEFAULT '',        -- json: DEM 晕渲参数 {azimuth,altitude,z_factor}
     stages      TEXT DEFAULT '',        -- json: 阶段化进度数组(下载/合并/切片各阶段独立跟踪)
     est_bytes   INTEGER DEFAULT 0,      -- 预估原始瓦片下载量(字节,提交时按经验单瓦片大小算)
@@ -120,7 +120,7 @@ _MIGRATIONS = {
     "use_cache": "ALTER TABLE tasks ADD COLUMN use_cache INTEGER DEFAULT 1",
     "annotate": "ALTER TABLE tasks ADD COLUMN annotate INTEGER DEFAULT 0",
     "global_max_level": "ALTER TABLE tasks ADD COLUMN global_max_level INTEGER DEFAULT 0",
-    "buffer_rings": "ALTER TABLE tasks ADD COLUMN buffer_rings INTEGER DEFAULT 1",
+    "buffer_rings": "ALTER TABLE tasks ADD COLUMN buffer_rings INTEGER DEFAULT 3",
     "hillshade": "ALTER TABLE tasks ADD COLUMN hillshade TEXT DEFAULT ''",
     "stages": "ALTER TABLE tasks ADD COLUMN stages TEXT DEFAULT ''",
     "est_bytes": "ALTER TABLE tasks ADD COLUMN est_bytes INTEGER DEFAULT 0",

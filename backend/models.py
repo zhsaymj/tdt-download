@@ -173,7 +173,7 @@ class TaskCreate(BaseModel):
         default=0, ge=0, le=21,
         description="全球底图铺到第几层;0=不启用(切片包低层级用真实全球瓦片)")
     buffer_rings: int = Field(
-        default=1, ge=0, le=10,
+        default=3, ge=0, le=10,
         description="每层范围外额外外扩的圈数(把清晰/模糊边界推远)")
     hillshade: HillshadeParams = Field(default_factory=HillshadeParams, description="DEM 晕渲光照参数")
     # ---- 三维建筑(Overture → b3dm)参数 ----
@@ -292,8 +292,8 @@ def create_task(data: TaskCreate, total: int, est_bytes: int = 0) -> str:
                 json.dumps(levels), 1 if data.use_cache else 0,
                 1 if data.annotate else 0,
                 int(getattr(data, "global_max_level", 0) or 0),
-                1 if getattr(data, "buffer_rings", 1) is None
-                else int(getattr(data, "buffer_rings", 1)),
+                3 if getattr(data, "buffer_rings", 3) is None
+                else int(getattr(data, "buffer_rings", 3)),
                 json.dumps(data.hillshade.model_dump()),
                 json.dumps(stages), int(est_bytes or 0),
                 data.base_height_mode, float(data.height_offset),
@@ -371,7 +371,7 @@ def _row_to_dict(row) -> dict:
     d["use_cache"] = bool(d.get("use_cache", 1))
     d["annotate"] = bool(d.get("annotate", 0))
     d["global_max_level"] = int(d.get("global_max_level", 0) or 0)
-    d["buffer_rings"] = int(d["buffer_rings"]) if d.get("buffer_rings") is not None else 1
+    d["buffer_rings"] = int(d["buffer_rings"]) if d.get("buffer_rings") is not None else 3
     hs = d.get("hillshade")
     d["hillshade"] = json.loads(hs) if hs else {"azimuth": 315.0, "altitude": 45.0, "z_factor": 1.0}
     # 级别列表:优先存储的 levels,旧任务(空)回退连续区间

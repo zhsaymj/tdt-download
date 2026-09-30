@@ -359,7 +359,7 @@ async def api_estimate(west: float, south: float, east: float, north: float,
                        levels: str | None = None, provider: str = "tianditu_img",
                        z_min: int | None = None, z_max: int | None = None,
                        annotate: bool = False, export: str | None = None,
-                       global_max_level: int = 0, buffer_rings: int = 1):
+                       global_max_level: int = 0, buffer_rings: int = 3):
     """提交前预估..."""
     z_cap = _z_cap_for(provider)
     lv = _parse_levels(levels, z_min, z_max, z_cap,
