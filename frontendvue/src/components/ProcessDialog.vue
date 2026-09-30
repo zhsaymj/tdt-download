@@ -72,6 +72,9 @@ const form = reactive({
   crs: 'EPSG:4326',
   clip: true,
   annotate: false,
+  globalBasemap: false,
+  globalMaxLevel: 5,
+  bufferRings: 1,
   keepTilesDir: true,
   tmsSourceStrategy: 'contiguous',
   contourInterval: 50,
@@ -396,6 +399,7 @@ function levelUnavailable(z) {
 const est = ref(null)
 // 后端按 provider+格式推导出的、本次实际要下载的网格(见 loadEstimate 的 export 参数)
 const estGrids = ref([])
+const estGlobalTiles = ref(0)
 /**
  * 双网格提示:天地的图同时勾 tms+osm 时会下两套原生瓦片。
  *
@@ -421,11 +425,14 @@ async function loadEstimate() {
       // 要下载哪些网格由后端按 provider+格式推导(天地图 tms+osm 同选时两套),
       // 前端只如实传格式 —— 判定只该有一处,否则预估与实际下载量会对不上
       export: form.export.join(','),
+      global_max_level: form.globalBasemap ? form.globalMaxLevel : 0,
+      buffer_rings: form.globalBasemap ? form.bufferRings : 0,
     })
     const m = {}
     for (const r of d.levels || []) m[r.z] = r
     est.value = m
     estGrids.value = d.grids || []
+    estGlobalTiles.value = d.global_tiles || 0
   } catch (_) { est.value = null; estGrids.value = [] }
 }
 function tilesOf(z) { return est.value?.[z]?.tiles ?? null }
@@ -671,6 +678,12 @@ watch(() => form.export, (exp) => {
 watch(() => form.annotate, () => {
   if (isDownload.value) loadEstimate()
 })
+watch(() => form.globalBasemap, () => {
+  if (isDownload.value) loadEstimate()
+})
+watch(() => form.globalMaxLevel, () => {
+  if (form.globalBasemap && isDownload.value) loadEstimate()
+})
 
 /** ③区(名称+格式)的显示条件:下载始终显示;本地来源要等检查通过 */
 const mainReady = computed(() => {
@@ -755,6 +768,8 @@ function buildPayload() {
     clip: !!(form.clip && drawStore.clipGeometry),
     annotate: canAnnotate(form.provider) ? form.annotate : false,
     tms_source_strategy: form.tmsSourceStrategy,
+    global_max_level: form.globalBasemap ? form.globalMaxLevel : 0,
+    buffer_rings: form.globalBasemap ? form.bufferRings : 0,
   }
 }
 
@@ -1045,6 +1060,9 @@ const title = computed(() => ({
               已选 {{ form.levels.length }} 级，共 {{ fmtNum(estTotal.tiles) }} 张瓦片，
               约 {{ fmtSize(estTotal.bytes) }}
               <span v-if="form.annotate && canAnnotate(form.provider)" class="dim">（含注记）</span>
+              <span v-if="estGlobalTiles > 0" class="dim">
+                （其中全球底图+缓冲约 {{ fmtNum(estGlobalTiles) }} 张，跨任务缓存仅首次需下载）
+              </span>
             </div>
             </div>
           </t-form-item>
@@ -1112,6 +1130,24 @@ const title = computed(() => ({
                 <t-checkbox v-model="form.annotate" :disabled="!annotationUsable(form.levels)">叠加路网注记</t-checkbox>
                 <InfoTip :content="annotationTip" max-width="360px" />
               </t-form-item>
+              <t-form-item v-if="isDownload" label-width="0">
+                <t-checkbox v-model="form.globalBasemap">全球底图 + 边缘缓冲</t-checkbox>
+              </t-form-item>
+              <template v-if="form.globalBasemap && isDownload">
+                <t-form-item label="全球底图铺到">
+                  <t-select v-model="form.globalMaxLevel" :options="[
+                    { value: 3, label: 'z3' }, { value: 4, label: 'z4' },
+                    { value: 5, label: 'z5' }, { value: 6, label: 'z6' },
+                    { value: 7, label: 'z7' }, { value: 8, label: 'z8' },
+                  ]" style="width: 100px" />
+                </t-form-item>
+                <t-form-item label="边缘缓冲圈数">
+                  <t-select v-model="form.bufferRings" :options="[
+                    { value: 0, label: '0 圈' }, { value: 1, label: '1 圈' },
+                    { value: 2, label: '2 圈' }, { value: 3, label: '3 圈' },
+                  ]" style="width: 100px" />
+                </t-form-item>
+              </template>
             </t-collapse-panel>
           </t-collapse>
         </template>

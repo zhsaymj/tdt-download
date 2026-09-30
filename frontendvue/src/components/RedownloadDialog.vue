@@ -46,6 +46,7 @@ const crsOpts = crsOptions()
 const form = reactive({
   name: '', provider: 'tianditu_img', levels: [], export: [],
   crs: 'EPSG:4326', clip: false, use_cache: true, annotate: false,
+  globalBasemap: false, globalMaxLevel: 5, bufferRings: 1,
   tms_source_strategy: 'contiguous',
   // 三维建筑参数
   base_height_mode: 'terrain', height_offset: 0, default_height: 6, max_per_tile: 2000,
@@ -165,6 +166,7 @@ watch(() => form.export, (exp) => {
 const perLevel = ref({})
 // 后端按 provider+格式推导出的、本次实际要下载的网格(与 ProcessDialog 同一口径)
 const estGrids = ref([])
+const estGlobalTiles = ref(0)
 /** 双网格提示:天地图同时勾 tms+osm 时会下两套原生瓦片(都不重投影,量约 2×)。 */
 const twoGridNote = computed(() => {
   if (estGrids.value.length < 2) return ''
@@ -186,8 +188,11 @@ async function refreshEstimate() {
       // 与 ProcessDialog 同一口径。不传的话这里显示的是实际的一半,而本对话框
       // 提交时会把 export 发出去、由后端重算 total —— 同一个对话框里自相矛盾。
       export: form.export.join(','),
+      global_max_level: form.globalBasemap ? form.globalMaxLevel : 0,
+      buffer_rings: form.globalBasemap ? form.bufferRings : 0,
     })
     estGrids.value = d.grids || []
+    estGlobalTiles.value = d.global_tiles || 0
     const map = {}
     for (const it of (d.levels || [])) {
       map[it.z] = { tiles: it.tiles, bytes: it.bytes, width: it.width, height: it.height }
@@ -371,6 +376,8 @@ async function submit() {
     clip: !!(form.clip && props.task.geometry),
     use_cache: form.use_cache,
     annotate: form.annotate,
+    global_max_level: form.globalBasemap ? form.globalMaxLevel : 0,
+    buffer_rings: form.globalBasemap ? form.bufferRings : 0,
     tms_source_strategy: form.tms_source_strategy,
   }
   try {
