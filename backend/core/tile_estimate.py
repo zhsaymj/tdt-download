@@ -18,6 +18,7 @@ from __future__ import annotations
 from .annotate import ANNOTATION_MAX_Z
 from .formats import GEO_MERCATOR, download_grids_of
 from .mercator_tiling import mercator_range_for_bbox
+from .tile_range import download_levels, level_range
 from .tiling import range_for_bbox
 
 
@@ -37,16 +38,20 @@ def _level_count(bbox, z: int, grid: str) -> int:
 
 
 def tile_total(provider: str, formats, bbox, levels,
-               annotate: bool = False) -> int:
+               annotate: bool = False,
+               global_max_level: int = 0,
+               buffer_rings: int = 0) -> int:
     """该任务要下载的原始瓦片总数(含注记)。
 
-    annotate 为真时,≤ `ANNOTATION_MAX_Z` 的级别按"每张底图瓦片配一张注记瓦片"
-    翻倍。调用方自己保证 DEM/本地文件源传 False(它们没有注记)。
+    global_max_level/buffer_rings:见 core.tile_range.level_range。
     """
     total = 0
+    dl_levels = download_levels(levels, global_max_level)
     for grid in grids_of(provider, formats):
-        for z in (levels or []):
-            n = _level_count(bbox, z, grid)
+        for z in dl_levels:
+            n = level_range(z, grid, bbox,
+                            global_max_level=global_max_level,
+                            buffer_rings=buffer_rings).count
             if annotate and z <= ANNOTATION_MAX_Z:
                 n *= 2
             total += n

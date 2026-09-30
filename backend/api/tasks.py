@@ -37,18 +37,13 @@ def _grids_for_estimate(provider: str, formats) -> list[str]:
     return grids_of(provider, formats)
 
 
-def _estimate_total(bbox, levels: list[int], provider: str, formats=()) -> int:
-    """按**实际要下载的网格**累计瓦片数。
-
-    天地图同时勾 tms+osm 时会下两套原生瓦片,而两套的计数不同(geodetic 第 z 级
-    是 2^z×2^(z-1)、mercator 是 2^z×2^z)—— **不是翻倍**,得各算一遍再相加。
-    少算一半会让用户以为实际下载量出了 bug。
-
-    刻意不在这里做任何上限检查:用户明确要求不设单任务瓦片数上限(设计 §9 Q1),
-    规模由调用方如实呈现、由用户判断。
-    """
+def _estimate_total(bbox, levels: list[int], provider: str, formats=(),
+                    global_max_level: int = 0, buffer_rings: int = 0) -> int:
+    """按**实际要下载的网格**累计瓦片数(含全球底图与边缘缓冲)。"""
     from ..core.tile_estimate import tile_total
-    return tile_total(provider, formats, bbox, levels, annotate=False)
+    return tile_total(provider, formats, bbox, levels, annotate=False,
+                      global_max_level=global_max_level,
+                      buffer_rings=buffer_rings)
 
 
 def _z_cap_for(provider: str) -> int:
@@ -363,32 +358,25 @@ async def api_list_tasks():
 async def api_estimate(west: float, south: float, east: float, north: float,
                        levels: str | None = None, provider: str = "tianditu_img",
                        z_min: int | None = None, z_max: int | None = None,
-                       annotate: bool = False, export: str | None = None):
-    """提交前预估:返回每层瓦片数与估算大小及合计。
-
-    levels 为逗号分隔级别,兼容旧的 z_min/z_max。total 字段保留向后兼容。
-
-    annotate=True 时把注记瓦片算进来(只对 ≤ ANNOTATION_MAX_Z 的级别),
-    与 api_create_task 的算法**必须一致** —— 此前本接口不接受 annotate,
-    增量由前端整体 ×2 补,导致对话框预估与建成后的任务数对不上
-    (z19+ 的注记增量为 0,整体 ×2 会虚高一倍)。
-
-    export 为逗号分隔格式,决定**要下载哪些网格**。天地图同时勾 tms+osm 时会下
-    两套原生瓦片(见 core.formats.download_grids_of),预估要按两套算 ——
-    否则用户看到实际下载量是预估的两倍会以为出 bug。返回里的 grids 字段供前端
-    显示"含双网格"。不传时与改动前一致(只算源自己的默认网格)。
-    """
+                       annotate: bool = False, export: str | None = None,
+                       global_max_level: int = 0, buffer_rings: int = 1):
+    """提交前预估..."""
     z_cap = _z_cap_for(provider)
     lv = _parse_levels(levels, z_min, z_max, z_cap,
                        z_floor=_z_floor_for(provider))
     detail = _estimate_detail((west, south, east, north), lv, provider, export)
     if annotate and not is_dem_provider(provider):
         _add_annotation_to_detail(detail, lv)
-    # total 保留:旧前端只读 total。
-    # grids 是给界面用的(显示"含双网格,瓦片数已按两套计"),放在接口这一层而不是
-    # _estimate_detail 里 —— 后者有测试做严格相等,不能凭添键。
-    return {"total": detail["total_tiles"],
+    resp = {"total": detail["total_tiles"],
             "grids": _grids_for_estimate(provider, export), **detail}
+    if global_max_level > 0:
+        from ..core.tile_estimate import tile_total
+        full = tile_total(provider, export, (west, south, east, north), lv,
+                          global_max_level=global_max_level,
+                          buffer_rings=buffer_rings)
+        base = tile_total(provider, export, (west, south, east, north), lv)
+        resp["global_tiles"] = max(0, full - base)
+    return resp
 
 
 @router.get("/suggest_levels")
@@ -890,7 +878,10 @@ async def api_create_task(data: TaskCreate):
     # total 走 core.tile_estimate 这个**唯一判定处** —— 运行期下载阶段的进度分母
     # 用的是同一个函数,两处不会再对不上(需求39)。
     from ..core.tile_estimate import tile_total
-    total = tile_total(data.provider, data.export, bbox_t, levels, annotate=_ann)
+    total = tile_total(data.provider, data.export, bbox_t, levels, annotate=_ann,
+                       global_max_level=data.global_max_level,
+                       buffer_rings=data.buffer_rings
+                       if data.global_max_level > 0 else 0)
     if total == 0:
         raise HTTPException(400, "所选范围在该级别下没有瓦片,请检查范围或级别")
     if _ann:

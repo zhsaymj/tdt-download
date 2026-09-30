@@ -370,7 +370,11 @@ async def run_task(task_id: str, emit, should_stop) -> None:
         # 用与建任务同一个函数(core.tile_estimate 是唯一判定处),两处不会再漂。
         from .tile_estimate import tile_total
         _want_total = tile_total(task["provider"], formats, bbox, levels,
-                                 annotate=annotate)
+                                 annotate=annotate,
+                                 global_max_level=int(task.get(
+                                     "global_max_level", 0) or 0),
+                                 buffer_rings=int(task.get("buffer_rings", 1))
+                                 if int(task.get("global_max_level", 0) or 0) > 0 else 0)
         if _want_total != total:
             logger.info("任务[%s] 下载量按当前网格重算:%d → %d 张",
                         task["name"], total, _want_total)
