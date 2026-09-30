@@ -1130,10 +1130,12 @@ const title = computed(() => ({
                 <t-checkbox v-model="form.annotate" :disabled="!annotationUsable(form.levels)">叠加路网注记</t-checkbox>
                 <InfoTip :content="annotationTip" max-width="360px" />
               </t-form-item>
-              <t-form-item v-if="isDownload" label-width="0">
+              <t-form-item v-if="isDownload && !isDem" label-width="0">
                 <t-checkbox v-model="form.globalBasemap">全球底图 + 边缘缓冲</t-checkbox>
+                <InfoTip content="切片包低层级用真实全球瓦片,缩到全球能看到完整底图;每层范围外再外扩 N 圈,消除清晰/模糊边界。全球瓦片跨任务缓存,仅首次需下载。"
+                  max-width="380px" />
               </t-form-item>
-              <template v-if="form.globalBasemap && isDownload">
+              <template v-if="form.globalBasemap && isDownload && !isDem">
                 <t-form-item label="全球底图铺到">
                   <t-select v-model="form.globalMaxLevel" :options="[
                     { value: 3, label: 'z3' }, { value: 4, label: 'z4' },

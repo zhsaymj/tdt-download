@@ -48,3 +48,23 @@ def download_levels(levels, global_max_level=0) -> list[int]:
     if global_max_level <= 0:
         return sorted(levels)
     return sorted(set(levels) | set(range(1, global_max_level + 1)))
+
+
+def supports_global_basemap(provider: str) -> bool:
+    """该数据源是否支持全球底图(切片包低层级用真实全球瓦片)。
+
+    **DEM 与本地/建筑源不支持**:它们的 TMS/OSM 导出走另一条链路
+    (`_tms_from_dem` / `_tms_from_source_file`),全球段根本进不去 ——
+    不拦的话下载阶段会白下 geodetic z1-5 的 682 张,预估也白算进总数,
+    而导出时一张都不出现(静默浪费,用户看不出原因)。
+    """
+    if provider in ("local_dem", "local_image"):
+        return False
+    from ..providers.buildings import is_building_provider
+    if is_building_provider(provider):
+        return False
+    # 按 DataKind 判定而非 provider 名单:DEM 的名单(providers/terrain.py 的
+    # DEM_PROVIDERS)只有当前在用的那个,而 formats 的登记表才是全量
+    # (aws_terrain 这类停用但仍在库里的也在其中)。
+    from .formats import DataKind, kind_of
+    return kind_of(provider) != DataKind.RASTER_DEM

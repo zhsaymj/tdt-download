@@ -52,7 +52,7 @@ from .terrain_tiles import export_terrain, level_for_resolution, write_layer_jso
 from .token_pool import token_pool
 from .tms import (export_tms, export_tms_from_source, source_tms_level_plan,
                   source_tms_level_plan_preserve_inputs, write_tilemapresource)
-from .tile_range import download_levels, level_range
+from .tile_range import download_levels, level_range, supports_global_basemap
 from .tiling import TILE_SIZE, range_for_bbox
 
 # OSM 金字塔起始下限:低于此级的超低层(单瓦片跨度巨大、小范围里基本全透明)
@@ -427,9 +427,12 @@ async def run_task(task_id: str, emit, should_stop) -> None:
                 anno_by_grid[g] = _mk_downloader(task, anno_prov) if anno_prov else None
 
         # 全球底图 + 边缘缓冲(设计 2026-09-30)
-        global_max = int(task.get("global_max_level", 0) or 0)
+        # DEM/本地/建筑源不支持:它们的导出走另一条链路,全球段进不去。
+        # 不归零的话会白下 geodetic z1-5 的 682 张(静默浪费)。
+        _gb_ok = supports_global_basemap(task["provider"])
+        global_max = int(task.get("global_max_level", 0) or 0) if _gb_ok else 0
         buffer_rings = (1 if task.get("buffer_rings", 1) is None
-                        else int(task.get("buffer_rings", 1)))
+                        else int(task.get("buffer_rings", 1))) if _gb_ok else 0
         dl_levels = download_levels(levels, global_max)
         anno_levels = _anno_levels_for(dl_levels)
 

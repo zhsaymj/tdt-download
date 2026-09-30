@@ -18,7 +18,7 @@ from __future__ import annotations
 from .annotate import ANNOTATION_MAX_Z
 from .formats import GEO_MERCATOR, download_grids_of
 from .mercator_tiling import mercator_range_for_bbox
-from .tile_range import download_levels, level_range
+from .tile_range import download_levels, level_range, supports_global_basemap
 from .tiling import range_for_bbox
 
 
@@ -46,6 +46,11 @@ def tile_total(provider: str, formats, bbox, levels,
     global_max_level/buffer_rings:见 core.tile_range.level_range。
     """
     total = 0
+    # DEM/本地源不支持全球底图 —— 两个参数一起归零(否则白算进总数);
+    # 缓冲也要归零,否则范围仍会外扩 buffer_rings 圈。
+    if not supports_global_basemap(provider):
+        global_max_level = 0
+        buffer_rings = 0
     dl_levels = download_levels(levels, global_max_level)
     for grid in grids_of(provider, formats):
         for z in dl_levels:

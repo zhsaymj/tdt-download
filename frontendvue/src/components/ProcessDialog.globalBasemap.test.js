@@ -46,3 +46,13 @@ test('控件渲染在界面上', () => {
   assert.ok(code.includes('form.globalMaxLevel'),
     '层级下拉没有绑定 form.globalMaxLevel')
 })
+
+test('DEM 源不显示这个开关(后端对该链路不生效,显示即误导)', () => {
+  const code = stripComments(src)
+  const i = code.indexOf('v-model="form.globalBasemap"')
+  assert.notEqual(i, -1)
+  // 往前找这个 t-form-item 的 v-if
+  const before = code.slice(Math.max(0, i - 300), i)
+  assert.ok(before.includes('!isDem'),
+    'DEM 任务会白下载全球低层级却导出不了 —— 开关必须对它隐藏')
+})
