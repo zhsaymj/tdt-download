@@ -861,6 +861,18 @@ def _tms_from_planned_sources_guarded(ctx, tms_dir: Path, clip_geom, plan,
     return out
 
 
+def _merge_tree(src: Path, dst: Path) -> None:
+    """把 src 下的瓦片树合并进 dst(不覆盖已存在文件,跳过标记文件)。"""
+    for p in src.rglob("*"):
+        if p.is_file() and p.name != "_ready.txt":
+            rel = p.relative_to(src)
+            d = dst / rel
+            d.parent.mkdir(parents=True, exist_ok=True)
+            if not d.exists():
+                import shutil
+                shutil.copyfile(p, d)
+
+
 def _stage_tms(ctx) -> list[str]:
     """输出 gdal2tiles geodetic TMS 瓦片包 + tilemapresource.xml。
 
@@ -872,6 +884,8 @@ def _stage_tms(ctx) -> list[str]:
     levels = ctx.levels
     ctx.tracker.start("tms", total=1, message="切 TMS 瓦片")
     tms_dir = ctx.out_dir / "tms"
+    global_max = int(ctx.task.get("global_max_level", 0) or 0)
+    global_bbox = (-180.0, -90.0, 180.0, 90.0)
 
     # DEM 走另一条路:export_tms 是"从缓存逐张搬运瓦片",而 DEM 缓存里是 3857 网格的
     # LERC 编码瓦片,既非 4326 行列号也不是图片,搬不过来。故先渲染成 4326 RGB 源,
@@ -890,6 +904,16 @@ def _stage_tms(ctx) -> list[str]:
     #
     # 计划用"每级各自为源、不向下补级":用户明确选择"只出已下载级别"
     # (设计 §1 非目标),故不给墨卡托源补金字塔。
+    # 全球底图段(mercator 源):从 mercator 缓存重投影并缓存,合并进 tms_dir
+    if global_max > 0 and _tms_needs_resample(_ctx_grid(ctx)) and not ctx.is_dem:
+        from .geodetic_tms_cache import ensure_geodetic_tms_cache
+        global_bbox_merc = (-180.0, -85.05112878, 180.0, 85.05112878)
+        gdir = ensure_geodetic_tms_cache(
+            settings.cache_dir, ctx.provider.key, global_max, global_bbox_merc,
+            ctx.downloader.tile_path, ctx.provider,
+            levels_for_src=[global_max])
+        _merge_tree(gdir, tms_dir)
+
     if _tms_needs_resample(_ctx_grid(ctx)):
         plan = [(z, [z])
                 for z in sorted({int(v) for v in levels}, reverse=True)]
@@ -904,8 +928,6 @@ def _stage_tms(ctx) -> list[str]:
 
     # 全球底图段(geodetic 源):低层级真实全球瓦片,写进同一 tms_dir。
     # 级号/行号换算走 export_tms 内部,不在外面自己算(混用即整体错位且不报错)。
-    global_max = int(ctx.task.get("global_max_level", 0) or 0)
-    global_bbox = (-180.0, -90.0, 180.0, 90.0)
     if global_max > 0 and _ctx_grid(ctx) == "geodetic":
         gg = [z for z in range(1, global_max + 1)]
 
