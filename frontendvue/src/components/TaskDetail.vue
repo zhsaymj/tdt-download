@@ -4,7 +4,7 @@ import { MessagePlugin } from 'tdesign-vue-next'
 import { useTaskStore, STATUS_TEXT } from '../stores/task'
 import { mapController } from '../composables/mapController'
 import { fmtSize } from '../utils/format'
-import { isBuildingProvider, isModel3dProvider } from '../utils/provider'
+import { isBuildingProvider, isDemProvider, isModel3dProvider } from '../utils/provider'
 import { api } from '../api'
 
 const taskStore = useTaskStore()
@@ -67,6 +67,61 @@ function fmtBbox(b) {
   return `西 ${b[0].toFixed(4)}｜南 ${b[1].toFixed(4)}｜东 ${b[2].toFixed(4)}｜北 ${b[3].toFixed(4)}`
 }
 
+// ---- 面板拖拽:整个面板(交互控件除外)都是把手 ----
+// 位移记在 dx/dy、用 transform 表达,不动 left —— 原来的 --pad-left 避让与
+// left 过渡都保留。Pointer Events + setPointerCapture 是必须的:拖动时指针会
+// 划过地图,不捕获的话地图抢走 pointermove,拖到一半就"断流"。
+const drag = ref({ x: 0, y: 0 })
+const dragging = ref(false)
+
+/** 面板至少保留这么多像素在视口内,避免被拖到完全看不见 */
+const KEEP_X = 60
+const KEEP_Y = 40
+
+function onDragStart(e) {
+  if (e.button !== 0) return                 // 只响应左键
+  // 点面板上的交互控件(关闭/打开目录/复选框/链接…)不启动拖拽,
+  // 否则点「✕」也会先触发 setPointerCapture,把 click 一起吞掉,按钮失效。
+  const target = e.target
+  if (target instanceof Element
+    && target.closest('button, input, label, a, textarea, select')) return
+  const el = e.currentTarget
+  const sx = e.clientX
+  const sy = e.clientY
+  const base = { ...drag.value }
+  dragging.value = true
+  el.setPointerCapture(e.pointerId)
+
+  const move = (ev) => {
+    // el 是 .detail 自身:按面板尺寸限位,保证至少留 KEEP 像素可见、永远拖得回
+    const w = el.offsetWidth || 340
+    const h = el.offsetHeight || 200
+    const nx = base.x + (ev.clientX - sx)
+    const ny = base.y + (ev.clientY - sy)
+    drag.value = {
+      x: Math.min(window.innerWidth - KEEP_X, Math.max(-(w - KEEP_X), nx)),
+      y: Math.min(window.innerHeight - KEEP_Y, Math.max(-(h - KEEP_Y), ny)),
+    }
+  }
+  const up = (ev) => {
+    dragging.value = false
+    if (el.hasPointerCapture(ev.pointerId)) el.releasePointerCapture(ev.pointerId)
+    el.removeEventListener('pointermove', move)
+    el.removeEventListener('pointerup', up)
+    el.removeEventListener('pointercancel', up)
+    // 拖到面板顶部(head)完全出视口时自动弹回顶部可见位置,
+    // 否则头部连把手带标题一起看不见,想拖回来都找不到抓取点。
+    if (drag.value.y < -120) drag.value = { ...drag.value, y: -60 }
+  }
+  el.addEventListener('pointermove', move)
+  el.addEventListener('pointerup', up)
+  el.addEventListener('pointercancel', up)
+}
+
+const dragStyle = computed(() => ({
+  transform: `translate(${drag.value.x}px, ${drag.value.y}px)`,
+}))
+
 // 点云坐标系:空串=自动(读 LAS 头),local=本地坐标不转 ECEF,EPSG:xxxx 原样
 function pcCrsText(t) {
   const v = String(t.pc_crs || '')
@@ -89,6 +144,8 @@ watch(showRange, (v) => {
 
 // 详情任务变化时,若勾选显示则重画范围(model3d 同上跳过)
 watch(() => taskStore.activeId, () => {
+  // 拖拽位置也复位:否则新任务的详情会开在上一个被拖走的地方
+  drag.value = { x: 0, y: 0 }
   if (isModel3d(t.value)) return
   if (t.value && showRange.value) mapController.value?.showPreview(t.value.bbox, t.value.geometry)
 })
@@ -113,7 +170,7 @@ async function openOutputDir() {
 </script>
 
 <template>
-  <div v-if="t" class="detail">
+  <div v-if="t" class="detail" :class="{ dragging }" :style="dragStyle" @pointerdown="onDragStart">
     <div class="head">
       <span class="title">{{ t.name }}</span>
       <t-button variant="text" shape="square" size="small" @click="close">✕</t-button>
@@ -167,12 +224,20 @@ async function openOutputDir() {
       </template>
 
       <!-- 栅格(影像/DEM) -->
+      <!-- 字段按三组排:输出配置 / 处理选项 / 下载量,组间用 .kv-sep 细线分开
+           —— 需求40 新增全球底图与缓冲后,平铺一长串不好速读。 -->
       <template v-else>
         <div class="kv"><span class="k">级别</span><span class="v">{{ fmtLevels(t) }}</span></div>
         <div class="kv"><span class="k">导出格式</span><span class="v">{{ fmtExport(t.export) }}</span></div>
         <div class="kv"><span class="k">坐标系</span><span class="v">{{ t.crs || 'EPSG:4326' }}</span></div>
-        <div class="kv" v-if="t.provider !== 'esri_terrain'"><span class="k">裁剪</span><span class="v">{{ t.clip ? '是' : '否' }}</span></div>
-        <div class="kv" v-if="t.provider !== 'esri_terrain'"><span class="k">路网注记</span><span class="v">{{ t.annotate ? '已叠加' : '否' }}</span></div>
+        <div class="kv-sep"></div>
+        <template v-if="!isDemProvider(t.provider)">
+          <div class="kv"><span class="k">裁剪</span><span class="v">{{ t.clip ? '是' : '否' }}</span></div>
+          <div class="kv"><span class="k">路网注记</span><span class="v">{{ t.annotate ? '已叠加' : '否' }}</span></div>
+          <div class="kv"><span class="k">全球底图</span><span class="v">{{ t.global_max_level > 0 ? `z1 - z${t.global_max_level}` : '否' }}</span></div>
+          <div class="kv" v-if="t.global_max_level > 0"><span class="k">边缘缓冲</span><span class="v">{{ t.buffer_rings ?? 0 }} 圈</span></div>
+        </template>
+        <div class="kv-sep"></div>
         <div class="kv"><span class="k">瓦片</span><span class="v">{{ t.downloaded }}/{{ t.total }}<span v-if="t.failed"> (失败{{ t.failed }})</span></span></div>
         <div class="kv" v-if="t.est_bytes"><span class="k">预估下载</span><span class="v">~{{ fmtSize(t.est_bytes) }} <span class="est-note">(仅原始瓦片)</span></span></div>
       </template>
@@ -209,14 +274,19 @@ async function openOutputDir() {
 <style scoped>
 .detail {
   /* 改停左上并随左侧面板避让:新布局的绘制工具条占了右上角,原先的 right:12px
-     会与它重叠。--pad-left 由 App.vue 按面板开合下传。 */
-  position: absolute; top: 12px; left: calc(12px + var(--pad-left, 0px));
-  z-index: 20; width: 290px; transition: left .22s ease;
+     会与它重叠。--pad-left 由 App.vue 按面板开合下传。
+     fixed 相对视口:absolute 会被 .map-main 的 overflow:hidden 裁剪,拖到顶部
+     整段消失、拖不回来;fixed 才能盖过头部菜单栏。top 里 +44px 是顶栏高。 */
+  position: fixed; top: calc(12px + 44px); left: calc(12px + var(--pad-left, 0px));
+  /* z-index 1000:盖过头部菜单栏(AppTopBar 无 z-index)与所有常规面板;
+     仍低于 TDesign 弹层(teleport 到 body,1500+)。 */
+  z-index: 1000; width: 340px; transition: left .22s ease;
   background: #fff; border: 1px solid #e2e8f0; border-radius: 10px;
   box-shadow: 0 6px 20px rgba(14,165,233,.14); padding: 14px; font-size: 13px;
-}
+  cursor: grab; user-select: none; }
 .head { display: flex; align-items: center; justify-content: space-between;
   margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid #eef2f7; }
+.detail.dragging { transition: none; cursor: grabbing; }   /* 拖拽时关过渡,否则跟手会拖影 */
 .title { font-weight: 700; color: #0369a1; font-size: 14px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .body { color: #334155; }
@@ -227,5 +297,7 @@ async function openOutputDir() {
 .kv .v.path { font-size: 11px; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 .path-text { word-break: break-all; }
 .kv .v .est-note { color: #94a3b8; font-weight: 400; }
+/* 字段分组细线:输出配置 / 处理选项 / 下载量 */
+.kv-sep { height: 1px; background: #eef2f7; margin: 6px 0; }
 .toggle { margin: 12px 0 8px; }
 </style>
