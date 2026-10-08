@@ -4,12 +4,13 @@ import { createMapController } from '../composables/useMap'
 import { mapController } from '../composables/mapController'
 import { useDrawStore } from '../stores/draw'
 import { useBasemapStore } from '../stores/basemap'
+import { useMapInfoStore } from '../stores/mapInfo'
 import { api } from '../api'
 
 const drawStore = useDrawStore()
 const basemapStore = useBasemapStore()
+const mapInfo = useMapInfoStore()
 const mapEl = ref(null)
-const info = ref({ zoom: '—', scale: '—', lon: null, lat: null })
 
 let controller = null
 
@@ -20,8 +21,10 @@ onMounted(async () => {
       drawStore.setRange({ bbox, geometry, shape })
     },
     onEditingChange: (v) => drawStore.setEditing(v),
+    // 实时视口信息(层级/比例尺/鼠标经纬度)写进 mapInfo store,由底部状态条
+    // 统一显示 —— 不再在地图上单独浮一条 .map-info。
     onInfo: ({ zoom, scale, lon, lat }) => {
-      info.value = { zoom, scale, lon, lat }
+      mapInfo.set({ zoom, scale, lon, lat })
     },
   })
   mapController.value = controller
@@ -43,13 +46,6 @@ onBeforeUnmount(() => {
 <template>
   <div class="map-wrap">
     <div ref="mapEl" class="map-canvas"></div>
-    <div class="map-info">
-      <span>层级:{{ info.zoom }}</span>
-      <span>比例尺:1:{{ typeof info.scale === 'number' ? info.scale.toLocaleString() : info.scale }}</span>
-      <span v-if="info.lon != null">
-        经纬度:{{ info.lon.toFixed(5) }}, {{ info.lat.toFixed(5) }}
-      </span>
-    </div>
   </div>
 </template>
 
@@ -66,14 +62,4 @@ onBeforeUnmount(() => {
   right: calc(10px + var(--pad-right, 0px));
   transition: right .22s ease, bottom .22s ease;
 }
-.map-info {
-  position: absolute; left: 0; bottom: 0; z-index: 10;
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex; gap: 16px; padding: 5px 14px;
-  background: rgba(2, 132, 199, 0.82); color: #f0f9ff;
-  font-size: 12px; font-family: Consolas, "Courier New", monospace;
-  border-top-right-radius: 8px;
-}
-.map-info span { white-space: nowrap; }
 </style>

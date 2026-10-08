@@ -7,10 +7,12 @@
  */
 import { computed } from 'vue'
 import { useTaskStore } from '../stores/task'
+import { useMapInfoStore } from '../stores/mapInfo'
 import { fmtEta } from '../utils/format'
 
 const emit = defineEmits(['open-tasks'])
 const taskStore = useTaskStore()
+const mapInfo = useMapInfoStore()
 
 /** 当前该展示的任务:优先运行中,其次排队中 */
 const current = computed(() => {
@@ -67,6 +69,14 @@ const failedCount = computed(() => taskStore.tasks.filter(
     </template>
 
     <span class="spacer"></span>
+    <!-- 地图实时信息(层级/比例尺/鼠标经纬度)显示在这,不再单独浮在地图上 -->
+    <span class="live">
+      <span>层级:{{ mapInfo.zoom }}</span>
+      <span>比例尺:1:{{ typeof mapInfo.scale === 'number' ? mapInfo.scale.toLocaleString() : mapInfo.scale }}</span>
+      <span v-if="mapInfo.lon != null">
+        经纬度:{{ mapInfo.lon.toFixed(5) }}, {{ mapInfo.lat.toFixed(5) }}
+      </span>
+    </span>
     <button class="item link" @click="emit('open-tasks')">
       已完成 {{ doneCount }}<template v-if="failedCount">
         · <span class="fail">失败 {{ failedCount }}</span>
@@ -85,6 +95,12 @@ const failedCount = computed(() => taskStore.tasks.filter(
   user-select: none;
 }
 .item { display: inline-flex; align-items: center; gap: 5px; }
+/* 实时信息沿用原地图浮条的风格:等宽字体,数字对齐 */
+.live {
+  display: inline-flex; align-items: center; gap: 12px;
+  font-family: Consolas, "Courier New", monospace;
+  white-space: nowrap;
+}
 .dim { color: #94a3b8; }
 .spacer { flex: 1 1 auto; }
 .conn .dot {
