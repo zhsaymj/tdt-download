@@ -1631,7 +1631,7 @@ def _stage_contour(ctx) -> list[str]:
     def on_progress(done, total):
         _check_stop(ctx)
         ctx.tracker.update("contour", done=done, total=total,
-                           message=f"提取等高线({done}/{total} 条等高距)")
+                           message=f"提取等高线(第 {done}/{total} 带)")
 
     geoms, values, crs = extract_contours(src, interval=interval,
                                           should_stop=ctx.should_stop,

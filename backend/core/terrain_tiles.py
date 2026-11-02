@@ -26,6 +26,7 @@ from __future__ import annotations
 import io
 import math
 import os
+import struct
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -43,6 +44,46 @@ import quantized_mesh_encoder as qme
 GRID = 257
 # 缺省 TIN 简化误差(米):越小越精细、瓦片越大
 DEFAULT_MAX_ERROR = 5.0
+
+#: 低层级全球兜底的最大级号 —— 不加这层,地球是残缺的。
+#:
+#: Cesium 只渲染"确实有瓦片"的区域:bbox 之外没有瓦片,那片球面就没有地形。
+#: 实测全国任务 L0 只出了 1 张瓦片(available 里 startX=endX=1),西半球整片
+#: 无地形,地球看起来缺了一块。
+#:
+#: L <= 该值的层级按全球范围出瓦片。源范围外的瓦片由零高程规则网格填充,
+#: 不读磁盘。更高层级仍只出 bbox 内 —— 远处粗、近处精,正是地形 LOD 要的样子。
+#:
+#: 取 6:L6 单张跨度 2.8125°,被 Cesium 升采样到更高层级后地球背面已是平滑
+#: 球面;再往上是纯量级(全球 L7 就要 3.3 万张、L8 要 13 万张)而肉眼几乎
+#: 看不出差别。
+GLOBAL_COVER_LEVEL = 6
+
+#: 全球兜底瓦片的网格密度(度/格) —— 决定椭球轮廓有多圆。
+#:
+#: 这条是被实测逼出来的:早先让兜底瓦片走 Martini,而 Martini 的简化判据基于
+#: 高度差,零高程网格每点误差都是 0,任何 max_error(含 0)都会把它塌成 2 个
+#: 三角形、4 个顶点。一个跨 180° 的 L0 瓦片于是成了 4 个角点连出的平面弦,
+#: 整个地球渲染出来是个多面体。
+#:
+#: 所以兜底层级改走"规则网格 TIN"(见 _encode_rule_tile),不做简化,顶点直接
+#: 落在椭球面上。每格 1.5° 时弦高偏差约 0.5km(地球半径 6371km),任意缩放下
+#: 轮廓都是光滑球面。
+_FLAT_SPAN_DEG = 1.5
+
+
+def coverage_bbox_for_level(
+    bbox: tuple[float, float, float, float],
+    L: int,
+    global_cover_level: int = GLOBAL_COVER_LEVEL,
+) -> tuple[float, float, float, float]:
+    """第 L 级实际要输出的瓦片范围:低层级全球兜底,高层级只出 bbox 内。
+
+    global_cover_level < 0 时完全关闭兜底(退化为只出 bbox,即旧行为)。
+    """
+    if L <= global_cover_level:
+        return (-180.0, -90.0, 180.0, 90.0)
+    return bbox
 
 
 def geodetic_span(L: int) -> float:
@@ -158,6 +199,77 @@ def _encode_terrain(
     return buf.getvalue()
 
 
+def _rule_grid_tin(n: int) -> np.ndarray:
+    """n×n 规则网格的三角形索引。
+
+    绕序必须与 Martini 一致(从椭球外看逆时针),否则整片地形会被背面剔除、
+    完全看不见。实测该写法 2046/2048 个三角形法线朝外,反过来写 0/2048。
+    """
+    tris = []
+    for r in range(n - 1):
+        row = r * n
+        nxt = row + n
+        for c in range(n - 1):
+            tl = row + c
+            tr = tl + 1
+            bl = nxt + c
+            br = bl + 1
+            tris.append((tl, bl, tr))
+            tris.append((tr, bl, br))
+    return np.asarray(tris, dtype=np.uint32)
+
+
+def _encode_rule_tile(heights: np.ndarray,
+                      bounds: tuple[float, float, float, float]) -> bytes:
+    """规则网格 → quantized-mesh 瓦片,**不做简化**(这是与 _encode_terrain 的分别)。
+
+    顶点按 (lon, lat, height) 铺满瓦片范围,行 0 在北(与
+    rescale_positions(flip_y=True) 的约定一致)。全 0 的 heights 得到的就是一张
+    贴着椭球面、网格致密的零高程瓦片 —— 全球兜底要的正是这个。
+    """
+    n = heights.shape[0]
+    west, south, east, north = bounds
+    lon2d, lat2d = np.meshgrid(np.linspace(west, east, n),
+                               np.linspace(north, south, n))
+    positions = np.stack([
+        lon2d.ravel(),
+        lat2d.ravel(),
+        heights.astype(np.float64).ravel(),
+    ], axis=1)
+    buf = io.BytesIO()
+    qme.encode(buf, positions, _rule_grid_tin(n),
+               bounds=(west, south, east, north))
+    return buf.getvalue()
+
+
+def _tile_vertex_count(path: Path) -> int:
+    """读 quantized-mesh 头里的顶点数(offset 88,见编码器 HEADER 布局)。
+
+    头 88B = 中心点 24 + 最小/最大高程 8 + 包围球 32 + 地平遮挡点 24,
+    紧跟 uint32 vertexCount。读不到就返回 0(当作需要重切)。
+    """
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(92)
+    except OSError:
+        return 0
+    if len(head) < 92:
+        return 0
+    return struct.unpack("<I", head[88:92])[0]
+
+
+def _flat_grid_for_span(span_deg: float) -> int:
+    """按瓦片经纬跨度选规则网格边长,使每格不超过 _FLAT_SPAN_DEG 度。
+
+    边长取 2^k+1 档(与 Martini 的网格约定统一,便于复用 _read_tile_grid)。
+    """
+    need = max(2, int(math.ceil(span_deg / _FLAT_SPAN_DEG)))
+    for n in (3, 5, 9, 17, 33, 65, 129, 257):
+        if n - 1 >= need:
+            return n
+    return 257
+
+
 def _ensure_overviews(path: Path) -> None:
     """确保高程源有 overview 金字塔(缺则就地补建)。
 
@@ -187,12 +299,15 @@ def export_terrain(
     grid: int = GRID,
     should_stop=None,
     concurrency: int | None = None,
+    global_cover_level: int = GLOBAL_COVER_LEVEL,
 ) -> tuple[Path, list[int], bool]:
     """把 4326 高程 GeoTIFF 切成 Cesium quantized-mesh 地形瓦片(多线程)。
 
     dem_4326_path: 高程源(必须已是 EPSG:4326 单波段 float32)。
     levels: 要输出的 geodetic 级号(L)列表。
     bbox: 经纬度矩形 (west, south, east, north),限定输出瓦片范围。
+    global_cover_level: L <= 该值的层级按全球出瓦片(范围外填 0=海平面),
+        保证 Cesium 里整个地球都有地形;<0 关闭(只出 bbox 内,旧行为)。
     on_progress(done_tiles, total_tiles): 细粒度上报已切瓦片数。
     should_stop(): 可选,返回 True 时在层/列边界尽快停止(暂停/取消)。
     concurrency: 切片线程数;None 时取 min(CPU 核数, 8)。
@@ -219,7 +334,8 @@ def export_terrain(
     # 细粒度进度分母:各级瓦片数之和(高层级瓦片数最多,故按瓦片计更平滑)
     total_tiles = 0
     for L in sorted_levels:
-        x_min, x_max, y_min, y_max = geodetic_range_for_bbox(bbox, L)
+        x_min, x_max, y_min, y_max = geodetic_range_for_bbox(
+            coverage_bbox_for_level(bbox, L, global_cover_level), L)
         total_tiles += (x_max - x_min + 1) * (y_max - y_min + 1)
     total_tiles = max(total_tiles, 1)
 
@@ -254,10 +370,22 @@ def export_terrain(
 
     def _worker(x, y, L, dst):
         """线程任务:窗口读高程 → Martini TIN → 编码 → 写 .terrain。"""
-        vrt = _get_vrt()
         tb = geodetic_tile_bounds(x, y, L)
-        g = _read_tile_grid(vrt, vb, tb, grid)
-        raw = _encode_terrain(g, tb, max_error)
+        west, south, east, north = tb
+        if L <= global_cover_level:
+            # 全球兜底层级:规则网格、不简化。既保证椭球轮廓圆滑,也顺带
+            # 保住了落在这些层级上的真实地形(低层级本来也没几处)。
+            n = _flat_grid_for_span(east - west)
+            if (east <= vb.left or west >= vb.right
+                    or north <= vb.bottom or south >= vb.top):
+                # 完全在源外:零高程,连源句柄都不开
+                g = np.zeros((n, n), dtype=np.float32)
+            else:
+                g = _read_tile_grid(_get_vrt(), vb, tb, n)
+            raw = _encode_rule_tile(g, tb)
+        else:
+            g = _read_tile_grid(_get_vrt(), vb, tb, grid)
+            raw = _encode_terrain(g, tb, max_error)
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_bytes(raw)
         _bump()
@@ -269,7 +397,8 @@ def export_terrain(
                 if should_stop and should_stop():
                     stopped = True
                     break
-                x_min, x_max, y_min, y_max = geodetic_range_for_bbox(bbox, L)
+                x_min, x_max, y_min, y_max = geodetic_range_for_bbox(
+                    coverage_bbox_for_level(bbox, L, global_cover_level), L)
                 futures = []
                 submitted = 0
                 for x in range(x_min, x_max + 1):
@@ -278,11 +407,16 @@ def export_terrain(
                         break
                     for y in range(y_min, y_max + 1):
                         dst = out_dir / str(L) / str(x) / f"{y}.terrain"
-                        # 断点续切:已存在且非空的瓦片直接跳过(只计进度)
+                        # 断点续切:已存在且非空的瓦片直接跳过(只计进度)。
+                        # 兜底层级额外校验网格密度:旧版本把零高程瓦片简化成了
+                        # 4 顶点平面(地球呈多面体),不重切就永远修不好。
                         if dst.exists() and dst.stat().st_size > 0:
-                            exported_set.add(L)
-                            _bump()
-                            continue
+                            if (L > global_cover_level
+                                    or _tile_vertex_count(dst)
+                                    >= _flat_grid_for_span(geodetic_span(L)) ** 2):
+                                exported_set.add(L)
+                                _bump()
+                                continue
                         futures.append(pool.submit(_worker, x, y, L, dst))
                         submitted += 1
                 for fut in futures:
@@ -308,17 +442,20 @@ def write_layer_json(
     out_dir: Path,
     bbox: tuple[float, float, float, float],
     levels: list[int],
+    global_cover_level: int = GLOBAL_COVER_LEVEL,
 ) -> Path:
     """写最外层 layer.json(quantized-mesh-1.0 规范)。
 
-    available 按每级 bbox 覆盖的瓦片区间生成(y 已是自南向北 TMS 行号)。
-    未声明 octvertexnormals/watermask(首版不写法线/水面掩膜)。
+    available 必须与实际出的瓦片一致:低层级声明为全球区间(见
+    GLOBAL_COVER_LEVEL),否则 Cesium 不会去请求那些瓦片,兜底就白做了。
+    y 已是自南向北 TMS 行号。未声明 octvertexnormals/watermask(首版不写法线)。
     """
     levels = sorted(levels)
     available = []
     for L in range(0, (max(levels) + 1) if levels else 0):
         if L in levels:
-            x_min, x_max, y_min, y_max = geodetic_range_for_bbox(bbox, L)
+            x_min, x_max, y_min, y_max = geodetic_range_for_bbox(
+                coverage_bbox_for_level(bbox, L, global_cover_level), L)
             available.append([{
                 "startX": x_min, "startY": y_min,
                 "endX": x_max, "endY": y_max,
