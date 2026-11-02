@@ -2,6 +2,10 @@
 /**
  * 地形任务新建表单:DEM 来源二选一(在线 Esri Terrain3D / 本地 DEM 文件),
  * 范围来自地图画框,固定只导出 terrain 一种格式(不带 geotiff/tms 等其他格式)。
+ *
+ * 展示容器用 SidePanel(左侧浮动、非模态),与主站 ProcessDialog 一致——这样
+ * 用户可以边开着本面板边在地图上画选区,不必关掉表单再画。业务逻辑(来源/级别/
+ * 探测/建议/max_error)不变,只是外层从 t-dialog 换成 SidePanel。
  */
 import { reactive, computed, ref, watch } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
@@ -9,6 +13,7 @@ import { api } from '../api'
 import { useDrawStore } from '../stores/draw'
 import { useTaskStore } from '../stores/task'
 import { defaultTaskName, levelsForProvider, DEM_LEVELS } from '../utils/taskDefaults'
+import SidePanel from '../components/SidePanel.vue'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -188,13 +193,8 @@ function close() { emit('update:visible', false) }
 </script>
 
 <template>
-  <t-dialog
-    :visible="visible" header="新建地形任务" width="520px"
-    :confirm-btn="{ content: '创建任务', loading: submitting, disabled: !canSubmit }"
-    cancel-btn="取消"
-    @update:visible="(v) => emit('update:visible', v)"
-    @confirm="submit" @close="close"
-  >
+  <SidePanel :visible="visible" title="新建地形任务" side="left" width="440px"
+    @update:visible="(v) => emit('update:visible', v)">
     <t-form label-align="top" :label-width="100">
       <t-form-item label="DEM 来源">
         <t-radio-group v-model="sourceKind">
@@ -232,12 +232,12 @@ function close() { emit('update:visible', false) }
       <template v-else>
         <t-form-item label="DEM 文件">
           <t-space direction="vertical" style="width: 100%">
-            <t-space>
-              <t-input v-model="localPath" placeholder="本地 DEM 文件绝对路径" style="width: 280px"
+            <div class="pick">
+              <t-input v-model="localPath" placeholder="本地 DEM 文件绝对路径"
                 @blur="inspectLocal" />
               <t-button v-if="dialogOk" variant="outline" @click="browseLocal">浏览…</t-button>
               <t-button variant="text" :disabled="!localPath || localBusy" @click="inspectLocal">检查</t-button>
-            </t-space>
+            </div>
             <span v-if="localBusy" class="hint">检查中…</span>
             <span v-else-if="localError" class="hint err">{{ localError }}</span>
             <span v-else-if="localInfo" class="hint ok">
@@ -258,7 +258,15 @@ function close() { emit('update:visible', false) }
         </t-space>
       </t-form-item>
     </t-form>
-  </t-dialog>
+
+    <!-- SidePanel 没有内置确认/取消按钮(主站 ProcessDialog 同样的处理方式:
+         浮动面板不是模态对话框,操作按钮放进面板内容区底部) -->
+    <div class="form-actions">
+      <t-button theme="primary" :loading="submitting" :disabled="!canSubmit"
+        @click="submit">创建任务</t-button>
+      <t-button variant="outline" @click="close">取消</t-button>
+    </div>
+  </SidePanel>
 </template>
 
 <style scoped>
@@ -266,4 +274,12 @@ function close() { emit('update:visible', false) }
 .hint.ok { color: #16a34a; }
 .hint.warn { color: #d97706; }
 .hint.err { color: #dc2626; }
+/* 与主站 ProcessDialog 的本地文件选择行同款弹性布局,避免写死宽度在
+   440px 面板内挤出按钮 */
+.pick { display: flex; gap: 6px; width: 100%; }
+.pick :deep(.t-input) { flex: 1 1 auto; min-width: 0; }
+.form-actions {
+  display: flex; gap: 8px; justify-content: flex-end;
+  margin-top: 16px; padding-top: 12px; border-top: 1px solid #eef2f7;
+}
 </style>

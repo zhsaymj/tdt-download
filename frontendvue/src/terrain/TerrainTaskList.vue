@@ -1,15 +1,24 @@
 <script setup>
 /**
- * 地形任务列表面板:只展示 DEM 来源且导出含 terrain 的任务(不展示该用户在
+ * 地形任务队列面板:只展示 DEM 来源且导出含 terrain 的任务(不展示该用户在
  * 主下载工具里建的其他 DEM 导出任务,如只导出 geotiff/等高线的)。
  * 进度展示参照 TaskQueue.vue 的阶段进度条,但只保留「预览」「删除」两个操作——
  * 其余管理功能(暂停/补充导出/重新下载)仍去主任务队列做。
+ *
+ * 展示容器用 SidePanel(右侧浮动),参照主站 TaskDialog.vue 包装 TaskQueue.vue
+ * 的方式:本组件承担原 TaskQueue 的角色(内容+过滤逻辑),外层套 SidePanel。
  */
 import { computed, onMounted } from 'vue'
 import { DialogPlugin, MessagePlugin } from 'tdesign-vue-next'
 import { useTaskStore, STATUS_TEXT } from '../stores/task'
 import { isDemProvider } from '../utils/provider'
 import { fmtEta } from '../utils/format'
+import SidePanel from '../components/SidePanel.vue'
+
+const props = defineProps({
+  visible: { type: Boolean, default: false },
+})
+const emit = defineEmits(['update:visible'])
 
 const taskStore = useTaskStore()
 
@@ -67,42 +76,46 @@ async function doDelete(id, purge) {
 </script>
 
 <template>
-  <div class="list">
-    <t-card
-      v-for="t in terrainTasks" :key="t.id"
-      class="task" :bordered="true" size="small"
-    >
-      <div class="row1">
-        <span class="name">{{ t.name }}</span>
-        <t-tag :theme="STATUS_THEME[t.status] || 'default'" variant="light" size="small">
-          {{ STATUS_TEXT[t.status] || t.status }}
-        </t-tag>
-      </div>
+  <!-- flush:列表自己就是滚动容器,不要再套一层(与 TaskDialog.vue 同款处理) -->
+  <SidePanel :visible="visible" title="地形任务队列" side="right" width="440px" flush
+    @update:visible="emit('update:visible', $event)">
+    <div class="list">
+      <t-card
+        v-for="t in terrainTasks" :key="t.id"
+        class="task" :bordered="true" size="small"
+      >
+        <div class="row1">
+          <span class="name">{{ t.name }}</span>
+          <t-tag :theme="STATUS_THEME[t.status] || 'default'" variant="light" size="small">
+            {{ STATUS_TEXT[t.status] || t.status }}
+          </t-tag>
+        </div>
 
-      <div v-if="t.stages && t.stages.length" class="stages">
-        <div v-for="s in t.stages" :key="s.key" class="stage">
-          <div class="stage-head">
-            <span class="stage-name">{{ s.label }}</span>
-            <span :class="['stage-status', s.status]">{{ STAGE_STATUS_TEXT[s.status] || s.status }}</span>
-            <span v-if="stageEta(s)" class="stage-eta">{{ stageEta(s) }}</span>
+        <div v-if="t.stages && t.stages.length" class="stages">
+          <div v-for="s in t.stages" :key="s.key" class="stage">
+            <div class="stage-head">
+              <span class="stage-name">{{ s.label }}</span>
+              <span :class="['stage-status', s.status]">{{ STAGE_STATUS_TEXT[s.status] || s.status }}</span>
+              <span v-if="stageEta(s)" class="stage-eta">{{ stageEta(s) }}</span>
+            </div>
+            <t-progress theme="line" :percentage="stagePct(s)"
+              :label="`${stagePct(s)}%`" :status="stageStatus(s)" />
           </div>
-          <t-progress theme="line" :percentage="stagePct(s)"
-            :label="`${stagePct(s)}%`" :status="stageStatus(s)" />
+          <div v-if="totalEta(t) && ['running', 'pending'].includes(t.status)" class="total-eta">
+            预计总剩余:{{ totalEta(t) }}
+          </div>
         </div>
-        <div v-if="totalEta(t) && ['running', 'pending'].includes(t.status)" class="total-eta">
-          预计总剩余:{{ totalEta(t) }}
-        </div>
-      </div>
-      <t-progress v-else :percentage="pct(t)" :label="true" size="small" />
+        <t-progress v-else :percentage="pct(t)" :label="true" size="small" />
 
-      <t-space size="small" class="actions">
-        <t-button v-if="t.status === 'done'"
-          size="small" variant="outline" theme="success" @click="openPreview(t)">预览</t-button>
-        <t-button size="small" variant="outline" theme="danger" @click="onDelete(t)">删除</t-button>
-      </t-space>
-    </t-card>
-    <t-empty v-if="!terrainTasks.length" description="暂无地形任务" />
-  </div>
+        <t-space size="small" class="actions">
+          <t-button v-if="t.status === 'done'"
+            size="small" variant="outline" theme="success" @click="openPreview(t)">预览</t-button>
+          <t-button size="small" variant="outline" theme="danger" @click="onDelete(t)">删除</t-button>
+        </t-space>
+      </t-card>
+      <t-empty v-if="!terrainTasks.length" description="暂无地形任务" />
+    </div>
+  </SidePanel>
 </template>
 
 <style scoped>
