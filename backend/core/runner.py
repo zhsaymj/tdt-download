@@ -1677,7 +1677,8 @@ def _stage_terrain(ctx) -> list[str]:
     """Cesium quantized-mesh 地形切片(terrain/ + layer.json)。
 
     切片阶段进度直接上报真实瓦片数(不用虚拟刻度,速率/ETA 才准);
-    准备高程源那段只更新消息文字、不占数字刻度。
+    准备高程源那段(拼接/重采样 + 重投影)也按行/窗口数同步 done/total,
+    避免大范围源单次处理耗时数十秒时界面长时间停在同一百分比。
     """
     import rasterio as _rio
     from rasterio.warp import calculate_default_transform as _cdt
@@ -1694,7 +1695,12 @@ def _stage_terrain(ctx) -> list[str]:
     else:
         def on_row(done_rows, total_r):
             _check_stop(ctx)
-            ctx.tracker.update("terrain", message=f"准备高程源({done_rows}/{total_r} 行)")
+            # 与 _stage_dem 同理:把行级进度同步进 done/total,否则界面数字
+            # 永远卡在 start() 时设的 0/1,用户看不出这步是否在正常推进
+            # (大范围/高分辨率源单次重投影可能耗时数十秒,长时间 0% 容易被
+            # 误认为卡死——本地地形任务实测复现过这个问题)。
+            ctx.tracker.update("terrain", done=done_rows, total=total_r,
+                               message=f"准备高程源({done_rows}/{total_r} 行)")
 
         tmp_src = ctx.out_dir / "_terrain_src.tmp.tif"
         if ctx.local_src is not None:
@@ -1702,7 +1708,13 @@ def _stage_terrain(ctx) -> list[str]:
         else:
             mosaic_dem_geotiff(tr, tmp_src, ctx.downloader.tile_path,
                                build_overviews=False, on_row=on_row)
-        reproject_geotiff(tmp_src, "EPSG:4326")
+
+        def on_reproject(done_w, total_w):
+            _check_stop(ctx)
+            ctx.tracker.update("terrain", done=done_w, total=total_w,
+                               message=f"重投影高程源({done_w}/{total_w} 块)")
+
+        reproject_geotiff(tmp_src, "EPSG:4326", on_progress=on_reproject)
         _check_stop(ctx)
         tmp_src.replace(terrain_src)   # 拼接+重投影都完成才改名为正式源
         ctx.tracker.update("terrain", message="切 Cesium 地形")
