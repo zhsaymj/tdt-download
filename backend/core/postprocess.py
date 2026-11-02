@@ -218,10 +218,15 @@ def _src_has_mask(src) -> bool:
 
 
 def reproject_geotiff(src_path: Path, dst_crs: str,
-                      resampling: Resampling = Resampling.bilinear) -> bool:
+                      resampling: Resampling = Resampling.bilinear,
+                      on_progress=None) -> bool:
     """把 GeoTIFF 原地重投影到 dst_crs(如 EPSG:4547)。
 
     dst_crs 与源相同或为空则跳过,返回 False。
+    on_progress(done_windows, total_windows): 可选,每写完一个分块窗口回调
+    一次——本函数已是分块流式(见下方说明),加这个回调只是把现成的循环进度
+    暴露出去,不改变内部处理方式。大范围/高分辨率栅格单次重投影可能耗时
+    数十秒,没有回调时调用方的进度条会在这期间停滞不动,容易被误认为卡死。
 
     resampling 只作用于**彩色波段**;alpha 与掩膜恒用 nearest(它们是有效性
     边界,插值会把透明区扩成灰边)。默认 bilinear 是既有行为,不要随手改 ——
@@ -264,6 +269,11 @@ def reproject_geotiff(src_path: Path, dst_crs: str,
         # 掩膜一起搬过去,否则投影版会丢掉裁剪边界的透明信息。
         has_mask = _src_has_mask(src)
 
+        # 提前算总窗口数供 on_progress 用;chunk 大小与 _chunk_windows 默认一致
+        total_windows = (len(range(0, height, _CHUNK_PX))
+                         * len(range(0, width, _CHUNK_PX)))
+        done_windows = 0
+
         tmp = src_path.with_suffix(".warp.tif")
         with rasterio.open(tmp, "w", **profile) as dst:
             vrt_kwargs = dict(
@@ -291,6 +301,9 @@ def reproject_geotiff(src_path: Path, dst_crs: str,
                             # 掩膜是 0/255 二值,必须最近邻,双线性会在边界糊出中间值
                             dst.write_mask(vrt.read_masks(1, window=window),
                                            window=window)
+                        done_windows += 1
+                        if on_progress:
+                            on_progress(done_windows, total_windows)
                 finally:
                     if vrt_alpha is not None:
                         vrt_alpha.close()
