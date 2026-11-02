@@ -48,7 +48,9 @@ from .mosaic import mosaic_to_geotiff
 from .osm import export_osm
 from .postprocess import clip_to_geometry, crop_to_bbox, reproject_geotiff
 from .progress import StageTracker
-from .terrain_tiles import export_terrain, level_for_resolution, write_layer_json
+from .terrain_tiles import (
+    DEFAULT_MAX_ERROR, export_terrain, level_for_resolution, write_layer_json,
+)
 from .token_pool import token_pool
 from .tms import (export_tms, export_tms_from_source, source_tms_level_plan,
                   source_tms_level_plan_preserve_inputs, write_tilemapresource)
@@ -1719,8 +1721,10 @@ def _stage_terrain(ctx) -> list[str]:
         ctx.tracker.update("terrain", done=done, total=total,
                            message=f"切 Cesium 地形({done}/{total} 张)")
 
+    max_error = float(ctx.task.get("terrain_max_error") or DEFAULT_MAX_ERROR)
     _, t_exported, stopped = export_terrain(terrain_src, t_levels, ctx.bbox,
                                             terrain_dir, on_progress=on_progress,
+                                            max_error=max_error,
                                             should_stop=ctx.should_stop)
     if stopped:
         raise _Stopped()          # 保留高程源,供恢复复用、不重拼
