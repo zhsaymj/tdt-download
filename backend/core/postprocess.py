@@ -11,7 +11,16 @@ from pathlib import Path
 import numpy as np
 import rasterio
 from rasterio.mask import mask as rio_mask
-from rasterio.warp import calculate_default_transform, reproject, Resampling
+from rasterio.vrt import WarpedVRT
+from rasterio.warp import calculate_default_transform, Resampling
+from rasterio.windows import Window
+
+
+# 分块流式重投影的窗口边长(像素)。2048² 的 float32 波段约 16MB,多波段
+# uint8 也才 16MB —— 峰值内存与整幅尺寸无关,只与这个常数有关。
+_CHUNK_PX = 2048
+# WarpedVRT 内部 warp 缓存上限(MB),同样与数据规模无关。
+_WARP_MEM_LIMIT_MB = 256
 
 
 def crop_to_bbox(src_path: Path, bbox: tuple[float, float, float, float],
@@ -182,6 +191,32 @@ def clip_to_geometry(src_path: Path, geometry: dict) -> bool:
     return True
 
 
+def _chunk_windows(width: int, height: int, chunk: int | None = None):
+    """把目标栅格切成 chunk 见方的写窗口(流式重投影用)。"""
+    if chunk is None:
+        chunk = _CHUNK_PX
+    for row_off in range(0, height, chunk):
+        h = min(chunk, height - row_off)
+        for col_off in range(0, width, chunk):
+            w = min(chunk, width - col_off)
+            yield Window(col_off, row_off, w, h)
+
+
+def _src_has_mask(src) -> bool:
+    """源栅格是否存在非全有效的掩膜(按窗口扫描,不整幅读入)。
+
+    无 nodata 且无 alpha 波段时 GDAL 的掩膜恒为 255,直接短路 —— 这是最常见
+    的影像路径,省掉一次全图扫描。其余情况逐窗口探测,遇到第一个 0 立即返回。
+    """
+    if src.nodata is None and not any(
+            ci == rasterio.enums.ColorInterp.alpha for ci in src.colorinterp):
+        return False
+    for window in _chunk_windows(src.width, src.height):
+        if src.read_masks(1, window=window).min() < 255:
+            return True
+    return False
+
+
 def reproject_geotiff(src_path: Path, dst_crs: str,
                       resampling: Resampling = Resampling.bilinear) -> bool:
     """把 GeoTIFF 原地重投影到 dst_crs(如 EPSG:4547)。
@@ -192,6 +227,13 @@ def reproject_geotiff(src_path: Path, dst_crs: str,
     边界,插值会把透明区扩成灰边)。默认 bilinear 是既有行为,不要随手改 ——
     用户选的"输出坐标系"走的就是这条。TMS 的 4326 源另传 cubic,理由见
     runner._mercator_raster_source。
+
+    **必须分块流式**:早期实现用 [src.read(i) ...] 把整幅源一次性读进内存,
+    再整幅重投影。全国 z13 高程图实测 46336x29440 float32 = 5.08GB,目标 4326
+    再要 4.55GB,峰值直接撞穿 Windows 提交上限,报错表现为
+    "cannot allocate 262144 bytes"(CPLE_OutOfMemoryError,只是一个 256KB 的
+    块分配失败)—— 掩盖了真正的整幅数组超额。现在改为 WarpedVRT + 分块窗口
+    读写,峰值内存恒为 _CHUNK_PX 量级,与栅格尺寸无关。
     """
     if not dst_crs:
         return False
@@ -212,60 +254,58 @@ def reproject_geotiff(src_path: Path, dst_crs: str,
             # 突破,GDAL 据实际大小写 64 位偏移,小文件不受影响。
             "BIGTIFF": "YES",
         })
-        src_data = [src.read(i) for i in range(1, src.count + 1)]
-        src_crs = src.crs
-        src_transform = src.transform
         src_nodata = src.nodata
+        n_bands = src.count
         alpha_indexes = {
             i for i, ci in enumerate(src.colorinterp, start=1)
             if ci == rasterio.enums.ColorInterp.alpha
         }
         # 裁剪过的影像用掩膜波段表达有效区(见 clip_to_geometry),重投影必须把
         # 掩膜一起搬过去,否则投影版会丢掉裁剪边界的透明信息。
-        src_mask = src.read_masks(1)
-        has_mask = bool(src_mask.min() < 255)
+        has_mask = _src_has_mask(src)
 
-    tmp = src_path.with_suffix(".warp.tif")
-    with rasterio.open(tmp, "w", **profile) as dst:
-        for i, band in enumerate(src_data, start=1):
-            reproject(
-                source=band,
-                destination=rasterio.band(dst, i),
-                src_transform=src_transform,
-                src_crs=src_crs,
-                dst_transform=transform,
-                dst_crs=dst_crs,
-                src_nodata=src_nodata,
-                dst_nodata=src_nodata,
-                # alpha 是有效性边界,避免插值把透明边界扩大成灰边。
-                resampling=Resampling.nearest if i in alpha_indexes
-                else resampling,
+        tmp = src_path.with_suffix(".warp.tif")
+        with rasterio.open(tmp, "w", **profile) as dst:
+            vrt_kwargs = dict(
+                crs=dst_crs, transform=transform, width=width, height=height,
+                src_nodata=src_nodata, nodata=src_nodata,
+                # warp 内部缓存给固定上限,不随数据规模增长
+                warp_mem_limit=_WARP_MEM_LIMIT_MB,
             )
-        if has_mask and not alpha_indexes:
-            dst_mask = np.zeros((height, width), dtype=np.uint8)
-            reproject(
-                source=src_mask,
-                destination=dst_mask,
-                src_transform=src_transform,
-                src_crs=src_crs,
-                dst_transform=transform,
-                dst_crs=dst_crs,
-                # 掩膜是 0/255 二值,必须最近邻,双线性会在边界糊出中间值
-                resampling=Resampling.nearest,
-            )
-            dst.write_mask(dst_mask)
-        if alpha_indexes:
-            if len(src_data) >= 4:
-                dst.colorinterp = [
-                    rasterio.enums.ColorInterp.red,
-                    rasterio.enums.ColorInterp.green,
-                    rasterio.enums.ColorInterp.blue,
-                    rasterio.enums.ColorInterp.alpha,
-                ]
-            elif len(src_data) == 2:
-                dst.colorinterp = [
-                    rasterio.enums.ColorInterp.gray,
-                    rasterio.enums.ColorInterp.alpha,
-                ]
+            with WarpedVRT(src, resampling=resampling, **vrt_kwargs) as vrt:
+                # alpha 是有效性边界,必须最近邻:插值会把透明边界扩成灰边。
+                # 单独开一个 nearest 的 VRT 读 alpha 波段(整体 resampling 只
+                # 能有一个),避免把整幅源读进内存。
+                vrt_alpha = (WarpedVRT(src, resampling=Resampling.nearest,
+                                       **vrt_kwargs)
+                             if alpha_indexes else None)
+                try:
+                    for window in _chunk_windows(width, height):
+                        data = vrt.read(window=window)
+                        if vrt_alpha is not None:
+                            alpha_data = vrt_alpha.read(window=window)
+                            for i in alpha_indexes:
+                                data[i - 1] = alpha_data[i - 1]
+                        dst.write(data, window=window)
+                        if has_mask and not alpha_indexes:
+                            # 掩膜是 0/255 二值,必须最近邻,双线性会在边界糊出中间值
+                            dst.write_mask(vrt.read_masks(1, window=window),
+                                           window=window)
+                finally:
+                    if vrt_alpha is not None:
+                        vrt_alpha.close()
+            if alpha_indexes:
+                if n_bands >= 4:
+                    dst.colorinterp = [
+                        rasterio.enums.ColorInterp.red,
+                        rasterio.enums.ColorInterp.green,
+                        rasterio.enums.ColorInterp.blue,
+                        rasterio.enums.ColorInterp.alpha,
+                    ]
+                elif n_bands == 2:
+                    dst.colorinterp = [
+                        rasterio.enums.ColorInterp.gray,
+                        rasterio.enums.ColorInterp.alpha,
+                    ]
     tmp.replace(src_path)
     return True
