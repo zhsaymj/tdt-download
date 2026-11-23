@@ -7,9 +7,11 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import rasterio
+import rasterio.features
 from rasterio.transform import from_bounds
 
 from backend.core.mercator_tiling import (
@@ -87,6 +89,36 @@ class TestClip3857(unittest.TestCase):
                "coordinates": [[[0.0, 0.0], [0.1, 0.0], [0.1, 0.1],
                                 [0.0, 0.1], [0.0, 0.0]]]}
         self.assertFalse(clip_to_geometry(p, far))
+
+
+class TestClipStreaming(unittest.TestCase):
+    def test_clip_is_chunked_and_bounded(self):
+        """29137×46002 OOM 回归:几何掩膜必须按窗口分块,不能整幅分配。"""
+        bounds = (0.0, 0.0, 1.0, 1.0)
+        geom = {
+            "type": "Polygon",
+            "coordinates": [[[0.2, 0.2], [0.8, 0.2], [0.8, 0.8],
+                             [0.2, 0.8], [0.2, 0.2]]],
+        }
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "stream.tif"
+            _make_tif(p, bounds, "EPSG:4326", size=64)
+            shapes = []
+            original = rasterio.features.geometry_mask
+
+            def spy(*args, **kwargs):
+                shapes.append(kwargs["out_shape"])
+                return original(*args, **kwargs)
+
+            with patch("rasterio.features.geometry_mask", side_effect=spy):
+                self.assertTrue(clip_to_geometry(p, geom, chunk_px=7))
+            self.assertGreater(len(shapes), 1)
+            self.assertTrue(all(h <= 7 and w <= 7 for h, w in shapes),
+                            f"出现整幅掩膜 {shapes}")
+            with rasterio.open(p) as ds:
+                alpha = ds.read(4)
+            self.assertEqual(int(alpha.min()), 0)
+            self.assertEqual(int(alpha.max()), 255)
 
 
 if __name__ == "__main__":
