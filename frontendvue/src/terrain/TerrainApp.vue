@@ -6,7 +6,7 @@
  * 才需要的面板。
  *
  * 直接复用主站现成组件:
- * - MapView.vue:地图容器,内部用 mapController 单例;本页面与 download.html
+ * - MapView.vue:地图容器,内部用 mapController 单例;本页面与主下载页(index)
  *   是各自独立的 Vue 应用实例 + 独立的 <script type="module"> 入口,各自拥有
  *   独立的 JS 模块图,mapController 这个模块级 shallowRef 容器不会跨页面共享
  *   (已读 composables/mapController.js 源码确认:纯 `shallowRef(null)`,
@@ -78,7 +78,7 @@ function onCreated() { listVisible.value = true }
       </nav>
 
       <nav class="actions">
-        <a class="nav-link" href="/download.html">主下载工具</a>
+        <a class="nav-link" href="/">主下载工具</a>
       </nav>
     </header>
 
