@@ -85,7 +85,7 @@ class TiandituOsmSourceTest(_CtxFactory):
             ctx = self._ctx(out, {"name": "任务", "provider": "tianditu_img"},
                             _build_provider_for({"provider": "tianditu_img"}),
                             cache, GEO_GEODETIC)
-            got, reusable = _osm_source_for_level(ctx, _Z)
+            got, reusable, _ = _osm_source_for_level(ctx, _Z)
             self.assertTrue(got.exists(), "未产出 OSM 源")
             with rasterio.open(got) as s:
                 self.assertEqual(s.crs.to_string(), "EPSG:3857",
@@ -116,7 +116,7 @@ class TiandituOsmSourceTest(_CtxFactory):
             ctx = self._ctx(out, {"name": "任务", "provider": "tianditu_img"},
                             _build_provider_for({"provider": "tianditu_img"}),
                             cache, GEO_GEODETIC)
-            got, _ = _osm_source_for_level(ctx, _Z)
+            got, _reusable, _keep = _osm_source_for_level(ctx, _Z)
             self.assertNotEqual(got, out / "任务_z6.tif",
                                 "不该复用 4326 的 geotiff 成果作 OSM 源")
             with rasterio.open(got) as s:
@@ -134,9 +134,10 @@ class GoogleOsmSourceTest(_CtxFactory):
             provider = _build_provider_for({"provider": "google_img"})
             ctx = self._ctx(out, {"name": "任务", "provider": "google_img"},
                             provider, cache, GEO_MERCATOR)
-            got, reusable = _osm_source_for_level(ctx, _Z)
+            got, reusable, cleanup_after = _osm_source_for_level(ctx, _Z)
             self.assertEqual(got, out / "任务_z6.tif")
             self.assertTrue(reusable, "复用的成果不该在切完后被删掉")
+            self.assertFalse(cleanup_after, "正式 GeoTIFF 成果绝不能被清理")
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@
 墨卡托网格第 z 级有 2^z 行,4326 网格只有 2^(z-1) 行 —— 所以两者的行号必然不同,
 用错网格就会全落空。本测试用真实缓存目录验证这一点。
 """
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -27,11 +28,11 @@ _BBOX = (114.2, 30.4, 114.6, 30.8)
 _Z = 6
 
 
-def _write_cache_tile(path: Path) -> None:
+def _write_cache_tile(path: Path, size: int = 8) -> None:
     """写一张非空的缓存瓦片(值 200),供拼接器读出非零内容。"""
     path.parent.mkdir(parents=True, exist_ok=True)
-    arr = np.full((3, 8, 8), 200, dtype=np.uint8)
-    with rasterio.open(path, "w", driver="PNG", height=8, width=8, count=3,
+    arr = np.full((3, size, size), 200, dtype=np.uint8)
+    with rasterio.open(path, "w", driver="PNG", height=size, width=size, count=3,
                        dtype="uint8") as dst:
         dst.write(arr)
 
@@ -72,9 +73,10 @@ class OsmSourceGridTest(unittest.TestCase):
             orig = runner.settings.download.cache_dir
             runner.settings.download.cache_dir = str(cache)
             try:
-                got, reusable = _osm_source_for_level(
-                    self._ctx(out, {"name": "任务", "provider": "google_img"},
-                              provider, cache), _Z)
+                got, reusable, _ = _osm_source_for_level(
+                    OsmSourceGridTest()._ctx(
+                        out, {"name": "任务", "provider": "google_img"},
+                        provider, cache), _Z)
             finally:
                 runner.settings.download.cache_dir = orig
 
@@ -97,11 +99,58 @@ class OsmSourceGridTest(unittest.TestCase):
             _write_cache_tile(kept)          # 内容无所谓,只要存在且非空
             provider = _build_provider_for({"provider": "google_img"})
 
-            got, reusable = _osm_source_for_level(
+            got, reusable, _ = _osm_source_for_level(
                 self._ctx(out, {"name": "任务", "provider": "google_img"},
                           provider, root / "tiles"), _Z)
             self.assertEqual(got, kept)
             self.assertTrue(reusable, "复用留存源时不该在切完后删掉它")
+
+
+class OsmSourceHardLinkTest(unittest.TestCase):
+    """磁盘耗尽回归:多级别留存 OSM 源不能再把成果整份复制一遍。"""
+
+    def test_kept_source_is_hardlink_and_survives_clip_of_main(self):
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            main = root / "任务_z13.tif"
+            kept = root / ".osm_src_z13.tif"
+            _write_cache_tile(main, size=8192)
+            runner._link_osm_source(main, kept)
+
+            self.assertTrue(kept.exists())
+            # 硬链接(或回退复制)后内容一致;NTFS 下应同 inode,不额外占空间
+            st_main, st_kept = main.stat(), kept.stat()
+            self.assertEqual(st_kept.st_size, st_main.st_size)
+            if os.name == "nt":
+                self.assertEqual((st_kept.st_dev, st_kept.st_ino),
+                                 (st_main.st_dev, st_main.st_ino),
+                                 "NTFS 上应走硬链接,不然 13 级留存副本仍会撑满磁盘")
+
+            # 模拟 clip_to_geometry:临时文件 replace 主文件后,留存源仍是未裁剪旧图
+            clip_tmp = root / "任务_z13.clip.tif"
+            clip_tmp.write_bytes(b"clipped-small")
+            clip_tmp.replace(main)
+            self.assertGreater(kept.stat().st_size, 1000,
+                               "留存源被误换成裁剪后的小图了")
+
+    def test_kept_source_is_cleaned_after_successful_osm(self):
+        """留存源只是中间物:OSM 成功后应释放,不能一直占着磁盘。"""
+        from backend.core.runner import _osm_source_for_level
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            out = root / "out"
+            out.mkdir()
+            provider = _build_provider_for({"provider": "google_img"})
+            kept = out / f".osm_src_z{_Z}.tif"
+            _write_cache_tile(kept)
+            ctx = OsmSourceGridTest()._ctx(
+                out, {"name": "任务", "provider": "google_img",
+                      "levels": [_Z]}, provider, root / "tiles")
+            ctx.levels = [_Z]
+            got, reusable, keep_after = _osm_source_for_level(ctx, _Z)
+            self.assertEqual(got, kept)
+            self.assertTrue(reusable and keep_after,
+                            "留存源要标记成功后清理(keep_after 表示该清理),避免再次撑满磁盘")
 
 
 if __name__ == "__main__":

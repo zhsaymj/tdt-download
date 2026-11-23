@@ -761,9 +761,7 @@ def _stage_geotiff(ctx) -> list[str]:
 
         # 裁剪前把 OSM 要用的那几级未裁剪图留一份(见上面 _osm_keep 的说明)。
         if z in _osm_keep:
-            import shutil as _shutil
-            osm_src = ctx.out_dir / f".osm_src_z{z}.tif"
-            _shutil.copyfile(geotiff, osm_src)
+            _link_osm_source(geotiff, ctx.out_dir / f".osm_src_z{z}.tif")
 
         if _clipping:
             clip_to_geometry(geotiff, ctx.geom)
@@ -1284,12 +1282,15 @@ def _stage_osm(ctx) -> list[str]:
                     for _, lv in groups]
     grand_total = max(sum(group_totals), 1)
     base_done = 0
-    built: list[Path] = []          # 本次自拼的源,切完删掉
+    built: list[Path] = []   # 本次自拼的源,切完就删
     stopped = False
     try:
         for (source_z, levels_here), total_here in zip(groups, group_totals):
-            src_path, reusable = _osm_source_for_level(ctx, source_z)
+            src_path, reusable, keep_after = _osm_source_for_level(ctx, source_z)
             if not reusable:
+                built.append(src_path)
+            elif keep_after:
+                # 中间源(geotiff 阶段留下的硬链接/副本):复用但不保留。
                 built.append(src_path)
 
             # 切片阶段进度:直接上报真实瓦片数(export_osm 给的 done/total 即真实
@@ -1309,7 +1310,9 @@ def _stage_osm(ctx) -> list[str]:
             base_done += total_here
     finally:
         # 暂停/取消时**保留**源,恢复时免重拼;正常结束才删自拼的那几份。
-        # 用安全删除:删不掉不影响已切好的成果(阶段仍算成功)。
+        # geotiff 阶段留下的硬链接/裁剪副本同样在成功后清理 —— 它们只是中间源,
+        # 多个连续级别时累计可达数 GB,留着会在下次下载把磁盘直接撑满(实测)。
+        # 删除用安全删除:删不掉不影响已切好的成果(阶段仍算成功)。
         if not stopped:
             for p in built:
                 _safe_unlink(p)
@@ -1319,13 +1322,18 @@ def _stage_osm(ctx) -> list[str]:
                     _mbtiles_scheme_for(_ctx_grid(ctx), "osm"), "png")
 
 
-def _osm_source_for_level(ctx, z: int) -> tuple[Path, bool]:
-    """OSM 切 z 这一层要用的源;返回 (路径, 是否切完保留)。
+def _osm_source_for_level(ctx, z: int) -> tuple[Path, bool, bool]:
+    """OSM 切 z 这一层要用的源;返回 (路径, 是否切完保留, 是否成功后清理)。
 
     优先用 geotiff 阶段**裁剪前**留存的未裁剪源(`.osm_src_z{z}.tif`)——OSM 需要
     未裁剪源(它自带几何遮罩、能精确切边;用裁过的源会在几何边缘产生暗边)。
     未裁剪任务下 geotiff 成果本身就是未裁剪源,直接复用。两者都没有(裁剪任务
     且没勾 geotiff)时才自拼一份。
+
+    `cleanup_after` 只对**中间源**为 True(geotiff 阶段留下的 `.osm_src_*`
+    硬链接/副本);用户成果(正式 GeoTIFF)与 `_w` 源永远 False。
+    判定按文件来源而非"是不是最高级":连续级别时每一级源都是独立的中间图,
+    都要清;最高级也不该被当成"可留存的正式成果"。
     """
     task = ctx.task
     if _osm_uses_mercator_cache(ctx):
@@ -1334,7 +1342,7 @@ def _osm_source_for_level(ctx, z: int) -> tuple[Path, bool]:
         # 的空操作,零重投影(设计 D4)。文件名带 w 以示区分。
         mkept = ctx.out_dir / f".osm_src_w_z{z}.tif"
         if mkept.exists() and mkept.stat().st_size > 0:
-            return mkept, True
+            return mkept, True, False
         prov_w = _build_provider_for(task, GEO_MERCATOR)
         dl_w = _mk_downloader(task, prov_w)
         anno_w = None
@@ -1344,18 +1352,49 @@ def _osm_source_for_level(ctx, z: int) -> tuple[Path, bool]:
             ap = build_annotation_provider(task["provider"], tok,
                                            grid=GEO_MERCATOR)
             anno_w = _mk_downloader(task, ap) if ap else None
-        return _build_osm_source(ctx, z, prov_w, dl_w.tile_path,
-                                 GEO_MERCATOR, mkept, anno_w)
+        w_src, w_reusable = _build_osm_source(
+            ctx, z, prov_w, dl_w.tile_path, GEO_MERCATOR, mkept, anno_w)
+        return w_src, w_reusable, False
 
     kept = ctx.out_dir / f".osm_src_z{z}.tif"
     if kept.exists() and kept.stat().st_size > 0:
-        return kept, True
+        # 这是 geotiff 阶段留下的**中间副本**(硬链接/复制),不是用户成果:
+        # 每级一份,连续 13 级时累计可达数 GB,OSM 切完必须删。
+        return kept, True, True
     done = ctx.out_dir / f"{task['name']}_z{z}.tif"
     clipped = bool(task.get("clip") and ctx.geom)
     if not clipped and done.exists() and done.stat().st_size > 0:
-        return done, True
-    return _build_osm_source(ctx, z, ctx.provider, ctx.downloader.tile_path,
-                             _ctx_grid(ctx), kept, ctx.anno_downloader)
+        # 未裁剪任务的正式 geotiff 成果:是用户成果,任何级别都不能删。
+        # 低级别兜底复用的也是它,更不能在切高层时清掉。
+        return done, True, False
+    built_src, built_reusable = _build_osm_source(
+        ctx, z, ctx.provider, ctx.downloader.tile_path,
+        _ctx_grid(ctx), kept, ctx.anno_downloader)
+    return built_src, built_reusable, False
+
+
+def _link_osm_source(geotiff: Path, osm_src: Path) -> None:
+    """给 OSM 留未裁剪源:优先同目录硬链接,失败再回退整份复制。
+
+    连续级别 1..13 时 geotiff 阶段要为 13 级各留一份源(需求38-2),实测量级
+    达数 GB。原先无条件 copyfile,在磁盘余量不足时直接抛 ENOSPC,已完成的
+    拼接成果也被判阶段失败(实测 G 盘 0 余量的任务)。
+
+    `clip_to_geometry` 是把裁剪结果写到 `.clip.tif` 再 `replace` 主文件,所以
+    硬链接仍指向**未被替换的旧 inode**:OSM 读到的仍是未裁剪 3 波段 RGB
+    (无 alpha),语义与复制完全相同,但不额外占空间。Windows 下硬链接需要
+    NTFS 且同卷;跨卷/无权限/文件系统不支持时回退复制,保证功能不退化。
+    旧留存文件先安全删除再建链接 —— `_purge_stage_outputs` 在重置时已清过,
+    这里再兜底一次,避免覆盖正在被读的旧文件。
+    """
+    if osm_src.exists():
+        _safe_unlink(osm_src)
+    try:
+        os.link(geotiff, osm_src)
+        return
+    except OSError:
+        import shutil as _shutil
+        _shutil.copyfile(geotiff, osm_src)
 
 
 def _build_osm_source(ctx, z: int, provider, tile_path_fn, grid: str,
