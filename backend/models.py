@@ -209,6 +209,9 @@ class TaskCreate(BaseModel):
                     "缺省取该阶段 containers 首项")
     contour_interval: float = Field(
         default=50.0, gt=0.0, le=10000.0, description="等高距(米)")
+    terrain_max_error: float = Field(
+        default=5.0, gt=0.0, le=1000.0,
+        description="Cesium 地形(quantized-mesh)三角网简化误差(米);越小越精细、瓦片越大")
     keep_tiles_dir: bool = Field(
         default=True,
         description="打包 MBTiles 后是否同时保留散列瓦片目录(默认保留,磁盘占用翻倍)")
@@ -278,11 +281,11 @@ def create_task(data: TaskCreate, total: int, est_bytes: int = 0) -> str:
                 building_count,
                 upload_id, height_field, height_mode, height_scale,
                 floor_height, name_field, keep_fields, dem_upload_id,
-                containers, contour_interval, keep_tiles_dir, source_path,
-                tms_source_strategy, pc_crs, pc_resolution,
+                containers, contour_interval, terrain_max_error, keep_tiles_dir,
+                source_path, tms_source_strategy, pc_crs, pc_resolution,
                 created_at, updated_at)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-                       ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 task_id, data.name, data.provider, json.dumps(data.bbox),
                 z_min, z_max, data.export,
@@ -306,6 +309,7 @@ def create_task(data: TaskCreate, total: int, est_bytes: int = 0) -> str:
                 json.dumps(normalize_containers(data.provider, data.containers),
                            ensure_ascii=False),
                 float(data.contour_interval or 50.0),
+                float(data.terrain_max_error or 5.0),
                 1 if data.keep_tiles_dir else 0,
                 (data.source_path or "").strip(),
                 normalize_tms_source_strategy(data.tms_source_strategy),
@@ -410,6 +414,7 @@ def _row_to_dict(row) -> dict:
     except (TypeError, ValueError):
         d["containers"] = {}
     d["contour_interval"] = float(d.get("contour_interval") or 50.0)
+    d["terrain_max_error"] = float(d.get("terrain_max_error") or 5.0)
     # 旧任务缺列时 get 返回 None → 回落 True(保留目录,与新默认一致)
     kt = d.get("keep_tiles_dir")
     d["keep_tiles_dir"] = True if kt is None else bool(kt)
