@@ -5,6 +5,7 @@ import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import settings
@@ -160,6 +161,22 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/output", StaticFiles(directory=str(OUTPUT_DIR)), name="output")
 if BASEMAP_DIR.exists():
     app.mount("/basemap", StaticFiles(directory=str(BASEMAP_DIR)), name="basemap")
+
+
+@app.get("/", include_in_schema=False)
+async def root():
+    """根路径按配置跳到默认页面。
+
+    地形切片版与主下载工具共用同一份产物,默认入口由 config.yaml 的
+    `ui.default_page` 决定。必须在下面 `app.mount("/")` **之前**注册:
+    Starlette 按注册顺序匹配,显式路由先命中才会接管根路径。
+
+    用重定向而不是直接吐 HTML,是为了让地址栏落在具体页面上 —— 页面内
+    静态资源走绝对路径 `/assets/...`,刷新与前进后退行为都依赖真实路径。
+    目标页面名来自 UiConfig.root_page() 的白名单,不拼接用户输入。
+    """
+    return RedirectResponse(f"/{settings.ui.root_page()}.html", status_code=302)
+
 
 # 静态前端挂到根路径(放最后,避免覆盖 /api 与 /ws)
 app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")

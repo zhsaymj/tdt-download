@@ -81,3 +81,11 @@ esri_imagery:
   # 关掉后用户选 z18 会下到一整片灰色占位图。
   probe_max_zoom: true
   probe_cache_hours: 24
+
+ui:
+  # 打开根路径 / 时进入哪个页面:
+  #   index   = 主下载工具(默认)
+  #   terrain = DEM 地形切片
+  # 两个页面始终可直接访问(/index.html、/terrain.html),此项只决定默认入口。
+  # 地形切片独立版就是把它改成 terrain,无需另装一套程序。
+  default_page: "index"

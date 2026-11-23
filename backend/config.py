@@ -149,6 +149,25 @@ class EsriImageryConfig:
 
 
 @dataclass
+class UiConfig:
+    """界面入口选择。
+
+    地形切片版与主下载工具**共用同一份产物**,差异只在这一项:根路径 `/`
+    重定向到哪个页面。两个页面在任何取值下都可直接访问(`/index.html`
+    `/terrain.html`),所以不需要为独立版另做一套打包。
+    """
+    # "index" = 主下载工具(默认);"terrain" = DEM 地形切片。
+    # 只接受这两个字面量,其他值一律回落 index —— 该值会被拼进重定向目标,
+    # 白名单校验同时也是防路径穿越的边界。
+    default_page: str = "index"
+
+    def root_page(self) -> str:
+        """归一化根路径入口,非法值回落主下载工具。"""
+        page = str(self.default_page or "").strip().lower()
+        return page if page in ("index", "terrain") else "index"
+
+
+@dataclass
 class Config:
     tianditu: TiandituConfig = field(default_factory=TiandituConfig)
     download: DownloadConfig = field(default_factory=DownloadConfig)
@@ -159,6 +178,7 @@ class Config:
     worker: WorkerConfig = field(default_factory=WorkerConfig)
     google: GoogleConfig = field(default_factory=GoogleConfig)
     esri_imagery: EsriImageryConfig = field(default_factory=EsriImageryConfig)
+    ui: UiConfig = field(default_factory=UiConfig)
 
     def abs_path(self, rel: str) -> Path:
         """把配置里的相对路径解析为基于项目根目录的绝对路径。"""
@@ -251,6 +271,14 @@ esri_imagery:
   # 关掉后用户选 z18 会下到一整片灰色占位图。
   probe_max_zoom: true
   probe_cache_hours: 24
+
+ui:
+  # 打开根路径 / 时进入哪个页面:
+  #   index   = 主下载工具(默认)
+  #   terrain = DEM 地形切片
+  # 两个页面始终可直接访问(/index.html、/terrain.html),此项只决定默认入口。
+  # 地形切片独立版就是把它改成 terrain,无需另装一套程序。
+  default_page: "index"
 """
 
 
@@ -282,6 +310,7 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         _merge(cfg.worker, raw.get("worker"))
         _merge(cfg.google, raw.get("google"))
         _merge(cfg.esri_imagery, raw.get("esri_imagery"))
+        _merge(cfg.ui, raw.get("ui"))
 
     # 环境变量可覆盖密钥,便于不落盘
     env_token = os.environ.get("TIANDITU_TOKEN")
