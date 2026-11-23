@@ -61,7 +61,7 @@ worker:
 google:
   # Google 影像(非官方瓦片端点)。实测直连不通,必须配代理。
   enabled: false
-  # 代理地址。可写 "127.0.0.1:6789" 或带 scheme 的完整 URL,两种都行。
+  # 代理地址。可写 "127.0.0.1:7890" 或带 scheme 的完整 URL,两种都行。
   # 注意:不支持 socks5(aiohttp 不内置 SOCKS 支持)。
   proxy: ""
   # 端点会变更,失效时先改这里。不设 key 字段:该端点忽略 key 参数。
