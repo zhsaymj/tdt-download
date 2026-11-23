@@ -78,7 +78,9 @@ function onCreated() { listVisible.value = true }
       </nav>
 
       <nav class="actions">
-        <a class="nav-link" href="/">主下载工具</a>
+        <!-- 必须指具体的 /index.html,不能写 "/":根路径由 config.yaml 的
+             ui.default_page 决定跳向哪个页面,默认页选 terrain 时会跳回本页。 -->
+        <a class="nav-link" href="/index.html">主下载工具</a>
       </nav>
     </header>
 
