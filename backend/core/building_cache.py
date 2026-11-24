@@ -18,6 +18,7 @@ from __future__ import annotations
 import gzip
 import json
 import math
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -318,13 +319,21 @@ class BuildingCache:
         """清理缓存。给 bbox 只清该范围覆盖的格子,否则全清。返回清理格数。"""
         if bbox is None:
             n = 0
-            for p in list(self.dir.glob("*.geojson.gz")) + list(self.dir.glob("*.meta.json")):
-                try:
-                    p.unlink(missing_ok=True)
-                    if p.name.endswith(".geojson.gz"):
-                        n += 1
-                except OSError:
-                    pass
+            # 边遍历边删：缓存目录可能有上千个格子文件，一次 list() 两份
+            # 会把全部 Path 对象同时留在内存里。
+            try:
+                with os.scandir(self.dir) as it:
+                    for e in it:
+                        if not e.name.endswith((".geojson.gz", ".meta.json")):
+                            continue
+                        try:
+                            os.unlink(e.path)
+                            if e.name.endswith(".geojson.gz"):
+                                n += 1
+                        except OSError:
+                            pass
+            except OSError:
+                pass
             logger.info("已清空建筑缓存(%s):%d 格", self.source_key, n)
             return n
         n = 0

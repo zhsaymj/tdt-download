@@ -15,6 +15,9 @@
 """
 from __future__ import annotations
 
+import os
+import sqlite3
+import tempfile
 from typing import Iterator
 
 from ..core.building_cache import (
@@ -115,30 +118,51 @@ class CachedBuildingSource(Building3DSource):
                 on_progress(i, len(miss))
 
         # ---- 合并全部格子并去重 ----
-        seen: set[str] = set()
+        # 去重表放临时 sqlite 而不是 set:跨格边界的建筑要在**整个 bbox**内
+        # 记住 key,20 万栋的字符串 set 是几十 MB 且随范围线性增长。落临时文件后
+        # 进程内存只与 sqlite 页缓存相关,语义仍是"出现过就跳过"。
         west, south, east, north = bbox
         emitted = 0
-        for cell in cells:
-            if should_stop and should_stop():
-                return
-            for gf in self.cache.read(cell):
-                k = feature_key(gf)
-                if k in seen:
-                    continue        # 跨格边界的建筑会在相邻格各存一份
-                seen.add(k)
-                feat = geojson_to_feature(gf)
-                if feat is None:
-                    continue
-                # 格子比请求范围大,按精确范围过滤(外环包围盒相交即保留,
-                # 避免漏掉跨边界的大建筑)
-                xs = [p[0] for p in feat.rings[0]]
-                ys = [p[1] for p in feat.rings[0]]
-                if max(xs) < west or min(xs) > east or max(ys) < south or min(ys) > north:
-                    continue
-                emitted += 1
-                yield feat
+        uniq = 0
+        fd, db_path = tempfile.mkstemp(prefix="bldg_seen_", suffix=".db")
+        os.close(fd)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("PRAGMA journal_mode=OFF")
+            conn.execute("PRAGMA synchronous=OFF")
+            # 页缓存钉死在 4 MB:表行数随 bbox 内建筑数增长,但那份增长只体现在
+            # 临时文件大小上,不进进程内存
+            conn.execute("PRAGMA cache_size = -4000")
+            conn.execute("CREATE TABLE seen (k TEXT PRIMARY KEY)")
+            for cell in cells:
+                if should_stop and should_stop():
+                    return
+                for gf in self.cache.read(cell):
+                    k = feature_key(gf)
+                    cur = conn.execute(
+                        "INSERT OR IGNORE INTO seen(k) VALUES (?)", (k,))
+                    if cur.rowcount == 0:
+                        continue    # 跨格边界的建筑会在相邻格各存一份
+                    uniq += 1
+                    feat = geojson_to_feature(gf)
+                    if feat is None:
+                        continue
+                    # 格子比请求范围大,按精确范围过滤(外环包围盒相交即保留,
+                    # 避免漏掉跨边界的大建筑)
+                    xs = [p[0] for p in feat.rings[0]]
+                    ys = [p[1] for p in feat.rings[0]]
+                    if max(xs) < west or min(xs) > east or max(ys) < south or min(ys) > north:
+                        continue
+                    emitted += 1
+                    yield feat
+        finally:
+            conn.close()
+            try:
+                os.unlink(db_path)
+            except OSError:
+                pass
         logger.info("建筑缓存:合并 %d 格产出 %d 栋(去重前 %d)",
-                    len(cells), emitted, len(seen))
+                    len(cells), emitted, uniq)
 
     def count(self, bbox) -> int:
         """全部格子都已缓存时按缓存计数(零网络);否则委托内层。"""
