@@ -24,6 +24,11 @@ from .logs import logger
 #: 支持读取的矢量扩展名(与 file_dialog.VECTOR_PATTERNS 对应)
 VECTOR_EXTS = {".shp", ".geojson", ".json", ".gpkg", ".kml", ".fgb", ".gml"}
 
+#: 逐要素边界兜底的上限(#26)。`read_bounds` 返回 (N,4) 数组,峰值随要素数
+#: 线性增长;超过这个量级宁可不给范围(调用方对 bounds=None 已有降级),
+#: 也不把 worker 进程读爆。
+_BOUNDS_FALLBACK_MAX = 200_000
+
 
 def _base_geom_type(gt: str) -> str:
     """归一化几何类型:去掉 Z/M 维度后缀与 Multi 前缀。
@@ -113,7 +118,17 @@ def inspect_vector(path: Path) -> dict:
             xmin, ymin, xmax, ymax = (float(tb[0]), float(tb[1]),
                                       float(tb[2]), float(tb[3]))
         else:
-            # 兜底:驱动算不出整体范围时才退回逐要素边界
+            # 兜底:驱动算不出整体范围时才退回逐要素边界。这条路径的峰值
+            # 随要素数线性增长,要素数过大就放弃范围(#26)。
+            n_feat = info.get("features")
+            try:
+                too_many = int(n_feat) > _BOUNDS_FALLBACK_MAX
+            except (TypeError, ValueError):
+                too_many = False        # 未知(-1/None)时保持原行为
+            if too_many:
+                logger.warning("矢量要素数 %s 超过逐要素边界上限,跳过范围计算:%s",
+                               n_feat, path.name)
+                raise ValueError("要素数过大,跳过范围计算")
             b = read_bounds(str(path))[1]
             xmin, ymin, xmax, ymax = (float(b[:, 0].min()), float(b[:, 1].min()),
                                       float(b[:, 2].max()), float(b[:, 3].max()))

@@ -69,6 +69,38 @@ _DEM_AVG_BYTES = 60 * 1024
 # 取 18KB 作估算基准(设计 §3.8)。比 DEM 的 LERC 小得多,不能套用后者。
 _MERC_IMG_AVG_BYTES = 18 * 1024
 
+# 成品 GeoTIFF 超过这个体积就提示内存占用(§5.3)。只警告不拦截 ——
+# 与"取消瓦片数硬上限"的既定决策一致,提交永远放行。
+_MEM_WARN_GIB = 4.0
+
+# 成品每像素字节数:影像按 3 波段 uint8(RGB),DEM 按 1 波段 float32。
+_MEM_BYTES_PER_PX_IMG = 3.0
+_MEM_BYTES_PER_PX_DEM = 4.0
+
+
+def _estimate_memory_warning(detail: dict, provider: str) -> str | None:
+    """成品体积过大时给一条内存提示,不拦截提交(§5.3)。
+
+    峰值内存已经与选区规模脱钩(下载/拼接/晕渲全是分块流式,见
+    `docs/内存审计报告.md`),但**成品文件本身**仍随范围线性增长 —— 打开、
+    预览、或其他程序加载这份 GeoTIFF 时仍要吃掉同等量级的地址空间。
+    这里只按最大级别的成品像素数估算,给出量级让用户心里有数。
+    """
+    levels = detail.get("levels") or []
+    if not levels:
+        return None
+    top = max(levels, key=lambda r: int(r.get("width") or 0) * int(r.get("height") or 0))
+    w, h = int(top.get("width") or 0), int(top.get("height") or 0)
+    if w <= 0 or h <= 0:
+        return None
+    per_px = _MEM_BYTES_PER_PX_DEM if is_dem_provider(provider) else _MEM_BYTES_PER_PX_IMG
+    gib = w * h * per_px / float(1 << 30)
+    if gib < _MEM_WARN_GIB:
+        return None
+    return (f"该范围最大级别的成品约 {w}×{h} 像素、{gib:.1f} GiB;"
+            f"下载与拼接本身是分块流式、内存不随范围增长,但打开/预览这份成品"
+            f"需要同量级内存,多个任务并行时会叠加。提交不受影响。")
+
 
 def _estimate_detail(bbox, levels: list[int], provider: str, formats=()) -> dict:
     """预估明细,按实际要下载的网格累计(见 _estimate_total)。
@@ -369,6 +401,9 @@ async def api_estimate(west: float, south: float, east: float, north: float,
         _add_annotation_to_detail(detail, lv)
     resp = {"total": detail["total_tiles"],
             "grids": _grids_for_estimate(provider, export), **detail}
+    warning = _estimate_memory_warning(detail, provider)
+    if warning:
+        resp["memory_warning"] = warning
     if global_max_level > 0:
         from ..core.tile_estimate import tile_total
         full = tile_total(provider, export, (west, south, east, north), lv,

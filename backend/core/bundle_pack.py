@@ -111,28 +111,40 @@ def pack(source_key: str = "osm", *, bundle_deg: float = BUNDLE_DEG,
     for i, (b, cells) in enumerate(sorted(groups.items()), start=1):
         if should_stop and should_stop():
             logger.info("打包被中断(已写 %d/%d)", i - 1, len(groups))
+            for p in out_dir.glob("b_*.json.gz.tmp"):
+                p.unlink(missing_ok=True)
             return {"interrupted": True, "bundles": len(bundles)}
-        payload: dict[str, list] = {}
-        nfeat = 0
-        for cell in cells:
-            feats = cache.read(cell)
-            if not feats:
-                continue
-            payload[str(cell)] = feats
-            nfeat += len(feats)
-            w, s, e, n = cell.bounds
-            minx = min(minx, w); maxx = max(maxx, e)
-            miny = min(miny, s); maxy = max(maxy, n)
-        if not payload:
-            continue
         path = out_dir / bundle_name(b)
-        with gzip.open(path, "wt", encoding="utf-8", compresslevel=6) as f:
-            json.dump({"cells": payload}, f, ensure_ascii=False)
+        tmp = path.with_name(path.name + ".tmp")
+        nfeat = n_cells = 0
+        # 逐格写 JSON 流(#28):原先先攒满整包 payload 再 dump,最重单包
+        # 12 万栋 ≈303 MiB 常驻;现在峰值只有一格的要素。
+        with gzip.open(tmp, "wt", encoding="utf-8", compresslevel=6) as f:
+            f.write('{"cells":{')
+            for cell in cells:
+                feats = cache.read(cell)
+                if not feats:
+                    continue
+                if n_cells:
+                    f.write(",")
+                f.write(json.dumps(str(cell), ensure_ascii=False))
+                f.write(":")
+                f.write(json.dumps(feats, ensure_ascii=False))
+                n_cells += 1
+                nfeat += len(feats)
+                w, s, e, n = cell.bounds
+                minx = min(minx, w); maxx = max(maxx, e)
+                miny = min(miny, s); maxy = max(maxy, n)
+            f.write("}}")
+        if not n_cells:
+            tmp.unlink(missing_ok=True)        # 整包无要素:不留空包
+            continue
+        tmp.replace(path)
         size = path.stat().st_size
         total_bytes += size
         total_feats += nfeat
         bundles.append({"b": [b[0], b[1]], "bytes": size,
-                        "cells": len(payload), "features": nfeat})
+                        "cells": n_cells, "features": nfeat})
         if on_progress and (i % 50 == 0 or i == len(groups)):
             on_progress(i, len(groups))
         if i % 500 == 0:
