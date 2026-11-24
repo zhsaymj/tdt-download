@@ -48,3 +48,41 @@ tools_src/3dtiles/vcpkg_installed/
 tools_src/3dtiles/thirdparty/
 tools_src/3dtiles/geoids/
 tools_src/3dtiles/build_log.txt
+# >>> Comet managed project state >>>
+!/.comet/
+/.comet/*
+!/.comet/config.yaml
+.comet-archive-staging/
+.*.comet-archive-cas-*
+.*.comet-runtime-migration.json*
+.*.comet-runtime-source-*
+.*.comet-runtime-stage-*
+**/comet/changes/*/runtime
+**/comet/archive/*/runtime
+**/.comet/run-state.json
+**/.comet/pending-action.json
+**/.comet/trajectory.jsonl
+**/.comet/context.md
+**/.comet/artifacts.json
+**/.comet/checkpoint.json
+**/.comet/skill-snapshots
+**/.comet/checks
+**/.comet/coordination.json
+**/.comet/subagent-progress.md
+.comet-state.lock
+.comet-state-transaction.json
+# <<< Comet managed project state <<<
+
+# >>> 本机 agent 环境配置（不进共享仓库） >>>
+.agents/
+.claude/
+.codebuddy/
+.codex/
+.comet/
+.dsh/
+.grok/
+.trae/
+.workbuddy/
+docs/comet/
+docs/openspec/
+# <<< 本机 agent 环境配置 <<<
