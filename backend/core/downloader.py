@@ -59,6 +59,8 @@ class TileDownloader:
         返回 (成功数, 失败数, stopped)。
         """
         sem = asyncio.Semaphore(self.concurrency)
+        # 在飞任务窗口:只需喂满信号量,超出的 Task 只是排队占内存。
+        max_in_flight = max(self.concurrency * 4, 32)
         # 默认头(天地图对 Referer/UA 有校验);provider 可覆盖(如 Esri 需模拟客户端头)
         headers = {
             "User-Agent": "Mozilla/5.0 (TiandituDownloader)",
@@ -83,27 +85,49 @@ class TileDownloader:
         proxy = getattr(self.provider, "proxy", None)
         async with aiohttp.ClientSession(headers=headers, timeout=timeout,
                                          proxy=proxy) as session:
-            tasks = [
-                asyncio.create_task(self._one(session, sem, col, row, tr.z))
-                for col, row in tr.iter_tiles()
-            ]
-            for coro in asyncio.as_completed(tasks):
-                success = await coro
-                if success:
-                    ok += 1
-                    if progress:
-                        progress(1, 0)
-                else:
-                    fail += 1
-                    if progress:
-                        progress(0, 1)
-                # 检查停止请求:取消尚未完成的下载协程后跳出
-                if should_stop and should_stop():
-                    stopped = True
-                    for tk in tasks:
+            # 分批提交:一次性为整个区间建 Task 的峰值 = 瓦片总数 × 单个 Task
+            # 开销(实测约 854 B),全国 z16 达数亿张、上百 GiB。改为滑动窗口,
+            # 在飞任务恒定为 _max_in_flight,内存与瓦片总数无关;吞吐不变
+            # (信号量 sem 才是真正的并发闸门,窗口只需喂满它)。
+            tiles = tr.iter_tiles()
+            exhausted = False
+            inflight: set[asyncio.Task] = set()
+            try:
+                while True:
+                    while not exhausted and len(inflight) < max_in_flight:
+                        try:
+                            col, row = next(tiles)
+                        except StopIteration:
+                            exhausted = True
+                            break
+                        inflight.add(asyncio.create_task(
+                            self._one(session, sem, col, row, tr.z)
+                        ))
+                    if not inflight:
+                        break
+                    done, inflight = await asyncio.wait(
+                        inflight, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    for tk in done:
+                        if tk.result():
+                            ok += 1
+                            if progress:
+                                progress(1, 0)
+                        else:
+                            fail += 1
+                            if progress:
+                                progress(0, 1)
+                    # 检查停止请求:取消尚未完成的下载协程后跳出
+                    if should_stop and should_stop():
+                        stopped = True
+                        break
+            finally:
+                if inflight:
+                    for tk in inflight:
                         if not tk.done():
                             tk.cancel()
-                    break
+                    # 等被取消的任务真正结束,避免 Session 关闭时残留告警
+                    await asyncio.gather(*inflight, return_exceptions=True)
         return ok, fail, stopped
 
     async def _one(self, session, sem, col, row, z) -> bool:

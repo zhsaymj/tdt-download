@@ -61,14 +61,25 @@ def crop_to_bbox(src_path: Path, bbox: tuple[float, float, float, float],
         win = window_from_bounds(ix0, iy0, ix1, iy1, src.transform)
         # 对齐到整像素:非整数窗口会让 transform 带半像素偏移,坐标就不准了
         win = win.round_offsets().round_lengths()
-        data = src.read(window=win)
         profile = src.profile.copy()
         profile.update(height=int(win.height), width=int(win.width),
                        transform=src.window_transform(win))
 
-    tmp = src_path.with_suffix(".crop.tmp.tif")
-    with rasterio.open(tmp, "w", **profile) as dst:
-        dst.write(data)
+        # 分块流式搬运:整窗一次 src.read 的峰值 = 波段数 × 裁剪面积,
+        # 大范围高级别 DEM(z18 数万像素见方)可达数十 GB。按 _CHUNK_PX 切窗后
+        # 峰值恒为一个块,源窗偏移 = 裁剪窗偏移 + 块内偏移,语义与原一次读等价
+        # (纯窗口复制,无 mask/nodata 参与,不改变任何像素值)。
+        tmp = src_path.with_suffix(".crop.tmp.tif")
+        try:
+            with rasterio.open(tmp, "w", **profile) as dst:
+                for sub in _chunk_windows(int(win.width), int(win.height)):
+                    src_win = Window(win.col_off + sub.col_off,
+                                     win.row_off + sub.row_off,
+                                     sub.width, sub.height)
+                    dst.write(src.read(window=src_win), window=sub)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
     tmp.replace(src_path)
     return True
 
