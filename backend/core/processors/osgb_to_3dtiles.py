@@ -96,6 +96,10 @@ class OsgbTo3dTiles(BaseProcessor):
 
         no_pyramid=True 追加 `--no-pyramid`,跳过顶层 LOD 金字塔,
         回退为平铺各 Tile 子树(仅用于排查金字塔相关问题)。
+
+        内存方面 3dtiles 没有块缓存上限参数(它整目录流式转换,峰值主要在
+        单个 Tile 的纹理),靠子进程继承的 GDAL_CACHEMAX 兜住纹理读写
+        (由 processors/base.py::run_cli 注入,#27)。
         """
         if not self._exe:
             raise ProcessorError(
@@ -139,16 +143,22 @@ class OsgbTo3dTiles(BaseProcessor):
         return min(count / estimated_total, 1.0)
 
     def expected_outputs(self, out_dir: Path) -> list[Path]:
-        """预期产物:tileset.json + 全部 .b3dm;无 b3dm 直接判失败。"""
+        """预期产物:tileset.json;另需至少一张非空 .b3dm,否则判失败。
+
+        原写法 `sorted(out_dir.rglob("*.b3dm"))` 把全部瓦片路径攒成列表再逐个
+        stat —— 38 万节点规模的成果就是 38 万个 Path(约 0.1 GiB)加 38 万次
+        stat,而结论只有"一张都没出"和"出了"两种。改成扫到第一张就停。
+        """
         out_dir = Path(out_dir)
-        b3dms = sorted(out_dir.rglob("*.b3dm"))
-        if not b3dms:
+        has_tile = next(
+            (p for p in out_dir.rglob("*.b3dm") if p.stat().st_size > 0), None)
+        if has_tile is None:
             raise ProcessorError(
                 self.name, 0,
                 hint="进程正常结束但未生成任何 .b3dm 瓦片,"
                      "请检查输入目录是否符合 smart3d 组织方式"
                      "(Data/ 目录 + 同名 .osgb)")
-        return [out_dir / "tileset.json", *b3dms]
+        return [out_dir / "tileset.json"]
 
     def preflight(self, input_dir) -> list[str]:
         """输入预检:返回警告列表(不阻断);硬性问题抛 ProcessorError。

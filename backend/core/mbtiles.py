@@ -44,8 +44,13 @@ def pack_mbtiles(tiles_dir: Path, out_path: Path, *, scheme: str,
     if not tiles_dir.is_dir():
         return None
 
-    files = [p for p in tiles_dir.rglob(f"*.{tile_format}") if p.is_file()]
-    if not files:
+    pattern = f"*.{tile_format}"
+    # 先数一遍拿进度分母,再惰性遍历一遍写库。rglob 本身是惰性的,数的时候不
+    # 占内存;但原写法 `[p for p in rglob(...)]` 会把全部 Path 攒成列表 —— 3° z18
+    # 是 130 万张瓦片,光路径就要 1 GiB 以上,而它们用完即弃。
+    # 代价是多走一遍目录树(不读文件内容,相比逐张读瓦片字节可以忽略)。
+    total_files = sum(1 for p in tiles_dir.rglob(pattern) if p.is_file())
+    if not total_files:
         logger.warning("MBTiles:%s 下没有 .%s 瓦片,跳过打包", tiles_dir, tile_format)
         return None
 
@@ -58,7 +63,9 @@ def pack_mbtiles(tiles_dir: Path, out_path: Path, *, scheme: str,
         zooms: set[int] = set()
         done = 0
         rows: list[tuple[int, int, int, bytes]] = []
-        for path in files:
+        for path in tiles_dir.rglob(pattern):
+            if not path.is_file():
+                continue
             if should_stop and should_stop():
                 con.rollback()
                 out_path.unlink(missing_ok=True)
@@ -78,7 +85,7 @@ def pack_mbtiles(tiles_dir: Path, out_path: Path, *, scheme: str,
                 con.executemany("INSERT OR REPLACE INTO tiles VALUES (?,?,?,?)", rows)
                 rows.clear()
                 if on_progress:
-                    on_progress(done, len(files))
+                    on_progress(done, total_files)
         if rows:
             con.executemany("INSERT OR REPLACE INTO tiles VALUES (?,?,?,?)", rows)
 
@@ -107,7 +114,7 @@ def pack_mbtiles(tiles_dir: Path, out_path: Path, *, scheme: str,
         con.close()
 
     if on_progress:
-        on_progress(done, len(files))
+        on_progress(done, total_files)
     logger.info("MBTiles:已打包 %s(%d 张瓦片,级别 %s)",
                 out_path.name, done,
                 f"{min(zooms)}-{max(zooms)}" if zooms else "无")

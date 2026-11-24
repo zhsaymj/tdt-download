@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import threading
 import time
@@ -134,9 +135,15 @@ def run_cli(cmd: list[str], *, cwd=None, cancel_event: threading.Event | None = 
     取消/超时/失败前都会先等读取线程收尾,保证输出行不丢、线程不泄漏。
     """
     tool = tool or Path(cmd[0]).name
+    # 内存上限只能靠环境变量传下去(#27):PDAL 的 pipeline、py3dtiles 的
+    # convert、fanvanzh 的 3dtiles 都没有"块缓存上限"类参数,能约束它们
+    # 内嵌 GDAL 的只有 GDAL_CACHEMAX。这里显式写入而不是依赖父进程导过
+    # core.gdal_env —— 否则"父子进程环境是否一致"会变成隐式前提。
+    env = os.environ.copy()
+    env.setdefault("GDAL_CACHEMAX", "512")
     try:
         proc = subprocess.Popen(
-            cmd, cwd=cwd,
+            cmd, cwd=cwd, env=env,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             creationflags=_CREATE_NO_WINDOW,
         )
@@ -213,7 +220,13 @@ class BaseProcessor(ABC):
 
     @abstractmethod
     def expected_outputs(self, out_dir: Path) -> list[Path]:
-        """预期产物清单,run 结束后逐个校验存在且非空。"""
+        """**关键**产物清单,run 结束后逐个校验存在且非空。
+
+        只返回数量与瓦片总数无关的那几个文件(如 tileset.json / 输出 tif)。
+        不要返回全部瓦片:实现方在生成几十万个瓦片的场景下会把路径全量物化,
+        而这些路径除了被 stat 一遍没有任何用途 —— 瓦片是否生成用
+        `progress_by_output_count` 的惰性计数判断即可。
+        """
 
     def run(self, cmd: list[str], *, out_dir, cwd=None,
             cancel_event: threading.Event | None = None,
