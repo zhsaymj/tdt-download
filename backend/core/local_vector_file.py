@@ -82,7 +82,9 @@ def inspect_vector(path: Path) -> dict:
             f"不支持的矢量格式 {path.suffix};支持 "
             + "、".join(sorted(e.lstrip('.') for e in VECTOR_EXTS)))
 
-    info = read_info(str(path))
+    # force_total_bounds:让 read_info 顺带算出整幅范围。原实现另调一次
+    # read_bounds,返回的是逐要素边界数组 (N,4),内存随要素数线性增长。
+    info = read_info(str(path), force_total_bounds=True)
     raw_gt = str(info.get("geometry_type") or "")
     kind = kind_of_geometry(raw_gt)
     probed = ""
@@ -106,9 +108,15 @@ def inspect_vector(path: Path) -> dict:
     bounds_wgs84 = None
     try:
         from rasterio.warp import transform_bounds
-        b = read_bounds(str(path))[1]      # (总范围 xmin,ymin,xmax,ymax)
-        xmin, ymin, xmax, ymax = (float(b[0].min()), float(b[1].min()),
-                                  float(b[2].max()), float(b[3].max()))
+        tb = info.get("total_bounds")
+        if tb is not None:
+            xmin, ymin, xmax, ymax = (float(tb[0]), float(tb[1]),
+                                      float(tb[2]), float(tb[3]))
+        else:
+            # 兜底:驱动算不出整体范围时才退回逐要素边界
+            b = read_bounds(str(path))[1]
+            xmin, ymin, xmax, ymax = (float(b[:, 0].min()), float(b[:, 1].min()),
+                                      float(b[:, 2].max()), float(b[:, 3].max()))
         if crs.upper().replace(" ", "") in ("EPSG:4326", "EPSG:4979", "OGC:CRS84"):
             bounds_wgs84 = [xmin, ymin, xmax, ymax]
         else:
@@ -163,23 +171,52 @@ def convert_vector(src: Path, dst: Path, container: str,
     if cont is None or cont.writer != "pyogrio":
         raise ValueError(f"不支持的矢量容器格式:{container}")
 
-    meta, _idx, geoms, field_data = read(str(src))
-    src_crs = str(meta.get("crs") or "EPSG:4326")
-    out_crs = "EPSG:4326" if to_wgs84 else src_crs
-
-    if to_wgs84 and src_crs.upper() not in ("EPSG:4326", "OGC:CRS84"):
-        geoms = _reproject_wkb(geoms, src_crs, "EPSG:4326")
-
+    # 分批读 + 分批 append 写:一次 read 会把整份 WKB 数组和属性列全部驻留,
+    # 几十万要素的成果直接顶到几百 MB。跳过前 k 批读第 k 批的代价:
+    # gpkg/fgb 可 seek,Shapefile 只能顺序迭代,大 shp 会慢一些但内存恒定。
+    BATCH = _VECTOR_BATCH
     dst.parent.mkdir(parents=True, exist_ok=True)
-    fields = np.asarray([str(f) for f in meta["fields"]])
-    # promote_to_multi:源里混有 Polygon 与 MultiPolygon 时,shp/gpkg 要求单一
-    # 几何类型,统一提升为 Multi 才不会写失败
-    write(str(dst), geoms, list(field_data), fields,
-          driver=cont.driver, crs=out_crs,
-          geometry_type=_write_geom_type(meta.get("geometry_type")),
-          encoding="UTF-8", promote_to_multi=True)
-    logger.info("矢量已转为 %s:%s(%d 个要素)", cont.label, dst.name, len(geoms))
+    meta = None
+    fields = None
+    src_crs = out_crs = "EPSG:4326"
+    wrote = 0
+    skip = 0
+    while True:
+        m, _idx, geoms, field_data = read(str(src), skip_features=skip,
+                                          max_features=BATCH)
+        n = len(geoms)
+        if meta is None:
+            meta = m
+            src_crs = str(meta.get("crs") or "EPSG:4326")
+            out_crs = "EPSG:4326" if to_wgs84 else src_crs
+            fields = np.asarray([str(f) for f in meta["fields"]])
+        if n == 0:
+            if wrote == 0:
+                # 空数据源:仍写出只含字段定义的容器(与原实现行为一致)
+                write(str(dst), geoms, list(field_data), fields,
+                      driver=cont.driver, crs=out_crs,
+                      geometry_type=_write_geom_type(meta.get("geometry_type")),
+                      encoding="UTF-8", promote_to_multi=True)
+            break
+        if to_wgs84 and src_crs.upper() not in ("EPSG:4326", "OGC:CRS84"):
+            geoms = _reproject_wkb(geoms, src_crs, "EPSG:4326")
+        # promote_to_multi:源里混有 Polygon 与 MultiPolygon 时,shp/gpkg 要求
+        # 单一几何类型,统一提升为 Multi 才不会写失败
+        write(str(dst), geoms, list(field_data), fields,
+              driver=cont.driver, crs=out_crs,
+              geometry_type=_write_geom_type(meta.get("geometry_type")),
+              encoding="UTF-8", promote_to_multi=True,
+              append=wrote > 0)
+        wrote += n
+        skip += n
+        if n < BATCH:
+            break
+    logger.info("矢量已转为 %s:%s(%d 个要素)", cont.label, dst.name, wrote)
     return dst
+
+
+# convert_vector 分批读写的一批要素数:越大越快、峰值越高
+_VECTOR_BATCH = 20_000
 
 
 def _write_geom_type(gt) -> str:

@@ -604,6 +604,10 @@ async def api_repair_nodata(task_id: str):
     return await asyncio.to_thread(_repair_task_output, task)
 
 
+# 成果转 GeoJSON 时每批读出的要素数(测试可 patch 变小以覆盖多批分支)
+_VECTOR_GEOJSON_BATCH = 20_000
+
+
 @router.get("/{task_id}/layers")
 async def api_task_layers(task_id: str):
     """列出该任务可叠加到地图的图层(或可打开三维预览的成果)。
@@ -640,33 +644,69 @@ async def api_task_vector(task_id: str, filename: str):
     if p.suffix.lower() not in (".gpkg", ".shp", ".fgb"):
         raise HTTPException(400, f"不支持转换该格式:{p.suffix}")
 
-    def _to_geojson() -> dict:
-        import json as _json
-        from pyogrio.raw import read as _read
-        from shapely import wkb as _wkb
-        from shapely.geometry import mapping as _mapping
-        meta, _idx, geoms, field_data = _read(str(p))
-        names = [str(x) for x in meta["fields"]]
-        feats = []
-        for i, g in enumerate(geoms):
-            if g is None:
-                continue
-            try:
-                geom = _mapping(_wkb.loads(g))
-            except Exception:
-                continue
-            props = {}
-            for j, nm in enumerate(names):
-                v = field_data[j][i]
-                # numpy 标量不是 JSON 可序列化类型
-                props[nm] = v.item() if hasattr(v, "item") else v
-            feats.append({"type": "Feature", "geometry": geom, "properties": props})
-        return {"type": "FeatureCollection", "features": feats}
+    # 分批读 + 流式输出:几十万要素的 gpkg 一次性 read 出来再拼 dict,会同时
+    # 驻留 WKB 数组与 Feature 树,主进程直接翻倍。按 BATCH 分批读、逐要素写到
+    # 响应流里,内存只与一批有关。
+    # 注意 skip_features 对 Shapefile 是顺序迭代(第 k 批要跳过前 k 批),
+    # gpkg/fgb 可 seek;本接口三种格式都收,大 shp 的耗时会随批数增长。
+    BATCH = _VECTOR_GEOJSON_BATCH
 
+    def _read_batch(skip: int):
+        from pyogrio.raw import read as _read
+        return _read(str(p), skip_features=skip, max_features=BATCH)
+
+    # 第一批在进入流式响应前读:转换失败还能返回 500,而不是半截 JSON
     try:
-        return await asyncio.to_thread(_to_geojson)
+        head = await asyncio.to_thread(_read_batch, 0)
     except Exception as e:
         raise HTTPException(500, f"转换失败:{str(e)[:200]}") from e
+
+    def _batches():
+        meta, _idx, geoms, field_data = head
+        yield meta, geoms, field_data
+        skip = len(geoms)
+        if skip < BATCH:
+            return              # 首批不满一批,说明文件已读完
+        while True:
+            m, _idx2, g, fd = _read_batch(skip)
+            n = len(g)
+            if n == 0:
+                return
+            yield m, g, fd
+            skip += n
+            if n < BATCH:
+                return
+
+    def _iter_geojson():
+        import json as _json
+        from shapely import wkb as _wkb
+        from shapely.geometry import mapping as _mapping
+        yield '{"type":"FeatureCollection","features":['
+        first = True
+        for meta, geoms, field_data in _batches():
+            names = [str(x) for x in meta["fields"]]
+            for i, g in enumerate(geoms):
+                if g is None:
+                    continue
+                try:
+                    geom = _mapping(_wkb.loads(g))
+                except Exception:
+                    continue
+                props = {}
+                for j, nm in enumerate(names):
+                    v = field_data[j][i]
+                    # numpy 标量不是 JSON 可序列化类型
+                    props[nm] = v.item() if hasattr(v, "item") else v
+                if not first:
+                    yield ","
+                first = False
+                yield _json.dumps(
+                    {"type": "Feature", "geometry": geom, "properties": props},
+                    ensure_ascii=False)
+        yield "]}"
+
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(_iter_geojson(), media_type="application/json")
 
 
 # ---------- MBTiles 预览 ----------

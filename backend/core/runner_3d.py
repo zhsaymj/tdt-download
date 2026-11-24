@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 import shutil
 import threading
 import time
@@ -71,14 +72,25 @@ def _source_path(task: dict) -> Path:
     return Path((task.get("source_path") or "").strip())
 
 
-def _las_files(task: dict) -> list[Path]:
-    """点云输入的 LAS/LAZ 文件清单:单文件 → [文件];目录 → 递归收集并排序。"""
+def _las_files(task: dict) -> list[str]:
+    """点云输入的 LAS/LAZ 文件清单:单文件 → [路径];目录 → 递归收集并排序。
+
+    返回**路径字符串**而不是 Path:目录输入可能有上万个 LAS,Path 对象每个
+    约 280 字节,字符串只要三分之一。需要 Path 的地方现构造。
+
+    排序键用 normcase:与原先 sorted(Path) 的比较规则一致(Windows 上大小写
+    不敏感),子目录序号前缀 001_ 绑定的仍是同一批文件。
+    """
     src = _source_path(task)
     if src.is_file():
-        return [src]
+        return [str(src)]
     if src.is_dir():
-        return sorted(p for p in src.rglob("*")
-                      if p.is_file() and p.suffix.lower() in (".las", ".laz"))
+        out: list[str] = []
+        for p in src.rglob("*"):
+            if p.is_file() and p.suffix.lower() in (".las", ".laz"):
+                out.append(str(p))
+        out.sort(key=os.path.normcase)
+        return out
     return []
 
 
@@ -93,7 +105,7 @@ def tiles3d_output(task: dict) -> Path:
         files = _las_files(task)
         if len(files) > 1:
             # 与 _stage_pc_tile_3d 的子目录命名一致(序号前缀防同名互覆)
-            return root / f"001_{files[0].stem}" / "tileset.json"
+            return root / f"001_{Path(files[0]).stem}" / "tileset.json"
     return root / "tileset.json"
 
 
@@ -256,7 +268,7 @@ def _stage_convert_3d(ctx) -> list[str]:
     return [str(out_dir)]
 
 
-def _estimate_resolution(proc: LasToDem, path: Path) -> tuple[float, str]:
+def _estimate_resolution(proc: LasToDem, path: "str | Path") -> tuple[float, str]:
     """pc_resolution=0 时按点云密度粗估分辨率:sqrt(bbox 面积 / 点数)。
 
     失败(预检不可用/头部缺数据)回落 1.0 米并在消息里注明,不阻断任务。
@@ -327,17 +339,17 @@ def _run_pc_raster(ctx, key: str, kind: str, out_tif: Path) -> list[str]:
         if ctx.should_stop():
             raise _Stopped()
         # 枚举序号前缀:目录递归收集时不同子目录的同名 LAS 不互相覆盖
-        out = out_tif if single else parts_dir / f"{i:03d}_{f.stem}.tif"
+        out = out_tif if single else parts_dir / f"{i:03d}_{Path(f).stem}.tif"
         out.parent.mkdir(parents=True, exist_ok=True)
         proc.run_pipeline(
-            input=str(f), output=str(out), kind=kind, resolution=resolution,
+            input=f, output=str(out), kind=kind, resolution=resolution,
             crs=crs, cancel_event=ctx.cancel_event)
         for w in getattr(proc, "last_warnings", None) or []:
             logger.warning("任务[%s] %s", task["name"], w)
             ctx.tracker.update(key, message=w)
         produced.append(out)
         ctx.tracker.update(key, done=i,
-                           message=f"已转换 {i}/{len(files)}:{f.name}")
+                           message=f"已转换 {i}/{len(files)}:{Path(f).name}")
 
     if not single:
         ctx.tracker.update(key, message="合并分幅 tif")
@@ -400,16 +412,16 @@ def _stage_pc_tile_3d(ctx) -> list[str]:
         if ctx.should_stop():
             raise _Stopped()
         # 序号前缀与 tiles3d_output 的主产物推导保持一致(防同名互覆)
-        out_sub = tiles_root if single else tiles_root / f"{i:03d}_{f.stem}"
+        out_sub = tiles_root if single else tiles_root / f"{i:03d}_{Path(f).stem}"
         out_sub.mkdir(parents=True, exist_ok=True)
         # pnts 总数事先不可知(取决于点数与八叉树深度),进度退化为文件粒度
-        cmd = proc.build_cmd(input_file=str(f), out_dir=str(out_sub),
+        cmd = proc.build_cmd(input_file=f, out_dir=str(out_sub),
                              srs_in=srs_in, srs_out=srs_out)
         proc.run(cmd, out_dir=str(out_sub), cancel_event=ctx.cancel_event,
                  on_progress=lambda p: ctx.tracker.update(
                      key, message=f"当前文件 {p * 100:.0f}%"))
         ctx.tracker.update(key, done=i,
-                           message=f"已切片 {i}/{len(files)}:{f.name}")
+                           message=f"已切片 {i}/{len(files)}:{Path(f).name}")
 
     main = tiles3d_output(task)
     if not main.is_file():

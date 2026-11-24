@@ -152,23 +152,32 @@ def _inspect_pointcloud(p: Path, cfg) -> dict:
 
     result = {"files": [], "count": None, "bbox": None, "srs": None,
               "error": None}
+    # 目录输入可能有上万个 LAS:不物化 Path 列表,一次遍历同时拿到清单
+    # (相对路径字符串,不同子目录的同名文件可区分)与排序后的第一个文件。
+    # 原先 sorted(整目录 Path) + 相对路径列表会同时持有两份 O(n) 数据。
+    names: list[str] = []
+    first: Path | None = None
     if p.is_dir():
-        files = sorted(f for f in p.rglob("*")
-                       if f.is_file() and f.suffix.lower() in (".las", ".laz"))
-        if not files:
+        for f in p.rglob("*"):
+            if not (f.is_file() and f.suffix.lower() in (".las", ".laz")):
+                continue
+            names.append(str(f.relative_to(p)))
+            if first is None or str(f).lower() < str(first).lower():
+                first = f
+        if first is None:
             result["error"] = f"目录下没有找到 las/laz 点云文件:{p}"
             return result
+        names.sort(key=str.lower)
     elif p.suffix.lower() in (".las", ".laz"):
-        files = [p]
+        first = p
+        names = [p.name]
     else:
         result["error"] = f"点云数据源只支持 las/laz 文件:{p}"
         return result
 
-    # 目录输入给相对路径(不同子目录的同名 LAS 可区分),单文件给文件名
-    result["files"] = ([str(f.relative_to(p)) for f in files]
-                       if p.is_dir() else [files[0].name])
+    result["files"] = names
     try:
-        info = LasToDem().preflight(files[0], cfg)
+        info = LasToDem().preflight(first, cfg)
     except ProcessorError as e:
         result["error"] = str(e)
         return result

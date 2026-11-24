@@ -41,6 +41,15 @@ MAX_SCAN_FILES = 200_000
 #: 瓦片文件名 {col}_{row}.ext（本工具缓存格式）
 _COLROW_RE = re.compile(r"^(\d+)_(\d+)$")
 
+#: tileset.json 小于此值时整份解析；更大的只流式取 root.boundingVolume。
+_TILESET_INLINE_MAX = 4 << 20
+#: 流式扫描上限：boundingVolume 一定在 root 开头，读这么多字节还找不到就放弃。
+_TILESET_BV_SCAN_MAX = 2 << 20
+#: root.boundingVolume 里的 region / box 数组（数组内无嵌套对象）
+_BV_RE = re.compile(
+    r'"boundingVolume"\s*:\s*\{[^{}]*?'
+    r'(?:"region"\s*:\s*(\[[^\]]*\])|"box"\s*:\s*(\[[^\]]*\]))')
+
 
 def geodetic_bounds(x_min: int, y_min: int, x_max: int, y_max: int,
                     L: int) -> tuple[float, float, float, float]:
@@ -285,6 +294,34 @@ def bounds_from_layer_json(layer_json: Path) -> list[float] | None:
     return None
 
 
+def _stream_root_bounding_volume(tileset_json: Path):
+    """只取 root.boundingVolume 的 region/box，不把整份 tileset.json 读进内存。
+
+    本工具产出的 tileset 已外部化（根清单很小），但服务扫描可以指向任意目录，
+    外部成果的根清单节点数可达十万级，整份 json.loads 会吃掉几十 MB。而
+    boundingVolume 紧跟在 root 开头，流式读到它就能停。
+    """
+    try:
+        with tileset_json.open("r", encoding="utf-8", errors="replace") as f:
+            buf = ""
+            while len(buf) < _TILESET_BV_SCAN_MAX:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
+                buf += chunk
+                m = _BV_RE.search(buf)
+                if m:
+                    try:
+                        region = json.loads(m.group(1)) if m.group(1) else None
+                        box = json.loads(m.group(2)) if m.group(2) else None
+                    except ValueError:
+                        return None, None
+                    return region, box
+    except OSError as e:
+        logger.debug("读 tileset.json 失败 %s:%s", tileset_json, e)
+    return None, None
+
+
 def bounds_from_tileset(tileset_json: Path) -> list[float] | None:
     """3D Tiles tileset.json 的根包围盒，返回 WGS84 度四至。
 
@@ -295,11 +332,16 @@ def bounds_from_tileset(tileset_json: Path) -> list[float] | None:
     if not tileset_json.is_file():
         return None
     try:
-        d = json.loads(tileset_json.read_text(encoding="utf-8"))
+        if tileset_json.stat().st_size <= _TILESET_INLINE_MAX:
+            d = json.loads(tileset_json.read_text(encoding="utf-8"))
+            bv = (d.get("root") or {}).get("boundingVolume") or {}
+        else:
+            # 大清单不整读：只流式取 root 的包围盒
+            region, box = _stream_root_bounding_volume(tileset_json)
+            bv = {"region": region, "box": box}
     except (OSError, ValueError) as e:
         logger.debug("读 tileset.json 失败 %s:%s", tileset_json, e)
         return None
-    bv = (d.get("root") or {}).get("boundingVolume") or {}
 
     region = bv.get("region")
     if isinstance(region, list) and len(region) == 4:

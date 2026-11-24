@@ -124,34 +124,49 @@ class _Tree:
 
     def __init__(self, root: Path, max_depth: int):
         self.root = root
-        self.children: dict[Path, list[Path]] = {}
+        # 只留目录级标量（每目录 1 个 bool + 至多 1 个扩展名 + 子目录列表）。
+        # 早先还缓存了"每个目录的文件 Path 列表"，output/ 9.2 万个文件光这一项
+        # 就占 25MB 以上，而它只在 _scan_one_dir 里按当前目录用一次——
+        # 需要时现扫一次即可（仍然只扫一层，不是递归 rglob）。
         self.dirs: dict[Path, list[Path]] = {}
         self.has_tile: dict[Path, bool] = {}
         self.tile_ext: dict[Path, str] = {}
         self._roots: dict[Path, tuple[int, int]] | None = None
         self._scan(root, 0, max_depth)
 
-    def _scan(self, d: Path, depth: int, max_depth: int) -> None:
-        files: list[Path] = []
-        dirs: list[Path] = []
+    def files(self, d: Path) -> list[Path]:
+        """列出 d 的直接文件（不缓存，调用点每目录只调一次）。"""
+        out: list[Path] = []
         try:
             with os.scandir(d) as it:
                 for e in it:
-                    p = Path(e.path)
-                    if e.is_dir(follow_symlinks=False):
-                        dirs.append(p)
-                    elif e.is_file(follow_symlinks=False):
-                        files.append(p)
+                    if e.is_file(follow_symlinks=False):
+                        out.append(Path(e.path))
         except OSError as ex:
             logger.debug("读取目录失败 %s:%s", d, ex)
-        self.children[d] = files
+        return out
+
+    def _scan(self, d: Path, depth: int, max_depth: int) -> None:
+        dirs: list[Path] = []
+        has_tile = False
+        tile_ext = ""
+        try:
+            with os.scandir(d) as it:
+                for e in it:
+                    if e.is_dir(follow_symlinks=False):
+                        dirs.append(Path(e.path))
+                    elif e.is_file(follow_symlinks=False):
+                        suffix = Path(e.name).suffix.lower()
+                        if suffix in _TILE_SUFFIXES:
+                            has_tile = True
+                            if not tile_ext:
+                                tile_ext = suffix.lstrip(".")
+        except OSError as ex:
+            logger.debug("读取目录失败 %s:%s", d, ex)
         self.dirs[d] = dirs
-        self.has_tile[d] = any(
-            f.suffix.lower() in _TILE_SUFFIXES for f in files)
-        for f in files:
-            if f.suffix.lower() in _TILE_SUFFIXES:
-                self.tile_ext[d] = f.suffix.lower().lstrip(".")
-                break
+        self.has_tile[d] = has_tile
+        if tile_ext:
+            self.tile_ext[d] = tile_ext
         if depth >= max_depth:
             return
         for sub in dirs:
@@ -202,8 +217,8 @@ class _Tree:
         if self._roots is not None:
             return self._roots
         roots: dict[Path, tuple[int, int]] = {}
-        for d, files in self.children.items():
-            if not any(f.suffix.lower() in _TILE_SUFFIXES for f in files):
+        for d, has_tile in self.has_tile.items():
+            if not has_tile:
                 continue
             if not d.name.isdigit():
                 continue
@@ -222,12 +237,13 @@ def _scan_one_dir(d: Path, rel: str, tree: _Tree) -> list[Candidate]:
     """识别单个目录下可能存在的成果。rel 是相对扫描根的路径，用于显示名。"""
     out: list[Candidate] = []
     out_dir = d
+    files = tree.files(d)
 
     def _prefix(sub: Path) -> str:
         return sub.relative_to(d).as_posix() if sub != d else ""
 
     # ---- 模型：目录内有 tileset.json ----
-    for f in tree.children.get(d, []):
+    for f in files:
         if f.name != "tileset.json":
             continue
         if (d.parent.name == "Data" and d.name.startswith("Tile_")
@@ -241,7 +257,7 @@ def _scan_one_dir(d: Path, rel: str, tree: _Tree) -> list[Candidate]:
             bounds_wgs84=b, bounds_approx=approx))
 
     # ---- 地形：目录含 layer.json ----
-    for f in tree.children.get(d, []):
+    for f in files:
         if f.name != "layer.json":
             continue
         levels = tree.tile_levels(d)
@@ -269,7 +285,7 @@ def _scan_one_dir(d: Path, rel: str, tree: _Tree) -> list[Candidate]:
             tile_ext=tree.ext_below(d)))
 
     # ---- 矢量：本目录下的单个文件 ----
-    for p in tree.children.get(d, []):
+    for p in files:
         if p.suffix.lower() not in _VECTOR_SUFFIXES:
             continue
         if p.name.startswith(("_", ".")):
