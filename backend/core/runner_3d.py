@@ -164,7 +164,9 @@ def _stage_convert_3d(ctx) -> list[str]:
     # 前几行样本,不无限攒列表。
     bad_count = 0
     bad_samples: list[str] = []
-    out_lines: list[str] = []
+    # 金字塔回退原因:只留**首个**命中行。原先攒 out_lines 全量行再回头扫,
+    # 3.8 万节点约 10~14 MiB 常驻,而实际只用到第一处匹配(下方 break)。
+    pyramid_fallback: str | None = None
 
     def _scan(line: str):
         nonlocal bad_count
@@ -202,8 +204,11 @@ def _stage_convert_3d(ctx) -> list[str]:
     poll.start()
 
     def _collect_lines(line: str) -> None:
-        """记录上游全部输出,供"金字塔是否真的生成"判定(见下)。"""
-        out_lines.append(line)
+        """边收边判定"金字塔是否回退":命中即记原因,不再攒全部输出行。"""
+        nonlocal pyramid_fallback
+        if pyramid_fallback is None and "pyramid:" in line:
+            if any(mark in line for mark in _PYRAMID_FALLBACK_MARKS):
+                pyramid_fallback = line.split("pyramid:", 1)[1].strip()
         _scan(line)
 
     try:
@@ -243,15 +248,10 @@ def _stage_convert_3d(ctx) -> list[str]:
     # 成果"能打开但不好看",用户无从判断问题出在哪。此处只做可观测性:
     # 回退时给出中文提示,不改变成功/失败判定。
     # 注意上游日志经 spdlog 输出,带 "[时间] [级别] " 前缀,只能按子串匹配。
-    for line in out_lines:
-        if "pyramid:" not in line:
-            continue
-        if any(mark in line for mark in _PYRAMID_FALLBACK_MARKS):
-            reason = line.split("pyramid:", 1)[1].strip()
-            ctx.tracker.update(
-                key, message="3D Tiles 已生成,但顶层 LOD 金字塔回退为平铺"
-                             f"(根节点精细度下降):{reason[:160]}")
-            break
+    if pyramid_fallback is not None:
+        ctx.tracker.update(
+            key, message="3D Tiles 已生成,但顶层 LOD 金字塔回退为平铺"
+                         f"(根节点精细度下降):{pyramid_fallback[:160]}")
 
     # 少量节点失败多半是源数据本身缺页(实测有 osgb 文件在源目录不存在),
     # 此时整目录成果仍完整可用。按占比判定:超过阈值才判失败,否则只在阶段

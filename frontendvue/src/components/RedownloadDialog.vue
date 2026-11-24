@@ -167,6 +167,8 @@ const perLevel = ref({})
 // 后端按 provider+格式推导出的、本次实际要下载的网格(与 ProcessDialog 同一口径)
 const estGrids = ref([])
 const estGlobalTiles = ref(0)
+/** 成品体积过大时的内存提示(§5.3):文案由后端算,**只警告不拦截提交** */
+const estMemoryWarning = ref('')
 /** 双网格提示:天地图同时勾 tms+osm 时会下两套原生瓦片(都不重投影,量约 2×)。 */
 const twoGridNote = computed(() => {
   if (estGrids.value.length < 2) return ''
@@ -193,12 +195,13 @@ async function refreshEstimate() {
     })
     estGrids.value = d.grids || []
     estGlobalTiles.value = d.global_tiles || 0
+    estMemoryWarning.value = d.memory_warning || ''
     const map = {}
     for (const it of (d.levels || [])) {
       map[it.z] = { tiles: it.tiles, bytes: it.bytes, width: it.width, height: it.height }
     }
     perLevel.value = map
-  } catch (_) { perLevel.value = {} }
+  } catch (_) { perLevel.value = {}; estMemoryWarning.value = '' }
 }
 const selectedSummary = computed(() => {
   let tiles = 0; let bytes = 0
@@ -516,6 +519,7 @@ async function submit() {
           </div>
           <div class="rd-esthint">仅原始瓦片下载量,非最终成果大小(GeoTIFF/TMS/OSM 经压缩/重编码后不同)</div>
           <div v-if="twoGridNote" class="rd-esthint">{{ twoGridNote }}</div>
+          <div v-if="estMemoryWarning" class="rd-esthint">{{ estMemoryWarning }}</div>
         </div>
       </t-form-item>
       <t-form-item v-if="!isBuildings" label="导出格式">

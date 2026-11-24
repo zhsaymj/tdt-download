@@ -400,6 +400,8 @@ const est = ref(null)
 // 后端按 provider+格式推导出的、本次实际要下载的网格(见 loadEstimate 的 export 参数)
 const estGrids = ref([])
 const estGlobalTiles = ref(0)
+/** 成品体积过大时的内存提示(§5.3):后端算好文案,**只警告不拦截提交** */
+const estMemoryWarning = ref('')
 /**
  * 双网格提示:天地的图同时勾 tms+osm 时会下两套原生瓦片。
  *
@@ -433,7 +435,8 @@ async function loadEstimate() {
     est.value = m
     estGrids.value = d.grids || []
     estGlobalTiles.value = d.global_tiles || 0
-  } catch (_) { est.value = null; estGrids.value = [] }
+    estMemoryWarning.value = d.memory_warning || ''
+  } catch (_) { est.value = null; estGrids.value = []; estMemoryWarning.value = '' }
 }
 function tilesOf(z) { return est.value?.[z]?.tiles ?? null }
 function sizeOf(z) {
@@ -1084,6 +1087,9 @@ const title = computed(() => ({
           </t-form-item>
           <t-form-item v-if="twoGridNote" label-width="0">
             <div class="wnote">{{ twoGridNote }}</div>
+          </t-form-item>
+          <t-form-item v-if="estMemoryWarning" label-width="0">
+            <div class="wnote">{{ estMemoryWarning }}</div>
           </t-form-item>
           <ContainerPicker :stages="stages" :selected="form.export"
             v-model="form.containers" />
