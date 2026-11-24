@@ -28,7 +28,7 @@ import math
 import os
 import struct
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 import numpy as np
@@ -393,14 +393,17 @@ def export_terrain(
 
     try:
         with ThreadPoolExecutor(max_workers=workers) as pool:
+            # 在飞 Future 上限:原来是整层一次 submit。全国 z16 是两千多万张瓦片,
+            # 每个 Future 约 1.6 KB,光调度结构就要 30 GiB 以上 —— 与瓦片编码
+            # 本身的内存无关,纯粹是提交方式的问题。
+            max_pending = max(workers * 4, 16)
+            pending: set = set()
             for L in sorted_levels:
                 if should_stop and should_stop():
                     stopped = True
                     break
                 x_min, x_max, y_min, y_max = geodetic_range_for_bbox(
                     coverage_bbox_for_level(bbox, L, global_cover_level), L)
-                futures = []
-                submitted = 0
                 for x in range(x_min, x_max + 1):
                     if should_stop and should_stop():
                         stopped = True
@@ -417,14 +420,24 @@ def export_terrain(
                                 exported_set.add(L)
                                 _bump()
                                 continue
-                        futures.append(pool.submit(_worker, x, y, L, dst))
-                        submitted += 1
-                for fut in futures:
+                        pending.add(pool.submit(_worker, x, y, L, dst))
+                        if len(pending) >= max_pending:
+                            finished, pending = wait(
+                                pending, return_when=FIRST_COMPLETED)
+                            for fut in finished:
+                                r = fut.result()
+                                if r is not None:
+                                    exported_set.add(r)
+                if stopped:
+                    for fut in pending:
+                        fut.cancel()
+                    pending.clear()
+                    break
+                finished, pending = wait(pending)
+                for fut in finished:
                     r = fut.result()
                     if r is not None:
                         exported_set.add(r)
-                if stopped:
-                    break
     finally:
         for ds, v in _open_handles:
             try:

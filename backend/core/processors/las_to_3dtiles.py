@@ -125,6 +125,9 @@ class LasTo3dTiles(BaseProcessor):
         runner_3d 按任务 pc_crs 三态接线(EPSG → srs_in=pc_crs +
         srs_out="4978";"local"/空 → 均不传,产物保持原坐标),
         语义见模块 docstring「CRS 行为」与 las_to_dem。
+
+        内存方面 py3dtiles 没有块缓存上限参数,靠子进程继承的
+        GDAL_CACHEMAX 约束(由 processors/base.py::run_cli 注入,#27)。
         """
         if not self._python:
             raise ProcessorError(
@@ -171,12 +174,16 @@ class LasTo3dTiles(BaseProcessor):
         return min(count / estimated_total, 1.0)
 
     def expected_outputs(self, out_dir: Path) -> list[Path]:
-        """预期产物:tileset.json + 全部 .pnts;无 pnts 直接判失败。"""
+        """预期产物:tileset.json;另需至少一张非空 .pnts,否则判失败。
+
+        同 osgb_to_3dtiles:不再把全部 .pnts 路径物化成列表,扫到第一张就停。
+        """
         out_dir = Path(out_dir)
-        pnts = sorted(out_dir.rglob("*.pnts"))
-        if not pnts:
+        has_tile = next(
+            (p for p in out_dir.rglob("*.pnts") if p.stat().st_size > 0), None)
+        if has_tile is None:
             raise ProcessorError(
                 self.name, 0,
                 hint="进程正常结束但未生成任何 .pnts 瓦片,"
                      "请检查输入文件是否为有效的 LAS/LAZ 点云")
-        return [out_dir / "tileset.json", *pnts]
+        return [out_dir / "tileset.json"]

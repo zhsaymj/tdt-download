@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from ..config import settings
@@ -123,6 +124,66 @@ def _load_features(path: Path):
             )
 
 
+_FEATURES_RE = re.compile(r'"features"\s*:\s*\[')
+
+#: 单个 feature 解码失败后最多再喂这么多字节。一栋建筑的轮廓也就几十 KB,
+#: 超过这个量只可能是文件损坏 —— 继续读会变成死循环。
+_MAX_FEATURE_BYTES = 32 << 20
+
+
+def _iter_geojson_features(path: Path, *, chunk: int = 1 << 20):
+    """流式产出 GeoJSON FeatureCollection 里的每个 feature dict。
+
+    标准库没有流式 JSON 解析器(不为此引入 ijson 这类新依赖),但 GeoJSON 的
+    结构足够规整:定位到根对象的 "features" 数组后逐个对象 raw_decode 即可。
+    这样读 18 万~100 万栋的成果文件时,不再需要「整份文本 + 整份 DOM」两份
+    同时在场 —— 原写法 `json.loads(path.read_text())` 正是如此(#16)。
+    """
+    decoder = json.JSONDecoder()
+    with path.open("r", encoding="utf-8") as f:
+        buf = f.read(chunk)
+        if not buf:
+            return
+        pos = 0
+        # 1) 定位 "features": [ 之后
+        while True:
+            m = _FEATURES_RE.search(buf, max(0, pos - 32))
+            if m is not None:
+                pos = m.end()
+                break
+            more = f.read(chunk)
+            if not more:
+                return
+            # 留一小段尾巴,防止 key 名正好被块边界切断
+            buf = buf[-32:] + more
+        # 2) 逐个解码数组元素
+        while True:
+            while pos < len(buf) and buf[pos] in " \t\r\n,":
+                pos += 1
+            if pos < len(buf) and buf[pos] == "]":
+                return
+            if pos >= len(buf):
+                more = f.read(chunk)
+                if not more:
+                    # 数组还没遇到 "]" 就到文件末尾 —— 与原来 json.loads
+                    # 会抛错的行为保持一致,不把半截成果当成完整数据。
+                    raise ValueError("GeoJSON 不完整:features 数组没有结束")
+                buf = buf[pos:] + more
+                pos = 0
+                continue
+            try:
+                obj, end = decoder.raw_decode(buf, pos)
+            except ValueError:
+                more = f.read(chunk)
+                if not more or len(buf) - pos > _MAX_FEATURE_BYTES:
+                    raise
+                buf = buf[pos:] + more
+                pos = 0
+                continue
+            pos = end
+            yield obj
+
+
 def _load_vector(path: Path):
     """从建筑轮廓矢量成果读回要素(切片阶段的回退数据源)。
 
@@ -130,9 +191,11 @@ def _load_vector(path: Path):
     单独重跑「切 3D Tiles」,没有这个回退就会报"缺少建模中间文件"。
     矢量成果里已含切片所需全部信息(轮廓/高度/底面高/属性),正好可以顶上,
     不必为此多留一份中间件。
+
+    读取走 `_iter_geojson_features` 增量解析:成果文件几百 MB,原先
+    `json.loads(path.read_text())` 会同时持有全文与整棵 DOM(#16)。
     """
-    gj = json.loads(path.read_text(encoding="utf-8"))
-    for feat in gj.get("features") or []:
+    for feat in _iter_geojson_features(path):
         geom = feat.get("geometry") or {}
         if geom.get("type") != "Polygon":
             continue
@@ -208,6 +271,25 @@ def _write_vector(path: Path, feats) -> int:
     return n
 
 
+#: 转容器时每批读入的要素数。按 18 万栋 × 每栋几十个顶点估,2 万栋一批
+#: 的几何数组约十几 MB,峰值与总栋数脱钩。
+_VECTOR_WRITE_BATCH = 20_000
+
+
+def _align_fields(names, data, target, n):
+    """把一批的字段按权威字段名顺序对齐,缺的补 None。
+
+    正常路径走不到这里 —— OGR 的 GeoJSON 驱动打开时扫全文件定 schema,
+    各批字段名应当一致;真出现不一致时宁可补空列,也不要让 append 把
+    不同字段序的数据写歪。
+    """
+    import numpy as _np
+
+    by_name = {str(k): v for k, v in zip(names, data)}
+    return [_np.full(n, None, dtype=object) if k not in by_name else by_name[k]
+            for k in target]
+
+
 def _to_selected_container(task: dict, geojson_path: Path) -> Path:
     """按任务选定的容器,把已写好的 GeoJSON 轮廓另存为 GPKG / Shapefile。
 
@@ -230,22 +312,45 @@ def _to_selected_container(task: dict, geojson_path: Path) -> Path:
     # 走 pyogrio.raw 而非 read_dataframe:后者需要 geopandas,项目没装(也不想装,
     # 它会拖进 pandas 全家桶)。raw 接口返回 (meta, index, geometry, field_data),
     # 字段名在 meta["fields"]、字段值在第四项 —— 与 write 的入参顺序正好对得上。
+    #
+    # 分批读 + append 写(#21):原先一次性 _read 全文件,18 万栋的轮廓会把
+    # 几何数组与属性列全部物化进内存,是切片阶段之后最大的一处峰值。
+    # OGR 的 GeoJSON 驱动在打开时会扫全文件确定 schema,所以各批 meta["fields"]
+    # 一致,直接用首批字段名作为权威,追加写即可。
     import numpy as _np
     from pyogrio.raw import read as _read, write as _write
 
     out_path = geojson_path.with_suffix(cont.ext)
     try:
-        meta, _idx, geom, field_data = _read(str(geojson_path))
-        _write(str(out_path), geom, list(field_data), _np.asarray(meta["fields"]),
-               driver=cont.driver, crs=meta.get("crs") or "EPSG:4326",
-               geometry_type="Polygon", encoding="UTF-8",
-               promote_to_multi=True)
-        logger.info("建筑轮廓已转为 %s:%s(%d 栋)",
-                    cont.label, out_path.name, len(geom))
+        fields: list[str] | None = None
+        wrote = 0
+        skip = 0
+        crs = "EPSG:4326"
+        while True:
+            meta, _idx, geom, field_data = _read(
+                str(geojson_path), skip_features=skip, max_features=_VECTOR_WRITE_BATCH)
+            n = len(geom)
+            if n == 0:
+                break
+            batch_fields = [str(x) for x in meta["fields"]]
+            if fields is None:
+                fields = batch_fields
+                crs = meta.get("crs") or crs
+            elif batch_fields != fields:
+                field_data = _align_fields(batch_fields, field_data, fields, n)
+            _write(str(out_path), geom, list(field_data), _np.asarray(fields),
+                   driver=cont.driver, crs=crs,
+                   geometry_type="Polygon", encoding="UTF-8",
+                   promote_to_multi=True, append=wrote > 0)
+            wrote += n
+            skip += n
+        if not wrote:
+            raise ValueError("矢量成果里没有要素")
+        logger.info("建筑轮廓已转为 %s:%s(%d 栋)", cont.label, out_path.name, wrote)
         # Shapefile 字段名上限 10 字符,超长会被 GDAL 静默截断
         # (实测 base_height → base_heigh)。这是格式固有限制,记日志让用户可查。
         if container == "shapefile":
-            long_names = [str(x) for x in meta["fields"] if len(str(x)) > 10]
+            long_names = [x for x in (fields or []) if len(x) > 10]
             if long_names:
                 logger.warning(
                     "Shapefile 字段名上限 10 字符,以下字段已被截断:%s"
@@ -504,6 +609,11 @@ def _stage_tile_3d(ctx) -> list[str]:
     prep_path = ctx.out_dir / "_buildings_prepared.jsonl"
     vec_path = vector_output(ctx.out_dir, ctx.task["name"])
     ctx.tracker.start("tile_3d", total=1, message="加载建模数据")
+    # 这里必须一次性物化成 list:export_tileset 的 build_tree 要用 len() 判是否
+    # 继续分裂,叶节点还要保留全部要素引用 —— 传生成器会在 len() 处直接崩。
+    # 物化的额外开销只有 n×8 B 的指针表,真正的内存是 BuildingFeature 对象本身,
+    # 而那是切片算法的必需输入(要按四叉树重排并逐节点写 b3dm)。所以 #9 不是
+    # "可消除的浪费",只是被读侧的全量解析放大过 —— 读侧已在 #16/#21 改为流式。
     if prep_path.exists() and prep_path.stat().st_size > 0:
         feats = list(_load_features(prep_path))
     elif vec_path.exists() and vec_path.stat().st_size > 0:

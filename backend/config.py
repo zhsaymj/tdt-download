@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from typing import ClassVar
 from pathlib import Path
 
 import yaml
@@ -100,6 +101,21 @@ class WorkerConfig:
     磁盘 I/O 竞争 —— 大范围任务同时跑会加速磁盘消耗。
     """
     num_workers: int = 2
+
+    #: 同时执行的任务数上界。每个 worker 是**独立子进程**,各自持有一份
+    #: GDAL 块缓存(默认 1.60 GiB/进程,见 `gdal_env.py`),N 个 worker 就是
+    #: N 份。不设上界时把 num_workers 填成 64 会直接吃掉 100 GiB 以上 ——
+    #: 这是防手滑的护栏,不是性能建议。
+    MAX_WORKERS: ClassVar[int] = 8
+
+
+def _clamp_workers(value: object) -> int:
+    """把配置/环境变量给的 worker 数收进 [1, MAX_WORKERS]。"""
+    try:
+        n = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return WorkerConfig.num_workers
+    return max(1, min(n, WorkerConfig.MAX_WORKERS))
 
 
 @dataclass
@@ -308,6 +324,7 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         _merge(cfg.buildings, raw.get("buildings"))
         _merge(cfg.tools, raw.get("tools"))
         _merge(cfg.worker, raw.get("worker"))
+        cfg.worker.num_workers = _clamp_workers(cfg.worker.num_workers)
         _merge(cfg.google, raw.get("google"))
         _merge(cfg.esri_imagery, raw.get("esri_imagery"))
         _merge(cfg.ui, raw.get("ui"))
@@ -325,7 +342,7 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
     env_workers = os.environ.get("NUM_WORKERS")
     if env_workers:
         try:
-            cfg.worker.num_workers = max(1, int(env_workers))
+            cfg.worker.num_workers = _clamp_workers(env_workers)
         except ValueError:
             pass
     # 代理可用环境变量覆盖(便于临时切换而不改配置文件)。

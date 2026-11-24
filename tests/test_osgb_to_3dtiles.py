@@ -112,8 +112,10 @@ class ExpectedOutputsTest(unittest.TestCase):
             b3dm.parent.mkdir(parents=True)
             b3dm.write_bytes(b"b3dm")
             outputs = p.expected_outputs(out)
-            self.assertEqual(outputs[0], out / "tileset.json")
-            self.assertIn(b3dm, outputs)
+            # 只返回关键产物:瓦片数随范围无界,逐个列出等于把内存拉到瓦片数级
+            # (#14)。瓦片存在性改由 next() 惰性校验 —— 上面「只有 tileset.json
+            # 没有 b3dm 就判失败」的用例守着这个语义。
+            self.assertEqual(outputs, [out / "tileset.json"])
 
 
 class PreflightTest(unittest.TestCase):

@@ -150,6 +150,8 @@ class LasToDem(BaseProcessor):
         """构造命令:`pdal pipeline <pipeline.json>`。
 
         不加 --nostream:PDAL 自动判定流式/标准模式(见模块 docstring)。
+        内存方面 PDAL 没有块缓存上限参数,靠子进程继承的 GDAL_CACHEMAX
+        约束(由 processors/base.py::run_cli 注入,#27)。
         """
         if not self._exe:
             raise ProcessorError(

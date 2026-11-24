@@ -252,6 +252,11 @@ def export_tms(
 
     # 瓦片相互独立、无共享可变状态,直接线程池并行(GDAL/IO 释放 GIL)
     with ThreadPoolExecutor(max_workers=workers) as pool:
+        # 在飞 Future 的上限。原来是把整层瓦片一次性 submit 完再逐个 result(),
+        # 每个 Future 约 1.6 KB —— 3° 范围 z18 就是 130 万个,光调度结构
+        # 就要 2 GiB 以上,和瓦片数据本身无关。改成滑窗后峰值只跟 workers 有关。
+        max_pending = max(workers * 4, 16)
+        pending: set = set()
         for z in levels:
             if should_stop and should_stop():
                 stopped = True
@@ -259,19 +264,30 @@ def export_tms(
             tr = level_range(z, "geodetic", bbox,
                              global_max_level=global_max_level,
                              buffer_rings=buffer_rings)
-            futures = []
             for i, (col, row) in enumerate(tr.iter_tiles()):
                 # 提交过程中定期查停止:及时中断大层级,取消未开始的任务
                 if should_stop and i % 256 == 0 and should_stop():
                     stopped = True
                     break
-                futures.append(pool.submit(_worker, col, row, z))
-            for fut in futures:
+                pending.add(pool.submit(_worker, col, row, z))
+                if len(pending) >= max_pending:
+                    finished, pending = wait(pending,
+                                             return_when=FIRST_COMPLETED)
+                    for fut in finished:
+                        r = fut.result()
+                        if r is not None:
+                            exported_set.add(r)
+            if stopped:
+                for fut in pending:
+                    fut.cancel()
+                pending.clear()
+                break
+            # 本层收尾:等剩下的跑完再进下一层(层级间有 global_max_level 依赖)
+            finished, pending = wait(pending)
+            for fut in finished:
                 r = fut.result()
                 if r is not None:
                     exported_set.add(r)
-            if stopped:
-                break
 
     exported = sorted(exported_set)
     if on_progress and not stopped:

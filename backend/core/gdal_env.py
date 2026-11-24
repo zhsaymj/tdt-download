@@ -16,3 +16,11 @@ import os
 #: 关掉 PAM(.aux.xml 边车文件)。GDAL 在**首次使用**时从环境变量读取配置,
 #: 所以模块被 import(早于任何栅格读写)就够了。
 os.environ.setdefault("GDAL_PAM_ENABLED", "NO")
+
+#: GDAL 的块缓存上限(MB)。GDAL 3.x 默认是「物理内存的 5%」,在本机 31.9 GiB
+#: 的机器上算出来是 1.60 GiB —— 而这只是**一个进程**的量:worker 是独立子进程,
+#: `num_workers=2` 就是 3.19 GiB 常驻,和分块大小之类的常数毫无关系,任务再小
+#: 也照占。显式钉成 512 MB:大栅格读写本来就是分块流式的,缓存只是加速重复读,
+#: 压到 512 MB 对吞吐影响很小,却把这条不受控的常驻内存砍掉三分之二。
+#: 用 setdefault 是为了让用户在环境变量里显式指定时仍然生效。
+os.environ.setdefault("GDAL_CACHEMAX", "512")

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 import numpy as np
@@ -292,12 +292,15 @@ def export_osm(
 
     try:
         with ThreadPoolExecutor(max_workers=workers) as pool:
+            # 在飞 Future 上限:原来把整层瓦片一次 submit,3° 范围 z18 是
+            # 130 万个 Future(约 1.6 KB/个),光调度结构就 2 GiB 以上。
+            max_pending = max(workers * 4, 16)
+            pending: set = set()
             for z in levels:
                 if should_stop and should_stop():
                     stopped = True
                     break
                 xs, ys = _xyz_range(z)
-                futures = []
                 for x in xs:
                     if should_stop and should_stop():
                         stopped = True
@@ -321,14 +324,25 @@ def export_osm(
                                               clip_bounds) == "outside":
                             _bump_progress()
                             continue
-                        futures.append(pool.submit(_worker, z, x, y, dst_png))
+                        pending.add(pool.submit(_worker, z, x, y, dst_png))
+                        if len(pending) >= max_pending:
+                            finished, pending = wait(
+                                pending, return_when=FIRST_COMPLETED)
+                            for fut in finished:
+                                r = fut.result()
+                                if r is not None:
+                                    exported_set.add(r)
+                if stopped:
+                    for fut in pending:
+                        fut.cancel()
+                    pending.clear()
+                    break
                 # 收集本级结果(等本级切完再进下一级,便于按级 exported/停止判断)
-                for fut in futures:
+                finished, pending = wait(pending)
+                for fut in finished:
                     r = fut.result()
                     if r is not None:
                         exported_set.add(r)
-                if stopped:
-                    break
     finally:
         # 关闭各线程创建的 vrt/ds,避免文件句柄泄漏(服务长跑会累积)
         for ds, v in _open_handles:

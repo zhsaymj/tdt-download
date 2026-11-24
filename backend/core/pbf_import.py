@@ -31,6 +31,9 @@ BUCKET_DEG = 1.0
 #: 每个粗桶的写缓冲行数,攒满才落盘(减少小写次数)
 BUCKET_FLUSH_LINES = 2000
 
+#: 桶内按纬度带分片时每个分片的写缓冲行数。
+SHARD_FLUSH_LINES = 2000
+
 #: 建筑最少顶点数(闭合环去重后)
 MIN_RING_POINTS = 3
 
@@ -299,27 +302,70 @@ def import_from_pbf(
             logger.info("pbf 导入被中断(阶段2,已写 %d 格)", stats["cells"])
             stats["interrupted"] = True
             return stats
-        groups: dict[tuple[int, int], list[dict]] = {}
-        with bp.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    feat = json.loads(line)
-                except ValueError:
-                    continue
-                ring = (feat.get("geometry") or {}).get("coordinates", [[]])[0]
-                if not ring:
-                    continue
-                cx, cy = _centroid(ring)
-                c = cell_of(cx, cy)
-                groups.setdefault((c.row, c.col), []).append(feat)
-        for (r, col), feats in groups.items():
-            # 不写逐格 meta:批量导入的新鲜度由覆盖清单统一判定
-            cache.write(Cell(r, col), feats, source="pbf", write_meta=False)
-            stats["cells"] += 1
-        bp.unlink(missing_ok=True)      # 处理完即删,临时占用随进度释放
+        # 桶是 1°×1°:城市中心的一个桶可能有几十万栋,原先直接按 0.05° 格分组,
+        # 等于把整桶要素全部物化进内存(#17)。这里先按 cell.row 分片落盘,
+        # 再逐片分组写缓存,峰值降到约 1/20 桶。分片行带上 col,第二遍
+        # 不必重新解析几何算质心。
+        shard_dir = tmp / f"shards_{i}"
+        shard_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            shard_paths: dict[int, Path] = {}
+            shard_buf: dict[int, list[str]] = {}
+            with bp.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        feat = json.loads(line)
+                    except ValueError:
+                        continue
+                    ring = (feat.get("geometry") or {}).get("coordinates", [[]])[0]
+                    if not ring:
+                        continue
+                    cx, cy = _centroid(ring)
+                    c = cell_of(cx, cy)
+                    p = shard_paths.get(c.row)
+                    if p is None:
+                        p = shard_paths[c.row] = shard_dir / f"r_{c.row}.jsonl"
+                    buf = shard_buf.setdefault(c.row, [])
+                    buf.append(f"{c.col}\t{line}")
+                    if len(buf) >= SHARD_FLUSH_LINES:
+                        with p.open("a", encoding="utf-8") as sf:
+                            sf.write("\n".join(buf) + "\n")
+                        buf.clear()
+            for row, buf in shard_buf.items():
+                if buf:
+                    with shard_paths[row].open("a", encoding="utf-8") as sf:
+                        sf.write("\n".join(buf) + "\n")
+                    buf.clear()
+            shard_buf.clear()
+            bp.unlink(missing_ok=True)      # 处理完即删,临时占用随进度释放
+
+            for row in sorted(shard_paths):
+                if should_stop and should_stop():
+                    logger.info("pbf 导入被中断(阶段2,已写 %d 格)", stats["cells"])
+                    stats["interrupted"] = True
+                    return stats
+                groups: dict[int, list[dict]] = {}
+                with shard_paths[row].open("r", encoding="utf-8") as sf:
+                    for line in sf:
+                        col_s, _, rest = line.partition("\t")
+                        if not rest:
+                            continue
+                        try:
+                            feat = json.loads(rest)
+                        except ValueError:
+                            continue
+                        groups.setdefault(int(col_s), []).append(feat)
+                for col, feats in groups.items():
+                    # 不写逐格 meta:批量导入的新鲜度由覆盖清单统一判定
+                    cache.write(Cell(row, col), feats, source="pbf",
+                                write_meta=False)
+                    stats["cells"] += 1
+                groups.clear()
+        finally:
+            shutil.rmtree(shard_dir, ignore_errors=True)
         if on_progress:
             on_progress("group", i, len(buckets))
         if i % 20 == 0 or i == len(buckets):

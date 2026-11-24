@@ -102,9 +102,12 @@ def optimize_tileset(path: str | Path) -> OptimizeResult:
     """保留顶层金字塔，将各 Tile 子树外置，最后替换主清单。"""
     path = Path(path)
     original_bytes = path.stat().st_size
-    data = json.loads(path.read_text(encoding="utf-8"))
+    # 整份清单必须进内存(要递归遍历并改写整棵树),但用 json.load 直接从文件
+    # 句柄解析 —— read_text + json.loads 会同时持有完整字符串与整棵 DOM 两份。
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
     root_dir = path.parent
-    plans: list[tuple[Path, dict]] = []
+    plans: list[tuple[Path, Path]] = []
     missing: list[str] = []
     data["root"] = _prune_missing(data["root"], root_dir, missing)
     if data["root"] is None:
@@ -126,11 +129,19 @@ def optimize_tileset(path: str | Path) -> OptimizeResult:
             _scale_errors(external, float(node.get("geometricError", 0)), target_error)
             _rewrite_uris(external, tile_dir)
             external_path = root_dir / tile_dir / "tileset.json"
-            plans.append((external_path, {
-                "asset": data["asset"],
-                "geometricError": target_error,
-                "root": external,
-            }))
+            # 校验通过就立刻落临时文件,plans 只留路径对(#35):原先要把每个
+            # 外部子树的完整 dict 攒到「全部校验通过」才写,大范围成果的子树
+            # 上千个,累积起来是几百 MB。改成临时文件后,失败也能靠清理回滚。
+            _validate_uris(external, external_path.parent)
+            tmp_path = external_path.with_name(external_path.name + ".tmp")
+            tmp_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path.write_text(
+                json.dumps({"asset": data["asset"],
+                            "geometricError": target_error,
+                            "root": external},
+                           ensure_ascii=False, separators=(",", ":")),
+                encoding="utf-8")
+            plans.append((external_path, tmp_path))
             return {
                 "boundingVolume": node["boundingVolume"],
                 "geometricError": target_error,
@@ -151,17 +162,20 @@ def optimize_tileset(path: str | Path) -> OptimizeResult:
 
     data["root"]["geometricError"] = root_error
     data["geometricError"] = root_error
-    data["root"] = visit(data["root"], root_error, overview_error, is_root=True)
+    try:
+        data["root"] = visit(data["root"], root_error, overview_error, is_root=True)
+    except Exception:
+        for _external_path, tmp_path in plans:
+            tmp_path.unlink(missing_ok=True)
+        raise
     if not plans:
         if missing:
             _atomic_json(path, data)
         return OptimizeResult(0, original_bytes, path.stat().st_size, len(missing))
 
-    # 全部原始引用通过校验后才写外部清单，主清单最后替换。
-    for external_path, external in plans:
-        _validate_uris(external["root"], external_path.parent)
-    for external_path, external in plans:
-        _atomic_json(external_path, external)
+    # 外部清单全部成功落盘后一次性改名,主清单最后替换。
+    for external_path, tmp_path in plans:
+        os.replace(tmp_path, external_path)
     _atomic_json(path, data)
     return OptimizeResult(len(plans), original_bytes, path.stat().st_size,
                           len(missing))
