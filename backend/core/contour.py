@@ -82,13 +82,16 @@ def _iter_band_contour_lines(band: np.ndarray, transform, level: float,
 
 
 def extract_contours(dem_path: Path, interval: float = DEFAULT_INTERVAL,
-                     should_stop=None, on_progress=None
+                     should_stop=None, on_progress=None, on_chunk=None
                      ) -> tuple[list[bytes], list[float], str]:
     """从高程 GeoTIFF 提取等高线。
 
     返回 (WKB 几何列表, 对应高程值列表, CRS 字符串)。
     interval: 等高距(与高程单位一致,通常是米)。
     on_progress(done_bands, total_bands): 按"带"上报 —— 分带提取的自然刻度。
+    on_chunk(geoms, values, crs): 传入则**流式**交付每一带的结果,不再累积到
+    返回值(返回的列表为空)。等高线每条 WKB 约 1.5 KB,全国级可达数十万条,
+    全量累积是 MB~GB 级;流式交付让峰值与总条数无关。
 
     **必须分带**:早期实现是 src.read(1, masked=True) 后
     np.ma.filled(...).astype("float64")。全国 z13 高程图 46336x29440 即
@@ -134,6 +137,7 @@ def extract_contours(dem_path: Path, interval: float = DEFAULT_INTERVAL,
         # 填值会多分配一份整幅数组,内存翻倍。
         geoms: list[bytes] = []
         values: list[float] = []
+        emitted = 0
         for bi, (y0, core_h, top, bottom) in enumerate(spans, start=1):
             if should_stop and should_stop():
                 break
@@ -145,16 +149,26 @@ def extract_contours(dem_path: Path, interval: float = DEFAULT_INTERVAL,
             left, bottom_g, right, top_g = bounds(
                 Window(0, y0 - top, width, core_h), band_tf)
             clip = box(left, bottom_g, right, top_g)
+            chunk_geoms: list[bytes] = []
+            chunk_values: list[float] = []
             for lv in levels:
                 for line in _iter_band_contour_lines(
                         band, band_tf, float(lv), px, valid=valid, clip=clip):
-                    geoms.append(shapely_wkb.dumps(line))
-                    values.append(float(lv))
+                    chunk_geoms.append(shapely_wkb.dumps(line))
+                    chunk_values.append(float(lv))
+            emitted += len(chunk_geoms)
+            if on_chunk is not None:
+                # 本带结果立刻交付写出,不再进总列表 —— 峰值只与单带条数有关
+                if chunk_geoms:
+                    on_chunk(chunk_geoms, chunk_values, crs)
+            else:
+                geoms.extend(chunk_geoms)
+                values.extend(chunk_values)
             if on_progress:
                 on_progress(bi, len(spans))
 
         logger.info("等高线:%s 提取 %d 条(高程 %.0f~%.0f,等高距 %.0f)",
-                    dem_path.name, len(geoms), vmin, vmax, interval)
+                    dem_path.name, emitted, vmin, vmax, interval)
     return geoms, values, crs
 
 
@@ -192,4 +206,72 @@ def write_contours(out_path: Path, geoms: list[bytes], values: list[float],
           encoding="UTF-8", promote_to_multi=False)
     logger.info("等高线:已写出 %s(%d 条,%s)", out_path.name, n, cont.label)
     return out_path
+
+
+class ContourWriter:
+    """等高线增量写盘:攒够一批就 append 到目标容器,内存只留一个批次。
+
+    pyogrio 的 write 是整份写出,故这里按 _BATCH 条分批落盘:首批覆盖写,
+    其后 append=True(实测 GeoJSON / GPKG / Shapefile 三种容器均支持追加)。
+    配合 extract_contours(on_chunk=...) 使用,峰值与等高线总条数无关。
+    """
+
+    _BATCH = 50_000
+
+    def __init__(self, out_path: Path, container: str = "geojson"):
+        from .formats import CONTAINERS
+
+        cont = CONTAINERS.get(container)
+        if cont is None:
+            raise ValueError(f"未知的容器格式:{container}")
+        self.out_path = out_path
+        self.cont = cont
+        self._geoms: list[bytes] = []
+        self._values: list[float] = []
+        self._crs: str | None = None
+        self._wrote = 0
+        self.out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def add(self, geoms, values, crs: str | None = None) -> None:
+        """接收一批 (WKB, 高程值);crs 取首次传入的值。"""
+        if crs and not self._crs:
+            self._crs = crs
+        self._geoms.extend(geoms)
+        self._values.extend(values)
+        if len(self._geoms) >= self._BATCH:
+            self._flush()
+
+    def _flush(self) -> None:
+        if not self._geoms:
+            return
+        from pyogrio.raw import write
+
+        n = len(self._geoms)
+        geom_arr = np.empty(n, dtype=object)
+        for i, g in enumerate(self._geoms):
+            geom_arr[i] = g
+        # 参数顺序 (path, geometry, field_data, fields),见 write_contours 的注释
+        write(str(self.out_path), geom_arr,
+              [np.asarray(self._values, dtype="float64")],
+              np.array(["高程"]),
+              driver=self.cont.driver, crs=self._crs or "EPSG:4326",
+              geometry_type="LineString", encoding="UTF-8",
+              promote_to_multi=False, append=self._wrote > 0)
+        self._wrote += n
+        self._geoms.clear()
+        self._values.clear()
+
+    @property
+    def written(self) -> int:
+        """已落盘 + 尚在缓冲的条目总数。"""
+        return self._wrote + len(self._geoms)
+
+    def close(self) -> Path:
+        self._flush()
+        if not self._wrote:
+            logger.warning("等高线:无数据可写,跳过 %s", self.out_path.name)
+        else:
+            logger.info("等高线:已写出 %s(%d 条,%s)", self.out_path.name,
+                        self._wrote, self.cont.label)
+        return self.out_path
 

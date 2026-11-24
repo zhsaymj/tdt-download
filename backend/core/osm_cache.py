@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from . import gdal_env  # noqa: F401
@@ -83,14 +83,28 @@ def export_osm_from_cache(
                 stopped = True
                 break
             tr = mercator_range_for_bbox(*bbox, z)
-            futures = []
-            for x in range(tr.col_min, tr.col_max + 1):
-                for y in range(tr.row_min, tr.row_max + 1):
-                    futures.append(pool.submit(_one, x, y, z))
-            for f in futures:
-                if f.result():
-                    exported.add(z)
-                _bump()
+            # 滑动窗口提交:一次性为整级建 Future 会让内存随该级瓦片数线性增长
+            # (Future 约 1.6 KB/个),窗口只需喂满线程池。
+            coords = ((x, y) for x in range(tr.col_min, tr.col_max + 1)
+                      for y in range(tr.row_min, tr.row_max + 1))
+            futures: set = set()
+            exhausted = False
+            max_pending = max(workers * 4, 16)
+            while True:
+                while not exhausted and len(futures) < max_pending:
+                    try:
+                        x, y = next(coords)
+                    except StopIteration:
+                        exhausted = True
+                        break
+                    futures.add(pool.submit(_one, x, y, z))
+                if not futures:
+                    break
+                finished, futures = wait(futures, return_when=FIRST_COMPLETED)
+                for f in finished:
+                    if f.result():
+                        exported.add(z)
+                    _bump()
     if on_progress and not stopped:
         on_progress(total, total)
     return out_dir, sorted(exported), stopped

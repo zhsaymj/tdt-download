@@ -23,6 +23,11 @@ from .tiling import TileRange
 # 缺失/无效高程的填充值(远低于地球任何真实海拔,GIS 里设为 nodata)
 DEM_NODATA = -32768.0
 
+# 行缓冲的列方向分块宽度(像素)。整行缓冲 = TILE_SIZE × 列数×TILE_SIZE,
+# 宽度随列数线性增长(z18 全国 11.05 GiB);按此宽度切分后单块固定为
+# TILE_SIZE × _ROW_CHUNK_PX(2048 像素约 2 MB),与范围无关。
+_ROW_CHUNK_PX = 2048
+
 
 def _check_lerc() -> None:
     """校验 LERC 解码库可用,不可用时抛出明确错误。
@@ -151,23 +156,30 @@ def mosaic_dem_geotiff(
 
     # 逐"瓦片行"分块写入,避免整幅 float32 canvas 占用几十 GB 内存
     # (与 mosaic.py 同策略;缺失瓦片保持 DEM_NODATA 填充)。
+    # 行内再按列区间切分:整行缓冲宽度 = 列数×TILE_SIZE 同样无上界
+    # (z18 全国 11.05 GiB),切分后单块固定为 TILE_SIZE×_ROW_CHUNK_PX。
     total_rows = tr.rows
     decoded = 0
+    cols_per_chunk = max(1, _ROW_CHUNK_PX // TILE_SIZE)
     with rasterio.open(out_path, "w", **profile) as dst:
         for ri, y in enumerate(range(tr.row_min, tr.row_max + 1), start=1):
-            row_buf = np.full((TILE_SIZE, width), DEM_NODATA, dtype=np.float32)
-            for x in range(tr.col_min, tr.col_max + 1):
-                elev = decode_lerc(tile_path_fn(x, y, tr.z))
-                if elev is None:
-                    continue
-                decoded += 1
-                h, w = elev.shape
-                h = min(h, TILE_SIZE)
-                w = min(w, TILE_SIZE)
-                px = (x - tr.col_min) * TILE_SIZE
-                row_buf[:h, px:px + w] = elev[:h, :w]
             oy = (y - tr.row_min) * TILE_SIZE
-            dst.write(row_buf, 1, window=Window(0, oy, width, TILE_SIZE))
+            for col_start in range(tr.col_min, tr.col_max + 1, cols_per_chunk):
+                col_end = min(col_start + cols_per_chunk - 1, tr.col_max)
+                chunk_w = (col_end - col_start + 1) * TILE_SIZE
+                row_buf = np.full((TILE_SIZE, chunk_w), DEM_NODATA, dtype=np.float32)
+                for x in range(col_start, col_end + 1):
+                    elev = decode_lerc(tile_path_fn(x, y, tr.z))
+                    if elev is None:
+                        continue
+                    decoded += 1
+                    h, w = elev.shape
+                    h = min(h, TILE_SIZE)
+                    w = min(w, TILE_SIZE)
+                    px = (x - col_start) * TILE_SIZE
+                    row_buf[:h, px:px + w] = elev[:h, :w]
+                x_off = (col_start - tr.col_min) * TILE_SIZE
+                dst.write(row_buf, 1, window=Window(x_off, oy, chunk_w, TILE_SIZE))
             if on_row:
                 on_row(ri, total_rows)
         if build_overviews:
@@ -183,6 +195,20 @@ def mosaic_dem_geotiff(
             "该数据源在此范围的最高可用级别低于所选级别,请改用更低的级别。")
 
     return out_path
+
+
+# 晕渲分块边长(像素)。float64 下每块约 8 MB,连同梯度/坡度/坡向等临时数组
+# 峰值数十 MB,与整幅尺寸无关 —— 整幅实现全国 z13 要上百 GB。
+_HS_CHUNK_PX = 1024
+
+
+def _hs_blocks(width: int, height: int):
+    """把栅格切成 _HS_CHUNK_PX 见方的窗口(晕渲分块用)。"""
+    for row_off in range(0, height, _HS_CHUNK_PX):
+        h = min(_HS_CHUNK_PX, height - row_off)
+        for col_off in range(0, width, _HS_CHUNK_PX):
+            w = min(_HS_CHUNK_PX, width - col_off)
+            yield Window(col_off, row_off, w, h)
 
 
 def hillshade_from_dem(
@@ -202,62 +228,87 @@ def hillshade_from_dem(
     z_factor: 垂直夸张系数(高程与平面单位不同或需强化地形时调大)。
     """
     with rasterio.open(dem_path) as src:
-        elev = src.read(1).astype(np.float64)
         transform = src.transform
         profile = src.profile.copy()
         nodata = src.nodata
         crs = src.crs
+        height, width = src.height, src.width
 
-    # 像元地面尺寸(米):EPSG:3857 下 transform 的像元宽高即为米
-    xres = abs(transform.a)
-    yres = abs(transform.e)
+        # 像元地面尺寸(米):EPSG:3857 下 transform 的像元宽高即为米
+        xres = abs(transform.a)
+        yres = abs(transform.e)
 
-    # nodata 先填为邻域可计算的值(用有效区均值),最后再遮罩回去
-    mask = None
-    if nodata is not None:
-        mask = elev == nodata
-        if mask.all():
-            fill = 0.0
-        else:
-            fill = float(elev[~mask].mean())
-        elev = np.where(mask, fill, elev)
+        # 第一遍流式统计全局有效像元均值。必须跨整幅一致:填充值若按块各算,
+        # 块与块之间会出现台阶,梯度在缝上跳变、晕渲出可见接痕。
+        fill = 0.0
+        if nodata is not None:
+            total = 0.0
+            cnt = 0
+            for win in _hs_blocks(width, height):
+                band = src.read(1, window=win)
+                good = band != nodata
+                n = int(good.sum())
+                if n:
+                    total += float(band[good].sum(dtype=np.float64))
+                    cnt += n
+            fill = (total / cnt) if cnt else 0.0
 
-    # Horn 算法:3x3 窗口的东西/南北梯度
-    z = elev * z_factor
-    # np.gradient 返回 (d/drow, d/dcol);行向南为正,列向东为正
-    dzdy, dzdx = np.gradient(z, yres, xres)
+        az = np.radians(360.0 - azimuth + 90.0)
+        alt = np.radians(altitude)
 
-    slope = np.arctan(np.hypot(dzdx, dzdy))
-    aspect = np.arctan2(dzdy, -dzdx)
+        profile.update({
+            "count": 1,
+            "dtype": "uint8",
+            "nodata": 0,
+            "compress": "LZW",
+            "crs": crs,
+            # 大范围晕渲图仍可能超 4GB 普通 TIFF 上限,用 BIGTIFF 突破
+            "BIGTIFF": "YES",
+        })
 
-    az = np.radians(360.0 - azimuth + 90.0)
-    alt = np.radians(altitude)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with rasterio.open(out_path, "w", **profile) as dst:
+            for win in _hs_blocks(width, height):
+                r0, c0 = int(win.row_off), int(win.col_off)
+                bw, bh = int(win.width), int(win.height)
+                r1, c1 = r0 + bh, c0 + bw
+                # 多读 1 像素 halo:np.gradient 在块内用中心差分,只有拿到
+                # 左右/上下邻居才能与整幅计算逐像素一致。全局最外沿没有 halo,
+                # 那里 np.gradient 用单侧差分,恰与整幅一致。
+                er0, ec0 = max(0, r0 - 1), max(0, c0 - 1)
+                er1, ec1 = min(height, r1 + 1), min(width, c1 + 1)
+                ext = src.read(1, window=Window(ec0, er0, ec1 - ec0,
+                                                er1 - er0)).astype(np.float64)
+                # nodata 填全局均值(与原整幅实现同语义),最后按原 mask 置 0
+                mask = None
+                if nodata is not None:
+                    mask = ext == nodata
+                    if mask.any():
+                        ext = np.where(mask, fill, ext)
 
-    shaded = (
-        np.sin(alt) * np.cos(slope)
-        + np.cos(alt) * np.sin(slope) * np.cos(az - aspect)
-    )
-    shaded = np.clip(shaded, 0.0, 1.0)
-    hs = (shaded * 255.0).astype(np.uint8)
+                # Horn 算法:3x3 窗口的东西/南北梯度
+                z = ext * z_factor
+                # np.gradient 返回 (d/drow, d/dcol);行向南为正,列向东为正
+                dzdy, dzdx = np.gradient(z, yres, xres)
+                oy, ox = r0 - er0, c0 - ec0
+                dzdy = dzdy[oy:oy + bh, ox:ox + bw]
+                dzdx = dzdx[oy:oy + bh, ox:ox + bw]
 
-    if mask is not None:
-        hs[mask] = 0
+                slope = np.arctan(np.hypot(dzdx, dzdy))
+                aspect = np.arctan2(dzdy, -dzdx)
+                shaded = (
+                    np.sin(alt) * np.cos(slope)
+                    + np.cos(alt) * np.sin(slope) * np.cos(az - aspect)
+                )
+                shaded = np.clip(shaded, 0.0, 1.0)
+                hs = (shaded * 255.0).astype(np.uint8)
 
-    profile.update({
-        "count": 1,
-        "dtype": "uint8",
-        "nodata": 0,
-        "compress": "LZW",
-        "crs": crs,
-        # 大范围晕渲图仍可能超 4GB 普通 TIFF 上限,用 BIGTIFF 突破
-        "BIGTIFF": "YES",
-    })
+                if mask is not None:
+                    hs[mask[oy:oy + bh, ox:ox + bw]] = 0
+                dst.write(hs, 1, window=win)
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with rasterio.open(out_path, "w", **profile) as dst:
-        dst.write(hs, 1)
-        if build_overviews:
-            dst.build_overviews([2, 4, 8, 16], Resampling.average)
-            dst.update_tags(ns="rio_overview", resampling="average")
+            if build_overviews:
+                dst.build_overviews([2, 4, 8, 16], Resampling.average)
+                dst.update_tags(ns="rio_overview", resampling="average")
 
     return out_path

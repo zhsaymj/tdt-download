@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 import shutil
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 import numpy as np
@@ -308,13 +308,15 @@ def export_tms_from_source(
               else sorted({int(z) for z in levels if int(z) >= 1}))
     clip_geoms = prepare_geoms(clip_geom, "EPSG:4326") if clip_geom else None
 
-    # 先数出总瓦片数,进度才有真实分母
-    tasks: list[tuple[int, int, int]] = []
-    for z in levels:
-        tr = range_for_bbox(*bbox, z)
-        for col, row in tr.iter_tiles():
-            tasks.append((col, row, z))
-    total = len(tasks)
+    # 进度分母:直接按各级瓦片区间计数求和,不物化三元组列表
+    # (全量列表本身随瓦片总数线性增长,全国 z16 达 95 GiB 量级)。
+    total = sum(range_for_bbox(*bbox, z).count for z in levels)
+
+    def _tile_iter():
+        for z in levels:
+            tr = range_for_bbox(*bbox, z)
+            for col, row in tr.iter_tiles():
+                yield col, row, z
     done = 0
     stopped = False
     lock = threading.Lock()
@@ -389,7 +391,25 @@ def export_tms_from_source(
     try:
         n = concurrency or min(os.cpu_count() or 4, 8)
         with ThreadPoolExecutor(max_workers=n) as pool:
-            list(pool.map(lambda a: _worker(*a), tasks))
+            # 滑动窗口提交:pool.map 内部会先为全部入参建 Future(约 1.6 KB/个),
+            # 一次性铺开会把瓦片总数变成内存。窗口只需喂满线程池。
+            pending: set = set()
+            tiles = _tile_iter()
+            exhausted = False
+            max_pending = max(n * 4, 16)
+            while True:
+                while not exhausted and len(pending) < max_pending:
+                    try:
+                        col, row, z = next(tiles)
+                    except StopIteration:
+                        exhausted = True
+                        break
+                    pending.add(pool.submit(_worker, col, row, z))
+                if not pending:
+                    break
+                finished, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for fut in finished:
+                    fut.result()
         if should_stop and should_stop():
             stopped = True
     finally:

@@ -34,7 +34,7 @@ from ..providers.terrain import build_terrain_provider, is_dem_provider
 from ..providers.tianditu import build_annotation_provider, build_provider
 from .annotate import ANNOTATION_MAX_Z
 from .containers import container_of, convert_raster
-from .contour import DEFAULT_INTERVAL, extract_contours, write_contours
+from .contour import DEFAULT_INTERVAL, ContourWriter, extract_contours
 from .mbtiles import pack_mbtiles
 from .dem import hillshade_from_dem, mosaic_dem_geotiff
 from .dem_tiling import mercator_range_for_bbox, mosaic_bounds_3857
@@ -1495,21 +1495,40 @@ def _dem_visual_source(ctx) -> Path:
 
 
 def _gray_to_rgb(src_path: Path, dst_path: Path) -> Path:
-    """把单波段灰度图复制成三波段 RGB(保持坐标与网格不变)。"""
+    """把单波段灰度图复制成三波段 RGB(保持坐标与网格不变)。
+
+    分块流式搬运:整幅 band 与 mask 各占 1 B/px,全国高级别晕渲图可达数 GB。
+    无效区改用 alpha 波段表达——GDAL 的 dataset mask 只能整幅 write_mask,
+    没法按窗口写;alpha 波段与 mask 语义等价,切片器的 read_masks() 同样取得到。
+    """
     import rasterio as _rio
     from rasterio.enums import ColorInterp as _CI
+    from rasterio.enums import MaskFlags as _MF
+    from rasterio.windows import Window as _Win
+
+    _block = 2048
     with _rio.open(src_path) as src:
-        band = src.read(1)
         profile = src.profile.copy()
-        mask = src.read_masks(1)
-    profile.update(count=3, dtype="uint8", photometric="RGB")
-    profile.pop("nodata", None)
-    with _rio.open(dst_path, "w", **profile) as dst:
-        for i in range(1, 4):
-            dst.write(band, i)
-        dst.colorinterp = [_CI.red, _CI.green, _CI.blue]
-        # 无数据区靠 mask 传下去,切片时才有正确 alpha
-        dst.write_mask(mask)
+        # 无 nodata 且无 alpha 时 GDAL 掩膜恒为 255,不必多带一个 alpha 波段
+        has_mask = any(set(f) != {_MF.all_valid} for f in src.mask_flag_enums)
+        profile.update(count=4 if has_mask else 3, dtype="uint8",
+                       photometric="RGB")
+        profile.pop("nodata", None)
+        height, width = profile["height"], profile["width"]
+        with _rio.open(dst_path, "w", **profile) as dst:
+            for row_off in range(0, height, _block):
+                h = min(_block, height - row_off)
+                for col_off in range(0, width, _block):
+                    w = min(_block, width - col_off)
+                    win = _Win(col_off, row_off, w, h)
+                    band = src.read(1, window=win)
+                    for i in range(1, 4):
+                        dst.write(band, i, window=win)
+                    if has_mask:
+                        # 无数据区靠 alpha 传下去,切片时才有正确的瓦片透明度
+                        dst.write(src.read_masks(1, window=win), 4, window=win)
+            dst.colorinterp = ([_CI.red, _CI.green, _CI.blue]
+                               + ([_CI.alpha] if has_mask else []))
     return dst_path
 
 
@@ -1674,19 +1693,29 @@ def _stage_contour(ctx) -> list[str]:
         ctx.tracker.update("contour", done=done, total=total,
                            message=f"提取等高线(第 {done}/{total} 带)")
 
-    geoms, values, crs = extract_contours(src, interval=interval,
-                                          should_stop=ctx.should_stop,
-                                          on_progress=on_progress)
+    # 边提取边写盘:等高线全国级可达数十万条、每条 WKB 约 1.5 KB,
+    # 攒在列表里是 MB~GB 级;ContourWriter 按批 append,峰值只剩一个批次。
+    out_path = ctx.out_dir / f"{task['name']}_contour{cont.ext}"
+    writer = ContourWriter(out_path, container)
+    try:
+        extract_contours(src, interval=interval,
+                         should_stop=ctx.should_stop,
+                         on_progress=on_progress,
+                         on_chunk=writer.add)
+    except BaseException:
+        # 半成品必须删掉:重跑时首批是覆盖写,但中断残留会误导下游读取
+        _safe_unlink(out_path)
+        raise
     if ctx.should_stop():
         if tmp_dem is not None:
             _safe_unlink(tmp_dem)
+        _safe_unlink(out_path)
         raise _Stopped()
 
-    out_path = ctx.out_dir / f"{task['name']}_contour{cont.ext}"
-    write_contours(out_path, geoms, values, crs, container)
+    writer.close()
     if tmp_dem is not None:
         _safe_unlink(tmp_dem)
-    ctx.tracker.update("contour", message=f"共 {len(geoms)} 条等高线")
+    ctx.tracker.update("contour", message=f"共 {writer.written} 条等高线")
     return [str(out_path)]
 
 

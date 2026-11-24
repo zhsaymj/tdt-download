@@ -18,6 +18,11 @@ from ..providers.base import TileProvider
 from .annotate import composite_annotation
 from .tiling import TILE_SIZE, TileRange
 
+# 行缓冲的列方向分块宽度(像素)。整行缓冲 = bands × TILE_SIZE × 宽度,
+# 宽度随列数线性增长(z18 全国可达 8.27 GiB);按此宽度切分后单块固定
+# 在 bands × TILE_SIZE × _ROW_CHUNK_PX(3 波段约 1.5 MB),与范围无关。
+_ROW_CHUNK_PX = 2048
+
 
 def _read_tile(path: Path, bands: int) -> np.ndarray | None:
     """读单张瓦片为 (bands, 256, 256) 的 uint8 数组;失败返回 None。
@@ -116,28 +121,31 @@ def mosaic_to_geotiff(
 
     # 逐"瓦片行"分块写入,而非一次性分配整幅 canvas——否则大范围高级别
     # (如 z18 数万×数万像素)会占几十 GB 内存直接 MemoryError。
-    # 每次仅缓存一行瓦片:bands × TILE_SIZE × width。
+    # 行内再按列区间切分:整行缓冲宽度 = 列数×TILE_SIZE 同样无上界
+    # (z18 全国 8.27 GiB),切分后单块固定为 bands×TILE_SIZE×_ROW_CHUNK_PX。
     total_rows = tr.rows
+    cols_per_chunk = max(1, _ROW_CHUNK_PX // TILE_SIZE)
     with rasterio.open(out_path, "w", **profile) as dst:
         for ri, row in enumerate(range(tr.row_min, tr.row_max + 1), start=1):
-            row_buf = np.zeros((bands, TILE_SIZE, width), dtype=np.uint8)
-            any_tile = False
-            for col in range(tr.col_min, tr.col_max + 1):
-                tile = _read_tile(tile_path_fn(col, row, tr.z), bands)
-                if tile is None:
-                    continue
-                # 叠加注记:仅对 RGB 波段合成(前 3 波段)
-                if anno_tile_path_fn is not None and bands >= 3:
-                    rgb = composite_annotation(tile[:3], anno_tile_path_fn(col, row, tr.z))
-                    tile = tile.copy()
-                    tile[:3] = rgb
-                x = (col - tr.col_min) * TILE_SIZE
-                row_buf[:, :, x:x + TILE_SIZE] = tile
-                any_tile = True
-            # 整行皆缺失也要写(保持黑色填充,与原全图 canvas 语义一致)
-            _ = any_tile
             y = (row - tr.row_min) * TILE_SIZE
-            dst.write(row_buf, window=Window(0, y, width, TILE_SIZE))
+            for col_start in range(tr.col_min, tr.col_max + 1, cols_per_chunk):
+                col_end = min(col_start + cols_per_chunk - 1, tr.col_max)
+                chunk_w = (col_end - col_start + 1) * TILE_SIZE
+                row_buf = np.zeros((bands, TILE_SIZE, chunk_w), dtype=np.uint8)
+                for col in range(col_start, col_end + 1):
+                    tile = _read_tile(tile_path_fn(col, row, tr.z), bands)
+                    if tile is None:
+                        continue
+                    # 叠加注记:仅对 RGB 波段合成(前 3 波段)
+                    if anno_tile_path_fn is not None and bands >= 3:
+                        rgb = composite_annotation(tile[:3], anno_tile_path_fn(col, row, tr.z))
+                        tile = tile.copy()
+                        tile[:3] = rgb
+                    x = (col - col_start) * TILE_SIZE
+                    row_buf[:, :, x:x + TILE_SIZE] = tile
+                # 整块皆缺失也要写(保持黑色填充,与原全图 canvas 语义一致)
+                x_off = (col_start - tr.col_min) * TILE_SIZE
+                dst.write(row_buf, window=Window(x_off, y, chunk_w, TILE_SIZE))
             if on_row:
                 on_row(ri, total_rows)
         # 内置概视图,便于 GIS 快速预览
