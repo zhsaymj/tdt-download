@@ -78,7 +78,8 @@ tools_src/3dtiles/build_log.txt
 .claude/
 .codebuddy/
 .codex/
-.comet/
+# .comet/ 不在这里整目录排除:上面 Comet 自己的块(/.comet/* + !/.comet/config.yaml)
+# 要放行 config.yaml —— 整目录忽略会让那条例外失效,worktree 里就缺配置了。
 .dsh/
 .grok/
 .trae/
